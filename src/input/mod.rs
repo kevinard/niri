@@ -475,7 +475,13 @@ impl State {
                 .downcast_ref::<remote_keyboard::RemoteKeyboardDevice>()
                 .is_none()
         {
-            crate::dbus::global_shortcuts::physical_source(self, &device).unwrap_or(source)
+            match crate::dbus::global_shortcuts::physical_source(self, &device) {
+                Some(source) => source,
+                None => {
+                    crate::dbus::input_capture::close_keyboard_admission(self);
+                    source
+                }
+            }
         } else {
             source
         };
@@ -527,6 +533,22 @@ impl State {
             );
             if block != KbMonBlock::Pass {
                 *consumed_by_a11y = true;
+            }
+            if let Some(code) = event.key_code().raw().checked_sub(8) {
+                let local = (&device as &dyn Any)
+                    .downcast_ref::<remote_keyboard::RemoteKeyboardDevice>()
+                    .is_none();
+                if crate::dbus::input_capture::key(
+                    self,
+                    source,
+                    code,
+                    pressed,
+                    time.micros(),
+                    local,
+                    shortcut_captured || block != KbMonBlock::Pass,
+                ) {
+                    return;
+                }
             }
             // The accessibility modifier first press must not change XKB state, so we return
             // early here.
