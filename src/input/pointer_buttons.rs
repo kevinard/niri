@@ -399,7 +399,7 @@ mod tests {
         buttons.input(Device(1), 0xffff, true);
         assert!(buttons.next_source > old);
         assert_eq!(buttons.retire(&Device(1)).cancel_origin, vec![0xffff]);
-        assert_eq!(buttons.retire(&Device(2)).cancel_origin, vec![]);
+        assert_eq!(buttons.retire(&Device(2)).cancel_origin, Vec::<u32>::new());
     }
 
     #[test]
