@@ -511,6 +511,19 @@ impl PipeWire {
                             StreamState::Connecting => (),
                             StreamState::Streaming => {
                                 inner.is_active = true;
+                                // Consumers may discard buffers queued during a transient pause.
+                                // Replay static content and cursor metadata on every resume.
+                                if let CastState::Ready {
+                                    damage_tracker,
+                                    cursor_damage_tracker,
+                                    last_cursor_location,
+                                    ..
+                                } = &mut inner.state
+                                {
+                                    *damage_tracker = None;
+                                    *cursor_damage_tracker = None;
+                                    *last_cursor_location = None;
+                                }
                                 redraw();
                             }
                         }
