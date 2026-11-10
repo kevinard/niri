@@ -16,6 +16,7 @@ pub mod gnome_shell_introspect;
 pub mod gnome_shell_screenshot;
 pub mod mutter_display_config;
 pub mod mutter_service_channel;
+pub mod remote_input;
 
 #[cfg(feature = "xdp-gnome-screencast")]
 pub mod mutter_screen_cast;
@@ -34,6 +35,8 @@ trait Start: Interface {
 #[derive(Default)]
 pub struct DBusServers {
     pub conn_service_channel: Option<Connection>,
+    pub conn_remote_input: Option<Connection>,
+    pub remote_input_leases: remote_input::Leases,
     pub conn_display_config: Option<Connection>,
     pub conn_screen_saver: Option<Connection>,
     pub conn_screen_shot: Option<Connection>,
@@ -90,6 +93,18 @@ impl DBusServers {
                 })
                 .unwrap();
             dbus.conn_display_config = try_start(display_config, is_session_instance);
+
+            let (to_niri, from_remote_input) = calloop::channel::sync_channel(8);
+            let leases = dbus.remote_input_leases.clone();
+            niri.event_loop
+                .insert_source(from_remote_input, move |event, _, state| {
+                    if let calloop::channel::Event::Msg(msg) = event {
+                        remote_input::handle(state, msg, &leases);
+                    }
+                })
+                .unwrap();
+            dbus.conn_remote_input =
+                try_start(remote_input::RemoteInput::new(to_niri), is_session_instance);
 
             let screen_saver = ScreenSaver::new(niri.is_fdo_idle_inhibited.clone());
             dbus.conn_screen_saver = try_start(screen_saver, is_session_instance);
