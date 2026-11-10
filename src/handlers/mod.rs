@@ -649,6 +649,15 @@ impl ScreencopyHandler for State {
 
 impl VirtualPointerHandler for State {
     fn process_virtual_pointer_event(&mut self, event: InputEvent<VirtualPointerBackend>) {
+        // Destruction emits synthetic releases before DeviceRemoved. Retire the
+        // source before those events can reach normal release bindings.
+        if let InputEvent::PointerButton { event } = &event {
+            let device = smithay::backend::input::Event::<VirtualPointerBackend>::device(event);
+            if !device.is_alive() {
+                self.retire_pointer_device(&device);
+                return;
+            }
+        }
         self.process_input_event(event);
     }
 }
