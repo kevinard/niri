@@ -14,6 +14,7 @@ pub mod freedesktop_login1;
 pub mod freedesktop_screensaver;
 pub mod gnome_shell_introspect;
 pub mod gnome_shell_screenshot;
+pub mod input_capture;
 pub mod mutter_display_config;
 pub mod mutter_service_channel;
 pub mod remote_input;
@@ -37,6 +38,8 @@ pub struct DBusServers {
     pub conn_service_channel: Option<Connection>,
     pub conn_remote_input: Option<Connection>,
     pub remote_input_leases: remote_input::Leases,
+    pub conn_input_capture: Option<Connection>,
+    pub input_capture_leases: input_capture::Leases,
     pub conn_display_config: Option<Connection>,
     pub conn_screen_saver: Option<Connection>,
     pub conn_screen_shot: Option<Connection>,
@@ -105,6 +108,20 @@ impl DBusServers {
                 .unwrap();
             dbus.conn_remote_input =
                 try_start(remote_input::RemoteInput::new(to_niri), is_session_instance);
+
+            let (to_niri, from_capture) = calloop::channel::sync_channel(8);
+            let captures = dbus.input_capture_leases.clone();
+            niri.event_loop
+                .insert_source(from_capture, move |event, _, state| {
+                    if let calloop::channel::Event::Msg(message) = event {
+                        input_capture::open(state, message, &captures);
+                    }
+                })
+                .unwrap();
+            dbus.conn_input_capture = try_start(
+                input_capture::InputCapture::new(to_niri),
+                is_session_instance,
+            );
 
             let screen_saver = ScreenSaver::new(niri.is_fdo_idle_inhibited.clone());
             dbus.conn_screen_saver = try_start(screen_saver, is_session_instance);

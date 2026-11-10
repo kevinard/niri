@@ -192,7 +192,11 @@ impl State {
         use InputEvent::*;
         match event {
             DeviceAdded { device } => self.on_device_added(device),
-            DeviceRemoved { device } => self.on_device_removed(device),
+            DeviceRemoved { device } => {
+                #[cfg(feature = "dbus")]
+                crate::dbus::input_capture::disable(self);
+                self.on_device_removed(device);
+            }
             Keyboard { event } => self.on_keyboard::<I>(event, &mut consumed_by_a11y),
             PointerMotion { event } => self.on_pointer_motion::<I>(event),
             PointerMotionAbsolute { event } => self.on_pointer_motion_absolute::<I>(event),
@@ -532,6 +536,20 @@ impl State {
             |this, mods, keysym| {
                 let key_code = keysym.raw_code();
                 let modifiers = modifiers_from_state(*mods);
+
+                #[cfg(feature = "dbus")]
+                if pressed
+                    && mods.ctrl
+                    && mods.alt
+                    && u32::from(key_code) == 9
+                    && (&device as &dyn Any)
+                        .downcast_ref::<remote_keyboard::RemoteKeyboardDevice>()
+                        .is_none()
+                    && crate::dbus::input_capture::disable(this)
+                {
+                    this.niri.suppressed_keys.insert(key_code);
+                    return ShouldInterceptResult::InterceptOnly;
+                }
 
                 // When resolving a bind, we can try three keysyms:
                 // - modified: the actual final keysym we got by pressing this key
@@ -2685,7 +2703,10 @@ impl State {
         }
     }
 
-    fn on_pointer_motion<I: InputBackend>(&mut self, event: I::PointerMotionEvent) {
+    fn on_pointer_motion<I: InputBackend>(&mut self, event: I::PointerMotionEvent)
+    where
+        I::Device: 'static,
+    {
         let was_inside_hot_corner = self.niri.pointer_inside_hot_corner;
         // Any of the early returns here mean that the pointer is not inside the hot corner.
         self.niri.pointer_inside_hot_corner = false;
@@ -2744,9 +2765,12 @@ impl State {
 
             // If the pointer is locked, only send relative motion.
             if pointer_locked {
+                let under = under.clone();
+                #[cfg(feature = "dbus")]
+                crate::dbus::input_capture::disable(self);
                 pointer.relative_motion(
                     self,
-                    Some(under.clone()),
+                    Some(under),
                     &RelativeMotionEvent {
                         delta: event.delta(),
                         delta_unaccel: event.delta_unaccel(),
@@ -2760,6 +2784,22 @@ impl State {
                 // much here I think.
                 return;
             }
+        }
+
+        #[cfg(feature = "dbus")]
+        if (&event.device() as &dyn Any)
+            .downcast_ref::<remote_pointer::RemotePointerDevice>()
+            .is_none()
+            && crate::dbus::input_capture::motion(
+                self,
+                (pos.x, pos.y),
+                (event.delta().x, event.delta().y),
+                false,
+                event.time().micros(),
+                pointer_confined.is_none() && !pointer.is_grabbed(),
+            )
+        {
+            return;
         }
 
         // Warp pointer across the screen during the spatial movement grabs.
@@ -2933,10 +2973,10 @@ impl State {
         self.niri.queue_redraw_all();
     }
 
-    fn on_pointer_motion_absolute<I: InputBackend>(
-        &mut self,
-        event: I::PointerMotionAbsoluteEvent,
-    ) {
+    fn on_pointer_motion_absolute<I: InputBackend>(&mut self, event: I::PointerMotionAbsoluteEvent)
+    where
+        I::Device: 'static,
+    {
         let was_inside_hot_corner = self.niri.pointer_inside_hot_corner;
         // Any of the early returns here mean that the pointer is not inside the hot corner.
         self.niri.pointer_inside_hot_corner = false;
@@ -2957,6 +2997,24 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
 
         let pointer = self.niri.seat.get_pointer().unwrap();
+
+        #[cfg(feature = "dbus")]
+        if (&event.device() as &dyn Any)
+            .downcast_ref::<remote_pointer::RemotePointerDevice>()
+            .is_none()
+        {
+            let old = pointer.current_location();
+            if crate::dbus::input_capture::motion(
+                self,
+                (old.x, old.y),
+                (pos.x, pos.y),
+                true,
+                event.time().micros(),
+                !pointer.is_grabbed(),
+            ) {
+                return;
+            }
+        }
 
         if let Some(output) = self.niri.screenshot_ui.selection_output() {
             let geom = self.niri.global_space.output_geometry(output).unwrap();
@@ -3071,6 +3129,17 @@ impl State {
         let before = pointer.with_grab(|serial, _| u32::from(serial));
         let suppressed = !pressed && self.niri.suppressed_buttons.contains(&button);
         let time = event.time();
+        #[cfg(feature = "dbus")]
+        if (&event.device() as &dyn Any)
+            .downcast_ref::<remote_pointer::RemotePointerDevice>()
+            .is_none()
+            && crate::dbus::input_capture::button(self, button, pressed, time.micros())
+            && pressed
+        {
+            self.niri.suppressed_buttons.insert(button);
+            pointer.press_suppressed_button(button);
+            return;
+        }
         self.on_pointer_button_combined::<I>(event);
         if pressed {
             let after = pointer.with_grab(|serial, _| u32::from(serial));
@@ -3537,7 +3606,34 @@ impl State {
         pointer.frame(self);
     }
 
-    fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
+    fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent)
+    where
+        I::Device: 'static,
+    {
+        #[cfg(feature = "dbus")]
+        if (&event.device() as &dyn Any)
+            .downcast_ref::<remote_pointer::RemotePointerDevice>()
+            .is_none()
+        {
+            let source = match event.source() {
+                AxisSource::Wheel => 1,
+                AxisSource::Finger => 2,
+                AxisSource::Continuous => 3,
+                AxisSource::WheelTilt => 4,
+            };
+            if crate::dbus::input_capture::axis(
+                self,
+                event.time().micros(),
+                source,
+                (event.amount(Axis::Horizontal), event.amount(Axis::Vertical)),
+                (
+                    event.amount_v120(Axis::Horizontal),
+                    event.amount_v120(Axis::Vertical),
+                ),
+            ) {
+                return;
+            }
+        }
         self.niri.cancel_interrupted_release_binds();
 
         let pointer = &self.niri.seat.get_pointer().unwrap();
