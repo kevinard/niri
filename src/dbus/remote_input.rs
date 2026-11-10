@@ -521,6 +521,7 @@ impl Lease {
         let _ = self.writer.shutdown(Shutdown::Both);
         let keyboard = state.niri.seat.get_keyboard().unwrap();
         keyboard.release_source(state, self.device.source);
+        crate::dbus::global_shortcuts::source_closed(state, self.device.source);
         let still_held = keyboard.pressed_keys();
         for key in self.held.keys() {
             let key = Keycode::from(*key + 8);
