@@ -64,6 +64,8 @@ pub mod move_grab;
 pub mod pick_color_grab;
 pub mod pick_window_grab;
 pub mod pointer_buttons;
+#[cfg(feature = "dbus")]
+pub mod remote_keyboard;
 pub mod resize_grab;
 pub mod scroll_swipe_gesture;
 pub mod scroll_tracker;
@@ -454,6 +456,10 @@ impl State {
         // Note that keyboard shortcuts can still be pressed across multiple
         // keyboards even with this, as intended.
         let source = virtual_keyboard.map_or(KeyboardSource::MAIN, |device| device.source());
+        #[cfg(feature = "dbus")]
+        let source = (&device as &dyn Any)
+            .downcast_ref::<remote_keyboard::RemoteKeyboardDevice>()
+            .map_or(source, |device| device.source);
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
