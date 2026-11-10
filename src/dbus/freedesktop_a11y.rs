@@ -2,7 +2,7 @@
 // - https://invent.kde.org/plasma/kwin/-/blob/397fbbe52a8f2d855ad0c9817b51a9bdf06a68e2/src/a11ykeyboardmonitor.cpp#L41
 // - https://gitlab.gnome.org/GNOME/mutter/-/blob/cbb7295ac1f93a2dfd55a7c0544688e7e5c4d2e2/src/backends/meta-a11y-manager.c
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -34,8 +34,12 @@ pub enum NiriToA11yManager {
     PointerContents(Option<(PointerAppData, f64, f64)>),
 }
 
+type ShortcutReservations = (bool, BTreeSet<u32>, BTreeSet<(u32, u32)>);
+
 #[derive(Debug, Default)]
 struct KeyboardData {
+    shortcut_revision: u64,
+    shortcut_reservations: ShortcutReservations,
     clients: HashMap<OwnedUniqueName, KeyboardClient>,
 
     grabbed_mods: HashSet<Keysym>,
@@ -124,6 +128,7 @@ impl KeyboardMonitor {
         let mut data = self.data.lock().unwrap();
         let client = data.clients.entry(sender).or_default();
         client.grabbed = true;
+        data.rebuild_grabbed_mods();
 
         Ok(())
     }
@@ -144,6 +149,7 @@ impl KeyboardMonitor {
         if let Some(client) = data.clients.get_mut(&sender) {
             trace!("disabling keyboard grab for {sender}");
             client.grabbed = false;
+            data.rebuild_grabbed_mods();
         }
 
         Ok(())
@@ -250,6 +256,24 @@ impl KeyboardMonitor {
 }
 
 impl KeyboardMonitor {
+    pub(crate) fn shortcut_revision(&self) -> u64 {
+        self.data.lock().unwrap().shortcut_revision
+    }
+    pub(crate) fn shortcut_reserved(
+        &self,
+        keysym: Keysym,
+        mask: u32,
+        mods: niri_config::Modifiers,
+    ) -> bool {
+        let data = self.data.lock().unwrap();
+        let (all, modifiers, keystrokes) = &data.shortcut_reservations;
+        *all || keystrokes.contains(&(keysym.raw(), mask))
+            || modifiers.iter().any(|&key| {
+                key == keysym.raw()
+                    || niri_config::ModKey::from_keysym(Keysym::new(key))
+                        .is_some_and(|m| mods.intersects(m.to_modifiers()))
+            })
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn process_key(
         &self,
@@ -354,6 +378,27 @@ impl KeyboardMonitor {
 
 impl KeyboardData {
     fn rebuild_grabbed_mods(&mut self) {
+        let mut reservations = ShortcutReservations::default();
+        for client in self.clients.values() {
+            reservations.0 |= client.grabbed;
+            reservations
+                .1
+                .extend(client.modifiers.iter().map(|key| key.raw()));
+            reservations.2.extend(
+                client
+                    .keystrokes
+                    .iter()
+                    .map(|(key, mask)| (key.raw(), *mask)),
+            );
+        }
+        if reservations.0 {
+            reservations.1.clear();
+            reservations.2.clear();
+        }
+        if self.shortcut_reservations != reservations {
+            self.shortcut_revision = self.shortcut_revision.saturating_add(1);
+            self.shortcut_reservations = reservations;
+        }
         self.grabbed_mods.clear();
         for client in self.clients.values() {
             self.grabbed_mods.extend(&client.modifiers);

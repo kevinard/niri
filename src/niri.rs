@@ -829,6 +829,9 @@ impl State {
         #[cfg(feature = "dbus")]
         crate::dbus::input_capture::refresh(self);
 
+        #[cfg(feature = "dbus")]
+        crate::dbus::global_shortcuts::refresh(self);
+
         // Advance animations to the current time (not target render time) before rendering outputs
         // in order to clear completed animations and render elements. Even if we're not rendering,
         // it's good to advance every now and then so the workspace clean-up and animations don't

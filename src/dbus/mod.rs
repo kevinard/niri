@@ -12,6 +12,7 @@ pub mod freedesktop_a11y;
 pub mod freedesktop_locale1;
 pub mod freedesktop_login1;
 pub mod freedesktop_screensaver;
+pub mod global_shortcuts;
 pub mod gnome_shell_introspect;
 pub mod gnome_shell_screenshot;
 pub mod input_capture;
@@ -38,6 +39,8 @@ pub struct DBusServers {
     pub conn_service_channel: Option<Connection>,
     pub conn_remote_input: Option<Connection>,
     pub remote_input_leases: remote_input::Leases,
+    pub conn_global_shortcuts: Option<Connection>,
+    pub global_shortcut_leases: global_shortcuts::Leases,
     pub conn_input_capture: Option<Connection>,
     pub input_capture_leases: input_capture::Leases,
     pub conn_display_config: Option<Connection>,
@@ -120,6 +123,20 @@ impl DBusServers {
                 .unwrap();
             dbus.conn_input_capture = try_start(
                 input_capture::InputCapture::new(to_niri),
+                is_session_instance,
+            );
+
+            let (to_niri, from_shortcuts) = calloop::channel::sync_channel(16);
+            let shortcuts = dbus.global_shortcut_leases.clone();
+            niri.event_loop
+                .insert_source(from_shortcuts, move |event, _, state| {
+                    if let calloop::channel::Event::Msg(message) = event {
+                        global_shortcuts::open(state, message, &shortcuts);
+                    }
+                })
+                .unwrap();
+            dbus.conn_global_shortcuts = try_start(
+                global_shortcuts::GlobalShortcuts::new(to_niri),
                 is_session_instance,
             );
 
