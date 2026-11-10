@@ -303,6 +303,8 @@ impl State {
 
     fn on_device_removed(&mut self, device: impl Device + 'static) {
         self.retire_pointer_device(&device);
+        #[cfg(feature = "dbus")]
+        crate::dbus::global_shortcuts::remove_device(self, &device);
         if device.has_capability(DeviceCapability::TabletTool) {
             let tablet_seat = self.niri.seat.tablet_seat();
 
@@ -427,7 +429,7 @@ impl State {
         Some(pos + target_geo.loc)
     }
 
-    fn is_inhibiting_shortcuts(&self) -> bool {
+    pub(crate) fn is_inhibiting_shortcuts(&self) -> bool {
         self.niri
             .keyboard_focus
             .surface()
@@ -467,11 +469,30 @@ impl State {
             .downcast_ref::<remote_keyboard::RemoteKeyboardDevice>()
             .map_or(source, |device| device.source);
 
+        #[cfg(feature = "dbus")]
+        let source = if virtual_keyboard.is_none()
+            && (&device as &dyn Any)
+                .downcast_ref::<remote_keyboard::RemoteKeyboardDevice>()
+                .is_none()
+        {
+            crate::dbus::global_shortcuts::physical_source(self, &device).unwrap_or(source)
+        } else {
+            source
+        };
+
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time(&event);
         let pressed = event.state() == KeyState::Pressed;
+        #[cfg(feature = "dbus")]
+        let shortcut_captured = crate::dbus::global_shortcuts::raw_edge(
+            self,
+            source,
+            event.key_code().raw(),
+            pressed,
+            time.micros(),
+        );
 
         // Stop bind key repeat on any release. This won't work 100% correctly in cases like:
         // 1. Press Mod
@@ -509,7 +530,7 @@ impl State {
             }
             // The accessibility modifier first press must not change XKB state, so we return
             // early here.
-            if block == KbMonBlock::ModifierFirstPress {
+            if block == KbMonBlock::ModifierFirstPress && !shortcut_captured {
                 // A pending release action recorded for the key must still run.
                 if !pressed {
                     if let Some(bind) = self.niri.pending_release_binds.remove(&event.key_code()) {
@@ -528,7 +549,7 @@ impl State {
         // events for modifier keys. This lets us do things like bind Control_L to an
         // action without confusing applications about its state.
         let keyboard = self.niri.seat.get_keyboard().unwrap();
-        let Some((result, mods_changed)) = keyboard.input_intercept(
+        let intercepted = keyboard.input_intercept(
             source,
             self,
             event.key_code(),
@@ -548,6 +569,11 @@ impl State {
                     && crate::dbus::input_capture::disable(this)
                 {
                     this.niri.suppressed_keys.insert(key_code);
+                    return ShouldInterceptResult::InterceptOnly;
+                }
+
+                #[cfg(feature = "dbus")]
+                if shortcut_captured {
                     return ShouldInterceptResult::InterceptOnly;
                 }
 
@@ -750,6 +776,36 @@ impl State {
                         }
                     }
 
+                    #[cfg(feature = "dbus")]
+                    if pressed
+                        && !is_inhibiting_shortcuts
+                        && !is_locked
+                        && !is_in_screenshot
+                        && !this.niri.pending_release_binds.contains_key(&key_code)
+                    {
+                        let (layout, effective) = {
+                            let xkb = keysym.xkb().lock().unwrap();
+                            // SAFETY: state does not escape its guard.
+                            let state = unsafe { xkb.state() };
+                            (
+                                state.key_get_layout(key_code),
+                                state.serialize_mods(
+                                    smithay::input::keyboard::xkb::STATE_MODS_EFFECTIVE,
+                                ),
+                            )
+                        };
+                        if crate::dbus::global_shortcuts::accepted_press(
+                            this,
+                            source,
+                            key_code.raw(),
+                            layout,
+                            effective,
+                            time.micros(),
+                        ) {
+                            return ShouldInterceptResult::InterceptOnly;
+                        }
+                    }
+
                     // Interaction with the active window, immediately update the active window's
                     // focus timestamp without waiting for a possible pending MRU lock-in delay.
                     this.niri.mru_apply_keyboard_commit();
@@ -757,7 +813,10 @@ impl State {
 
                 res
             },
-        ) else {
+        );
+        #[cfg(feature = "dbus")]
+        crate::dbus::global_shortcuts::seat_key(self, event.key_code().raw(), time.micros());
+        let Some((result, mods_changed)) = intercepted else {
             return;
         };
 
@@ -936,6 +995,9 @@ impl State {
         } else {
             self.niri.clear_keyboard_and_tablet_input_state();
         }
+
+        #[cfg(feature = "dbus")]
+        crate::dbus::global_shortcuts::reset(self);
 
         for bind in binds {
             self.handle_bind(bind, false);
@@ -5150,6 +5212,35 @@ fn should_intercept_key<'a>(
         }
         None => ShouldInterceptResult::Forward,
     }
+}
+
+#[cfg(feature = "dbus")]
+pub(crate) fn portal_shortcut_reserved(
+    config: &Config,
+    mod_key: ModKey,
+    sym: Keysym,
+    raw: &[Keysym],
+    mods: Modifiers,
+) -> bool {
+    if mods.contains(Modifiers::CTRL | Modifiers::ALT) && sym == Keysym::Escape {
+        return true;
+    }
+    let binds = config.binds.0.iter().chain(
+        config
+            .recent_windows
+            .binds
+            .iter()
+            .filter(|_| config.recent_windows.on),
+    );
+    find_bind(
+        binds,
+        mod_key,
+        (sym != Keysym::NoSymbol).then_some(sym),
+        raw,
+        mods,
+        config.input.disable_power_key_handling,
+    )
+    .is_some()
 }
 
 fn find_bind<'a, I: Iterator<Item = &'a Bind> + Clone>(
