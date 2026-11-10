@@ -149,8 +149,11 @@ impl Winit {
                 }
                 WinitEvent::Input(event) => state.process_input_event(event),
                 WinitEvent::Focus(false) => {
+                    // Only the host device lost focus. Virtual pointers remain
+                    // connected and may still own buttons or release actions.
+                    state.retire_pointer_device(&winit::WinitVirtualDevice);
                     // Lost focus. Reset key pressed (like alt or windows key)
-                    state.release_held_inputs();
+                    state.release_held_keyboard_and_tablet_inputs();
 
                     if let Some(keyboard) = state.niri.seat.get_keyboard() {
                         keyboard.release_source(state, KeyboardSource::MAIN);

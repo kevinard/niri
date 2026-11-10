@@ -359,6 +359,9 @@ pub struct Niri {
     pub suppressed_keys: HashSet<Keycode>,
     /// Button codes of the mouse buttons to suppress.
     pub suppressed_buttons: HashSet<u32>,
+    /// Tablet suppression is separate from the pointer button namespace.
+    pub suppressed_tablet_buttons: HashSet<u32>,
+    pub(crate) pointer_buttons: crate::input::pointer_buttons::Buttons,
     /// Binds whose release action is pending, keyed by the key code.
     pub pending_release_binds: HashMap<Keycode, Bind>,
     /// Same as `pending_release_binds`, but for mouse buttons, keyed by the button code.
@@ -2843,6 +2846,8 @@ impl Niri {
             popup_grab: None,
             suppressed_keys: HashSet::new(),
             suppressed_buttons: HashSet::new(),
+            suppressed_tablet_buttons: HashSet::new(),
+            pointer_buttons: Default::default(),
             pending_release_binds: HashMap::new(),
             pending_mouse_release_binds: HashMap::new(),
             pending_tablet_release_binds: HashMap::new(),
@@ -6600,10 +6605,15 @@ impl Niri {
     }
 
     pub fn clear_input_state(&mut self) {
-        self.suppressed_keys.clear();
+        self.clear_keyboard_and_tablet_input_state();
         self.suppressed_buttons.clear();
-        self.pending_release_binds.clear();
         self.pending_mouse_release_binds.clear();
+    }
+
+    pub fn clear_keyboard_and_tablet_input_state(&mut self) {
+        self.suppressed_keys.clear();
+        self.suppressed_tablet_buttons.clear();
+        self.pending_release_binds.clear();
         self.pending_tablet_release_binds.clear();
 
         // Stop ongoing key repeat if any.

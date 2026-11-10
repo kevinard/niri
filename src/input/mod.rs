@@ -63,6 +63,7 @@ pub mod click_grab;
 pub mod move_grab;
 pub mod pick_color_grab;
 pub mod pick_window_grab;
+pub mod pointer_buttons;
 pub mod resize_grab;
 pub mod scroll_swipe_gesture;
 pub mod scroll_tracker;
@@ -292,7 +293,8 @@ impl State {
         }
     }
 
-    fn on_device_removed(&mut self, device: impl Device) {
+    fn on_device_removed(&mut self, device: impl Device + 'static) {
+        self.retire_pointer_device(&device);
         if device.has_capability(DeviceCapability::TabletTool) {
             let tablet_seat = self.niri.seat.tablet_seat();
 
@@ -868,6 +870,16 @@ impl State {
 
     /// Forgets all held inputs, running the release actions of anything that was still held.
     pub fn release_held_inputs(&mut self) {
+        self.release_held_inputs_inner(true);
+    }
+
+    /// The host lost keyboard focus, but virtual pointers did not disconnect.
+    /// Their buttons, suppression and pending release actions must stay owned.
+    pub fn release_held_keyboard_and_tablet_inputs(&mut self) {
+        self.release_held_inputs_inner(false);
+    }
+
+    fn release_held_inputs_inner(&mut self, include_pointer: bool) {
         let mut binds = Vec::new();
         binds.extend(
             self.niri
@@ -875,12 +887,14 @@ impl State {
                 .drain()
                 .map(|(_, bind)| bind),
         );
-        binds.extend(
-            self.niri
-                .pending_mouse_release_binds
-                .drain()
-                .map(|(_, bind)| bind),
-        );
+        if include_pointer {
+            binds.extend(
+                self.niri
+                    .pending_mouse_release_binds
+                    .drain()
+                    .map(|(_, bind)| bind),
+            );
+        }
         binds.extend(
             self.niri
                 .pending_tablet_release_binds
@@ -889,7 +903,13 @@ impl State {
         );
 
         // Forget the rest of the input state: the releases will never arrive.
-        self.niri.clear_input_state();
+        if include_pointer {
+            let retired = self.niri.pointer_buttons.reset();
+            self.finish_retired_pointer_buttons(retired);
+            self.niri.clear_input_state();
+        } else {
+            self.niri.clear_keyboard_and_tablet_input_state();
+        }
 
         for bind in binds {
             self.handle_bind(bind, false);
@@ -3020,7 +3040,142 @@ impl State {
         find_configured_bind(bindings, mod_key, trigger, mods)
     }
 
-    fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
+    fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent)
+    where
+        I::Device: 'static,
+    {
+        use pointer_buttons::Dispatch;
+        let button = event.button_code();
+        let pressed = event.state() == ButtonState::Pressed;
+        let dispatch = self
+            .niri
+            .pointer_buttons
+            .input(event.device(), button, pressed);
+        if dispatch == Dispatch::Ignore {
+            return;
+        }
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        let before = pointer.with_grab(|serial, _| u32::from(serial));
+        let suppressed = !pressed && self.niri.suppressed_buttons.contains(&button);
+        let time = event.time();
+        self.on_pointer_button_combined::<I>(event);
+        if pressed {
+            let after = pointer.with_grab(|serial, _| u32::from(serial));
+            if let Some(serial) = after.filter(|after| Some(*after) != before) {
+                self.niri.pointer_buttons.grabbed(button, serial);
+                if !self.niri.pointer_buttons.is_routed(button) {
+                    // A workspace gesture can consume its initiating press
+                    // before reaching the seat. Keep that button held so an
+                    // unrelated release cannot end the new grab prematurely.
+                    pointer.press_suppressed_button(button);
+                }
+            }
+        } else if suppressed {
+            if let Dispatch::Release(ended) = dispatch {
+                self.finish_pointer_cycle(ended, time, true);
+            }
+        }
+    }
+
+    /// Retire only this device's ownership. The final releases bypass the normal
+    /// binding/screenshot path; another source's held buttons remain active.
+    pub(crate) fn retire_pointer_device<D: Eq + std::hash::Hash + 'static>(&mut self, device: &D) {
+        let retired = self.niri.pointer_buttons.retire(device);
+        self.finish_retired_pointer_buttons(retired);
+    }
+
+    fn finish_retired_pointer_buttons(&mut self, retired: pointer_buttons::Retired) {
+        if retired.cancel_origin.is_empty() && retired.ended.is_empty() {
+            return;
+        }
+        for button in retired.cancel_origin {
+            self.niri.pending_mouse_release_binds.remove(&button);
+        }
+        let time = smithay::backend::input::InputTime::now();
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        let cancel_grab = pointer
+            .with_grab(|serial, grab| {
+                retired
+                    .ended
+                    .iter()
+                    .any(|ended| ended.grab == Some(u32::from(serial)))
+                    && !grab
+                        .as_any()
+                        .is::<smithay::input::pointer::ClickGrab<State>>()
+                    && !grab.as_any().is::<click_grab::ClickGrab<State>>()
+            })
+            .unwrap_or(false);
+        if cancel_grab {
+            // Cancel before clearing any of this batch. Several buttons may
+            // have reached the grab while no client had pointer focus. Sending
+            // their releases after ungrabbing would give the client unpaired
+            // releases, or turn loss of the last held button into a drop.
+            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+        }
+        for ended in retired.ended {
+            // An ended combined cycle has no remaining source that can complete
+            // its pending release action. Cleanup never executes that action.
+            self.niri.pending_mouse_release_binds.remove(&ended.button);
+            let suppressed = self.niri.suppressed_buttons.remove(&ended.button);
+            if ended.button == 0x110 {
+                // End a pointer selection without confirming a screenshot.
+                let _ = self.niri.screenshot_ui.pointer_up(None);
+            }
+            self.finish_pointer_cycle(ended, time, suppressed || cancel_grab);
+        }
+        self.niri.queue_redraw_all();
+    }
+
+    fn finish_pointer_cycle(
+        &mut self,
+        ended: pointer_buttons::Ended,
+        time: smithay::backend::input::InputTime,
+        suppressed: bool,
+    ) {
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        let owned_grab = pointer
+            .with_grab(|serial, grab| {
+                ended.grab == Some(u32::from(serial))
+                    && !grab
+                        .as_any()
+                        .is::<smithay::input::pointer::ClickGrab<State>>()
+                    && !grab.as_any().is::<click_grab::ClickGrab<State>>()
+            })
+            .unwrap_or(false);
+        if owned_grab {
+            // This also cancels DnD instead of turning source loss into a drop.
+            // It handles compositor grabs whose initiating press was consumed
+            // before PointerHandle::button, such as a workspace gesture.
+            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+        }
+        if owned_grab || suppressed {
+            let empty = pointer.release_suppressed_button(ended.button);
+            if empty
+                && pointer
+                    .with_grab(|_, grab| {
+                        grab.as_any()
+                            .is::<smithay::input::pointer::ClickGrab<State>>()
+                            || grab.as_any().is::<click_grab::ClickGrab<State>>()
+                    })
+                    .unwrap_or(false)
+            {
+                pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+            }
+        } else if ended.routed {
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button: ended.button,
+                    state: ButtonState::Released,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                },
+            );
+        }
+        pointer.frame(self);
+    }
+
+    fn on_pointer_button_combined<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
         let pointer = self.niri.seat.get_pointer().unwrap();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -3354,6 +3509,9 @@ impl State {
             }
         }
 
+        if button_state == ButtonState::Pressed {
+            self.niri.pointer_buttons.routed(button_code);
+        }
         pointer.button(
             self,
             &ButtonEvent {
@@ -4116,13 +4274,13 @@ impl State {
             // Handle release binds.
             if button_state == ButtonState::Released {
                 if let Some(bind) = self.niri.pending_tablet_release_binds.remove(&button) {
-                    self.niri.suppressed_buttons.remove(&button);
+                    self.niri.suppressed_tablet_buttons.remove(&button);
                     self.handle_bind(bind, false);
                     return;
                 }
             }
 
-            if self.niri.suppressed_buttons.remove(&button) {
+            if self.niri.suppressed_tablet_buttons.remove(&button) {
                 return;
             }
 
@@ -4138,7 +4296,7 @@ impl State {
 
                     if self.niri.mods_with_tablet_stylus_binds.contains(&modifiers) {
                         if let Some(bind) = self.find_pointer_bind(mod_key, trigger, mods) {
-                            self.niri.suppressed_buttons.insert(button);
+                            self.niri.suppressed_tablet_buttons.insert(button);
                             if should_record_release_bind(
                                 &bind,
                                 self.niri.is_locked(),
