@@ -18,6 +18,12 @@ where
 }
 
 pub trait NiriInputDevice: input::Device {
+    /// Only compositor-resolved capture mappings may bypass hardware transforms
+    /// and the desktop bounding-rectangle fallback.
+    fn absolute_position_is_global(&self) -> bool {
+        false
+    }
+
     // FIXME: this should maybe be per-event, not per-device,
     // but it's not clear that this matters in practice?
     // it might be more obvious once we implement it for libinput

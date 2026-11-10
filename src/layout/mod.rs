@@ -2387,6 +2387,39 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     /// Returns the window under the cursor and the hit type.
+    /// Root surface origin in the current rendered output. Zoomed overview input
+    /// cannot represent a surface's logical coordinates, so it has no mapping.
+    pub fn window_surface_origin(&self, window: &W::Id) -> Option<(&Output, Point<f64, Logical>)> {
+        if self.overview_progress.is_some() || self.overview_open {
+            return None;
+        }
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if move_.tile.window().id() == window {
+                let tile = &move_.tile;
+                return Some((
+                    &move_.output,
+                    move_.tile_render_location(1.) + tile.buf_loc() + tile.bob_offset(),
+                ));
+            }
+        }
+        let MonitorSet::Normal { monitors, .. } = &self.monitor_set else {
+            return None;
+        };
+        for mon in monitors {
+            for (ws, geo) in mon.workspaces_with_render_geo_cull(true) {
+                for (tile, pos, visible) in ws.tiles_with_render_positions() {
+                    if visible && tile.window().id() == window {
+                        return Some((
+                            &mon.output,
+                            geo.loc + pos + tile.buf_loc() + tile.bob_offset(),
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn window_under(
         &self,
         output: &Output,

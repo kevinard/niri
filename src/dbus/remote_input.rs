@@ -23,6 +23,7 @@ use crate::input::remote_keyboard::{
 };
 use crate::niri::State;
 
+mod pointer;
 mod symbols;
 mod wire;
 use symbols::{Key, Planner};
@@ -37,6 +38,8 @@ enum InputReader {
     Evdev(Reader),
     Symbols(TypedReader),
 }
+
+pub type MappingDescriptors = Vec<(u64, String, (i32, i32), f64)>;
 
 const MAX_LEASES: usize = 8;
 const MAX_KEYMAP: usize = 1024 * 1024;
@@ -73,6 +76,18 @@ pub enum Message {
     },
     Snapshot {
         reply: async_channel::Sender<fdo::Result<Snapshot>>,
+    },
+    OpenMappedPointer {
+        stream: UnixStream,
+        permit: Permit,
+        session: String,
+        streams: Vec<String>,
+        reply: async_channel::Sender<fdo::Result<(u32, MappingDescriptors)>>,
+    },
+    OpenPointer {
+        stream: UnixStream,
+        permit: Permit,
+        reply: async_channel::Sender<fdo::Result<u32>>,
     },
 }
 
@@ -135,6 +150,73 @@ impl RemoteInput {
         1
     }
 
+    /// FD-owned pointer commands with explicit acknowledgements. The capability
+    /// mask excludes absolute motion, which needs an approved live cast mapping.
+    async fn open_pointer(&self) -> fdo::Result<(zvariant::OwnedFd, u32)> {
+        let permit = Permit::acquire(&self.admission)?;
+        let (client, stream) = UnixStream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let (reply, receive) = async_channel::bounded(1);
+        self.send(Message::OpenPointer {
+            stream,
+            permit,
+            reply,
+        })?;
+        let caps = receive
+            .recv()
+            .await
+            .map_err(|_| fdo::Error::Failed("compositor stopped".into()))??;
+        Ok((zvariant::OwnedFd::from(OwnedFd::from(client)), caps))
+    }
+
+    /// Bind absolute input to fixed, started streams of this capture session.
+    /// Region sizes and physical scales are immutable; changes retire the source.
+    async fn open_mapped_pointer(
+        &self,
+        session: zvariant::ObjectPath<'_>,
+        streams: Vec<zvariant::ObjectPath<'_>>,
+    ) -> fdo::Result<(zvariant::OwnedFd, u32, MappingDescriptors)> {
+        if streams.is_empty() || streams.len() > 16 {
+            return Err(fdo::Error::InvalidArgs(
+                "expected 1 to 16 capture streams".into(),
+            ));
+        }
+        let permit = Permit::acquire(&self.admission)?;
+        let (client, stream) = UnixStream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let (reply, receive) = async_channel::bounded(1);
+        self.send(Message::OpenMappedPointer {
+            stream,
+            permit,
+            session: session.to_string(),
+            streams: streams.into_iter().map(|s| s.to_string()).collect(),
+            reply,
+        })?;
+        let (caps, descriptors) = receive
+            .recv()
+            .await
+            .map_err(|_| fdo::Error::Failed("compositor stopped".into()))??;
+        Ok((
+            zvariant::OwnedFd::from(OwnedFd::from(client)),
+            caps,
+            descriptors,
+        ))
+    }
+
+    #[zbus(property)]
+    fn mapped_pointer_version(&self) -> u32 {
+        2
+    }
+
+    #[zbus(property)]
+    fn pointer_version(&self) -> u32 {
+        1
+    }
+
     /// Read authoritative state even while the portal has no focused Wayland surface.
     async fn keyboard_snapshot(&self) -> fdo::Result<Snapshot> {
         let (reply, receive) = async_channel::bounded(1);
@@ -173,7 +255,7 @@ fn snapshot(state: &mut State) -> fdo::Result<Snapshot> {
 }
 
 #[derive(Default, Clone)]
-pub struct Leases(Rc<RefCell<Vec<Weak<RefCell<Lease>>>>>);
+pub struct Leases(Rc<RefCell<Vec<Weak<RefCell<Lease>>>>>, pointer::Leases);
 
 /// Publish seat state after compositor work and before its clients are flushed.
 /// Slow readers are retired instead of accumulating an unbounded output queue.
@@ -186,6 +268,7 @@ pub fn refresh(state: &mut State) {
     else {
         return;
     };
+    pointer::refresh(state, &leases.1);
     let active: Vec<_> = {
         let mut entries = leases.0.borrow_mut();
         entries.retain(|entry| entry.strong_count() != 0);
@@ -219,6 +302,22 @@ pub fn refresh(state: &mut State) {
 
 pub fn handle(state: &mut State, msg: Message, leases: &Leases) {
     match msg {
+        Message::OpenMappedPointer {
+            stream,
+            permit,
+            session,
+            streams,
+            reply,
+        } => {
+            pointer::open_mapped(state, stream, permit, reply, &leases.1, &session, &streams);
+        }
+        Message::OpenPointer {
+            stream,
+            permit,
+            reply,
+        } => {
+            pointer::open(state, stream, permit, reply, &leases.1);
+        }
         Message::Snapshot { reply } => {
             let _ = reply.try_send(snapshot(state));
         }
