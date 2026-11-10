@@ -14,10 +14,10 @@ use niri_ipc::LayoutSwitchTarget;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
-    InputEvent, KeyState, KeyboardKeyEvent, Keycode, MouseButton, PointerAxisEvent,
+    InputEvent, InputTime, KeyState, KeyboardKeyEvent, Keycode, MouseButton, PointerAxisEvent,
     PointerButtonEvent, PointerMotionEvent, ProximityState, Switch, SwitchState, SwitchToggleEvent,
     TabletToolButtonEvent, TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent,
-    TabletToolTipState, TouchEvent,
+    TabletToolTipState, TouchEvent, TouchSlot,
 };
 use smithay::backend::libinput::LibinputInputBackend;
 use smithay::input::dnd::DnDGrab;
@@ -68,6 +68,8 @@ pub mod pointer_buttons;
 pub mod remote_keyboard;
 #[cfg(feature = "dbus")]
 pub mod remote_pointer;
+#[cfg(feature = "dbus")]
+pub mod remote_touch;
 pub mod resize_grab;
 pub mod scroll_swipe_gesture;
 pub mod scroll_tracker;
@@ -289,7 +291,9 @@ impl State {
         }
     }
 
-    fn on_device_added(&mut self, device: impl Device) {
+    fn on_device_added(&mut self, device: impl Device + 'static) {
+        #[cfg(feature = "dbus")]
+        crate::dbus::remote_input::touch::add_device(self, &device);
         if device.has_capability(DeviceCapability::TabletTool) {
             let tablet_seat = self.niri.seat.tablet_seat();
 
@@ -304,6 +308,8 @@ impl State {
     fn on_device_removed(&mut self, device: impl Device + 'static) {
         self.retire_pointer_device(&device);
         #[cfg(feature = "dbus")]
+        crate::dbus::remote_input::touch::remove_device(self, &device);
+        #[cfg(feature = "dbus")]
         crate::dbus::global_shortcuts::remove_device(self, &device);
         if device.has_capability(DeviceCapability::TabletTool) {
             let tablet_seat = self.niri.seat.tablet_seat();
@@ -317,6 +323,10 @@ impl State {
             }
         }
         if device.has_capability(DeviceCapability::Touch) && self.niri.touch.is_empty() {
+            #[cfg(feature = "dbus")]
+            if crate::dbus::remote_input::touch::has_devices(self) {
+                return;
+            }
             self.niri.seat.remove_touch();
         }
     }
@@ -4865,18 +4875,35 @@ impl State {
         &self,
         evt: &impl AbsolutePositionEvent<I>,
     ) -> Option<Point<f64, Logical>> {
+        if evt.device().absolute_position_is_global() {
+            return Some(Point::from((evt.x(), evt.y())));
+        }
         self.compute_absolute_location(evt, self.niri.output_for_touch())
     }
 
-    fn on_touch_down<I: InputBackend>(&mut self, evt: I::TouchDownEvent) {
-        let Some(handle) = self.niri.seat.get_touch() else {
-            return;
-        };
+    fn on_touch_down<I: InputBackend>(&mut self, evt: I::TouchDownEvent)
+    where
+        I::Device: 'static,
+    {
+        #[cfg(feature = "dbus")]
+        if !remote_touch::is_device(&evt.device()) {
+            crate::dbus::remote_input::touch::physical_down(self, &evt.device(), evt.slot());
+        }
         let Some(pos) = self.compute_touch_location(&evt) else {
             return;
         };
-        let slot = evt.slot();
+        self.touch_down_at(evt.slot(), pos, evt.time());
+    }
 
+    pub(crate) fn touch_down_at(
+        &mut self,
+        slot: TouchSlot,
+        pos: Point<f64, Logical>,
+        time: InputTime,
+    ) {
+        let Some(handle) = self.niri.seat.get_touch() else {
+            return;
+        };
         self.niri.cancel_interrupted_release_binds();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -4945,7 +4972,7 @@ impl State {
                     location: pos,
                 };
                 let start_data = AnyStartData::Touch(start_data);
-                let start_timestamp = Duration::from_micros(evt.time().micros());
+                let start_timestamp = Duration::from_micros(time.micros());
                 let grab = TouchOverviewGrab::new(
                     start_data,
                     start_timestamp,
@@ -4991,19 +5018,30 @@ impl State {
                 slot,
                 location: pos,
                 serial,
-                time: evt.time(),
+                time: time,
             },
         );
 
         // We're using touch, hide the pointer.
         self.niri.pointer_visibility = PointerVisibility::Disabled;
     }
-    fn on_touch_up<I: InputBackend>(&mut self, evt: I::TouchUpEvent) {
+    fn on_touch_up<I: InputBackend>(&mut self, evt: I::TouchUpEvent)
+    where
+        I::Device: 'static,
+    {
+        #[cfg(feature = "dbus")]
+        if !remote_touch::is_device(&evt.device())
+            && !crate::dbus::remote_input::touch::physical_up(self, &evt.device(), evt.slot())
+        {
+            return;
+        }
+        self.touch_up(evt.slot(), evt.time());
+    }
+
+    pub(crate) fn touch_up(&mut self, slot: TouchSlot, time: InputTime) {
         let Some(handle) = self.niri.seat.get_touch() else {
             return;
         };
-        let slot = evt.slot();
-
         if let Some(capture) = self.niri.screenshot_ui.pointer_up(Some(slot)) {
             if capture {
                 self.confirm_screenshot(true);
@@ -5018,19 +5056,35 @@ impl State {
             &UpEvent {
                 slot,
                 serial,
-                time: evt.time(),
+                time: time,
             },
         )
     }
-    fn on_touch_motion<I: InputBackend>(&mut self, evt: I::TouchMotionEvent) {
-        let Some(handle) = self.niri.seat.get_touch() else {
+    fn on_touch_motion<I: InputBackend>(&mut self, evt: I::TouchMotionEvent)
+    where
+        I::Device: 'static,
+    {
+        #[cfg(feature = "dbus")]
+        if !remote_touch::is_device(&evt.device())
+            && !crate::dbus::remote_input::touch::physical_motion(self, &evt.device(), evt.slot())
+        {
             return;
-        };
+        }
         let Some(pos) = self.compute_touch_location(&evt) else {
             return;
         };
-        let slot = evt.slot();
+        self.touch_motion_at(evt.slot(), pos, evt.time());
+    }
 
+    pub(crate) fn touch_motion_at(
+        &mut self,
+        slot: TouchSlot,
+        pos: Point<f64, Logical>,
+        time: InputTime,
+    ) {
+        let Some(handle) = self.niri.seat.get_touch() else {
+            return;
+        };
         if let Some(output) = self.niri.screenshot_ui.selection_output().cloned() {
             let geom = self.niri.global_space.output_geometry(&output).unwrap();
             let point = (pos - geom.loc.to_f64())
@@ -5048,7 +5102,7 @@ impl State {
             &TouchMotionEvent {
                 slot,
                 location: pos,
-                time: evt.time(),
+                time: time,
             },
         );
 
@@ -5063,6 +5117,30 @@ impl State {
             }
         }
     }
+    /// Source loss is a release, never screenshot confirmation or seat-wide cancel.
+    pub(crate) fn retire_touch_slots(&mut self, slots: &[TouchSlot]) {
+        let Some(handle) = self.niri.seat.get_touch() else {
+            return;
+        };
+        let time = InputTime::now();
+        for &slot in slots {
+            if self.niri.screenshot_ui.pointer_up(Some(slot)).is_some() {
+                self.niri.queue_redraw_all();
+            }
+            handle.up(
+                self,
+                &UpEvent {
+                    slot,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                },
+            );
+        }
+        // The source may have sent its final Up but disappeared before Frame.
+        // Flush even when no contacts remain in the ownership registry.
+        handle.frame(self);
+    }
+
     fn on_touch_frame<I: InputBackend>(&mut self, _evt: I::TouchFrameEvent) {
         let Some(handle) = self.niri.seat.get_touch() else {
             return;
@@ -5070,6 +5148,8 @@ impl State {
         handle.frame(self);
     }
     fn on_touch_cancel<I: InputBackend>(&mut self, _evt: I::TouchCancelEvent) {
+        #[cfg(feature = "dbus")]
+        crate::dbus::remote_input::touch::physical_cancel(self);
         let Some(handle) = self.niri.seat.get_touch() else {
             return;
         };
