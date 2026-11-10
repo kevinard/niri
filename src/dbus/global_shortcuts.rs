@@ -139,7 +139,7 @@ fn now() -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
-fn source_id(source: KeyboardSource) -> Option<u64> {
+pub(super) fn source_id(source: KeyboardSource) -> Option<u64> {
     match source {
         KeyboardSource::Physical => Some(1),
         KeyboardSource::Auxiliary(id) if id != 0 => id.checked_add(1),
@@ -440,7 +440,8 @@ pub fn seat_key(state: &State, code: u32, time: u64) {
         leases.inner.borrow_mut().host.seat_key(code, down, time);
     }
 }
-pub fn source_closed(state: &State, source: KeyboardSource) {
+pub fn source_closed(state: &mut State, source: KeyboardSource) {
+    super::input_capture::source_closed(state, source);
     if let (Some(leases), Some(source)) = (leases(state), source_id(source)) {
         let down = state
             .niri

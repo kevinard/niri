@@ -117,7 +117,7 @@ impl DBusServers {
             niri.event_loop
                 .insert_source(from_capture, move |event, _, state| {
                     if let calloop::channel::Event::Msg(message) = event {
-                        input_capture::open(state, message, &captures);
+                        input_capture::handle(state, message, &captures);
                     }
                 })
                 .unwrap();

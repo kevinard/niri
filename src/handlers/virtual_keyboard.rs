@@ -58,6 +58,23 @@ impl VirtualKeyboardHandler for State {
             }) => {
                 self.activate_virtual_keyboard_keymap(&device);
 
+                #[cfg(feature = "dbus")]
+                let (mods_depressed, mods_latched, mods_locked, group) =
+                    if self.is_input_method_virtual_keyboard(&device) {
+                        (mods_depressed, mods_latched, mods_locked, group)
+                    } else {
+                        let Some(masks) = crate::dbus::input_capture::virtual_modifiers(
+                            self,
+                            device.source(),
+                            mods_depressed,
+                            mods_latched,
+                            mods_locked,
+                            group,
+                        ) else {
+                            return;
+                        };
+                        masks
+                    };
                 let keyboard = self.niri.seat.get_keyboard().unwrap();
                 keyboard.with_xkb_state(self, |mut context| {
                     context.set_modifier_mask(mods_depressed, mods_latched, mods_locked, group);
