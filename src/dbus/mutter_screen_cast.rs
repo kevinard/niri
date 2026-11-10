@@ -5,16 +5,16 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
-use zbus::zvariant::{DeserializeDict, OwnedObjectPath, SerializeDict, Type, Value};
+use zbus::zvariant::{DeserializeDict, OwnedObjectPath, Type, Value};
 use zbus::{fdo, interface, ObjectServer};
 
 use super::{request_name, Start};
-use crate::backend::IpcOutputMap;
+use crate::screencasting::sources::{self, Message as SourceMessage};
 use crate::utils::{CastSessionId, CastStreamId};
 
 #[derive(Clone)]
 pub struct ScreenCast {
-    ipc_outputs: Arc<Mutex<IpcOutputMap>>,
+    to_sources: calloop::channel::SyncSender<SourceMessage>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
     #[allow(clippy::type_complexity)]
     sessions: Arc<Mutex<Vec<(Session, InterfaceRef<Session>)>>>,
@@ -23,7 +23,7 @@ pub struct ScreenCast {
 #[derive(Clone)]
 pub struct Session {
     id: CastSessionId,
-    ipc_outputs: Arc<Mutex<IpcOutputMap>>,
+    to_sources: calloop::channel::SyncSender<SourceMessage>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
     #[allow(clippy::type_complexity)]
     streams: Arc<Mutex<Vec<(Stream, InterfaceRef<Stream>)>>>,
@@ -45,6 +45,8 @@ struct RecordMonitorProperties {
     cursor_mode: Option<CursorMode>,
     #[zvariant(rename = "is-recording")]
     _is_recording: Option<bool>,
+    #[zvariant(rename = "canopa-source-id")]
+    source_id: Option<u64>,
 }
 
 #[derive(Debug, DeserializeDict, Type)]
@@ -56,45 +58,24 @@ struct RecordWindowProperties {
     cursor_mode: Option<CursorMode>,
     #[zvariant(rename = "is-recording")]
     _is_recording: Option<bool>,
+    #[zvariant(rename = "canopa-source-id")]
+    source_id: Option<u64>,
 }
 
 #[derive(Clone)]
 pub struct Stream {
     id: CastStreamId,
     session_id: CastSessionId,
-    target: StreamTarget,
+    to_sources: calloop::channel::SyncSender<SourceMessage>,
     cursor_mode: CursorMode,
     was_started: Arc<AtomicBool>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
-}
-
-#[derive(Clone)]
-enum StreamTarget {
-    // FIXME: update on scale changes and whatnot.
-    Output(niri_ipc::Output),
-    Window { id: u64 },
-}
-
-#[derive(Debug, Clone)]
-pub enum StreamTargetId {
-    Output { name: String },
-    Window { id: u64 },
-}
-
-#[derive(Debug, SerializeDict, Type, Value)]
-#[zvariant(signature = "dict")]
-struct StreamParameters {
-    /// Position of the stream in logical coordinates.
-    position: (i32, i32),
-    /// Size of the stream in logical coordinates.
-    size: (i32, i32),
 }
 
 pub enum ScreenCastToNiri {
     StartCast {
         session_id: CastSessionId,
         stream_id: CastStreamId,
-        target: StreamTargetId,
         cursor_mode: CursorMode,
         signal_ctx: SignalEmitter<'static>,
     },
@@ -120,7 +101,7 @@ impl ScreenCast {
         let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{}", session_id.get());
         let path = OwnedObjectPath::try_from(path).unwrap();
 
-        let session = Session::new(session_id, self.ipc_outputs.clone(), self.to_niri.clone());
+        let session = Session::new(session_id, self.to_sources.clone(), self.to_niri.clone());
         match server.at(&path, session.clone()).await {
             Ok(true) => {
                 let iface = server.interface(&path).await.unwrap();
@@ -135,6 +116,32 @@ impl ScreenCast {
         }
 
         Ok(path)
+    }
+
+    /// Stable live monitor identity for Canopa's source selection. Callers can
+    /// require this identity in RecordMonitor's canopa-source-id property.
+    async fn monitor_info(&self, connector: &str) -> fdo::Result<(u64, (i32, i32), (i32, i32))> {
+        let (reply, receive) = async_channel::bounded(1);
+        self.to_sources
+            .try_send(SourceMessage::MonitorInfo {
+                name: connector.into(),
+                reply,
+            })
+            .map_err(|_| fdo::Error::LimitsExceeded("capture query queue unavailable".into()))?;
+        let metadata = receive
+            .recv()
+            .await
+            .map_err(|_| fdo::Error::Failed("compositor stopped".into()))??;
+        Ok((
+            metadata.source_id.unwrap(),
+            metadata.position,
+            metadata.size,
+        ))
+    }
+
+    #[zbus(property)]
+    fn canopa_source_version(&self) -> u32 {
+        1
     }
 
     #[zbus(property)]
@@ -185,92 +192,36 @@ impl Session {
     }
 
     async fn record_monitor(
-        &mut self,
+        &self,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
         connector: &str,
         properties: RecordMonitorProperties,
     ) -> fdo::Result<OwnedObjectPath> {
-        debug!(connector, ?properties, "record_monitor");
-
-        let output = {
-            let ipc_outputs = self.ipc_outputs.lock().unwrap();
-            ipc_outputs.values().find(|o| o.name == connector).cloned()
-        };
-        let Some(output) = output else {
-            return Err(fdo::Error::Failed("no such monitor".to_owned()));
-        };
-
-        if output.logical.is_none() {
-            return Err(fdo::Error::Failed("monitor is disabled".to_owned()));
-        }
-
-        let stream_id = CastStreamId::next();
-        let path = format!("/org/gnome/Mutter/ScreenCast/Stream/u{}", stream_id.get());
-        let path = OwnedObjectPath::try_from(path).unwrap();
-
-        let cursor_mode = properties.cursor_mode.unwrap_or_default();
-
-        let target = StreamTarget::Output(output);
-        let stream = Stream::new(
-            stream_id,
-            self.id,
-            target,
-            cursor_mode,
-            self.to_niri.clone(),
-        );
-        match server.at(&path, stream.clone()).await {
-            Ok(true) => {
-                let iface = server.interface(&path).await.unwrap();
-                self.streams.lock().unwrap().push((stream, iface));
-            }
-            Ok(false) => return Err(fdo::Error::Failed("stream path already exists".to_owned())),
-            Err(err) => {
-                return Err(fdo::Error::Failed(format!(
-                    "error creating stream object: {err:?}"
-                )))
-            }
-        }
-
-        Ok(path)
+        self.record(
+            server,
+            connection,
+            sources::Request::Monitor(connector.into()),
+            properties.source_id,
+            properties.cursor_mode.unwrap_or_default(),
+        )
+        .await
     }
 
     async fn record_window(
-        &mut self,
+        &self,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
         properties: RecordWindowProperties,
     ) -> fdo::Result<OwnedObjectPath> {
-        debug!(?properties, "record_window");
-
-        let stream_id = CastStreamId::next();
-        let path = format!("/org/gnome/Mutter/ScreenCast/Stream/u{}", stream_id.get());
-        let path = OwnedObjectPath::try_from(path).unwrap();
-
-        let cursor_mode = properties.cursor_mode.unwrap_or_default();
-
-        let target = StreamTarget::Window {
-            id: properties.window_id,
-        };
-        let stream = Stream::new(
-            stream_id,
-            self.id,
-            target,
-            cursor_mode,
-            self.to_niri.clone(),
-        );
-        match server.at(&path, stream.clone()).await {
-            Ok(true) => {
-                let iface = server.interface(&path).await.unwrap();
-                self.streams.lock().unwrap().push((stream, iface));
-            }
-            Ok(false) => return Err(fdo::Error::Failed("stream path already exists".to_owned())),
-            Err(err) => {
-                return Err(fdo::Error::Failed(format!(
-                    "error creating stream object: {err:?}"
-                )))
-            }
-        }
-
-        Ok(path)
+        self.record(
+            server,
+            connection,
+            sources::Request::Window(properties.window_id),
+            properties.source_id,
+            properties.cursor_mode.unwrap_or_default(),
+        )
+        .await
     }
 
     #[zbus(signal)]
@@ -283,34 +234,45 @@ impl Stream {
     pub async fn pipe_wire_stream_added(ctxt: &SignalEmitter<'_>, node_id: u32)
         -> zbus::Result<()>;
 
-    #[zbus(property)]
-    async fn parameters(&self) -> StreamParameters {
-        match &self.target {
-            StreamTarget::Output(output) => {
-                let logical = output.logical.as_ref().unwrap();
-                StreamParameters {
-                    position: (logical.x, logical.y),
-                    size: (logical.width as i32, logical.height as i32),
-                }
-            }
-            StreamTarget::Window { .. } => {
-                // Does any consumer need this?
-                StreamParameters {
-                    position: (0, 0),
-                    size: (1, 1),
-                }
-            }
+    /// This is live on-demand metadata; it is not a cached output projection.
+    #[zbus(property(emits_changed_signal = "false"))]
+    async fn parameters(&self) -> fdo::Result<HashMap<&'static str, Value<'static>>> {
+        let (reply, receive) = async_channel::bounded(1);
+        self.to_sources
+            .try_send(SourceMessage::Metadata {
+                session: self.session_id,
+                stream: self.id,
+                reply,
+            })
+            .map_err(|_| fdo::Error::LimitsExceeded("capture query queue unavailable".into()))?;
+        let metadata = receive
+            .recv()
+            .await
+            .map_err(|_| fdo::Error::Failed("compositor stopped".into()))??;
+        let mut values = HashMap::from([
+            ("position", Value::from(metadata.position)),
+            ("size", Value::from(metadata.size)),
+        ]);
+        if let Some(id) = metadata.source_id {
+            values.insert("canopa-source-id", Value::from(id));
         }
+        if let Some(id) = metadata.mapping_id {
+            values.insert("mapping-id", Value::from(id));
+        }
+        if let Some(scale) = metadata.physical_scale {
+            values.insert("canopa-physical-scale", Value::from(scale));
+        }
+        Ok(values)
     }
 }
 
 impl ScreenCast {
     pub fn new(
-        ipc_outputs: Arc<Mutex<IpcOutputMap>>,
+        to_sources: calloop::channel::SyncSender<SourceMessage>,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
     ) -> Self {
         Self {
-            ipc_outputs,
+            to_sources,
             to_niri,
             sessions: Arc::new(Mutex::new(vec![])),
         }
@@ -329,14 +291,89 @@ impl Start for ScreenCast {
 }
 
 impl Session {
+    async fn record(
+        &self,
+        server: &ObjectServer,
+        connection: &zbus::Connection,
+        target: sources::Request,
+        expected: Option<u64>,
+        cursor_mode: CursorMode,
+    ) -> fdo::Result<OwnedObjectPath> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(fdo::Error::Failed("capture session stopped".into()));
+        }
+        let stream_id = CastStreamId::next();
+        let path = OwnedObjectPath::try_from(format!(
+            "/org/gnome/Mutter/ScreenCast/Stream/u{}",
+            stream_id.get()
+        ))
+        .unwrap();
+        let owner = connection
+            .unique_name()
+            .ok_or_else(|| fdo::Error::Failed("capture is not on the session bus".into()))?;
+        let mapping_id = format!("canopa-niri:{}:u{}", owner, stream_id.get());
+        let (reply, receive) = async_channel::bounded(1);
+        self.to_sources
+            .try_send(SourceMessage::Pin {
+                session: self.id,
+                stream: stream_id,
+                target,
+                expected,
+                mapping_id,
+                stopped: self.stopped.clone(),
+                reply,
+            })
+            .map_err(|_| fdo::Error::LimitsExceeded("capture query queue unavailable".into()))?;
+        receive
+            .recv()
+            .await
+            .map_err(|_| fdo::Error::Failed("compositor stopped".into()))??;
+        let stream = Stream::new(
+            stream_id,
+            self.id,
+            self.to_sources.clone(),
+            cursor_mode,
+            self.to_niri.clone(),
+        );
+        match server.at(&path, stream.clone()).await {
+            Ok(true) => {
+                let iface = server
+                    .interface(&path)
+                    .await
+                    .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+                // Do not publish a new stream after concurrent Session::stop
+                // drained its list. The read-only D-Bus method avoids holding an
+                // exclusive interface lock while waiting on the compositor.
+                let stopped = {
+                    let mut streams = self.streams.lock().unwrap();
+                    if self.stopped.load(Ordering::Acquire) {
+                        true
+                    } else {
+                        streams.push((stream, iface));
+                        false
+                    }
+                };
+                if stopped {
+                    let _ = server.remove::<Stream, _>(&path).await;
+                    return Err(fdo::Error::Failed("capture session stopped".into()));
+                }
+                Ok(path)
+            }
+            Ok(false) => Err(fdo::Error::Failed("stream path already exists".into())),
+            Err(error) => Err(fdo::Error::Failed(format!(
+                "error creating stream object: {error:?}"
+            ))),
+        }
+    }
+
     pub fn new(
         id: CastSessionId,
-        ipc_outputs: Arc<Mutex<IpcOutputMap>>,
+        to_sources: calloop::channel::SyncSender<SourceMessage>,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
     ) -> Self {
         Self {
             id,
-            ipc_outputs,
+            to_sources,
             streams: Arc::new(Mutex::new(vec![])),
             to_niri,
             stopped: Arc::new(AtomicBool::new(false)),
@@ -356,14 +393,14 @@ impl Stream {
     fn new(
         id: CastStreamId,
         session_id: CastSessionId,
-        target: StreamTarget,
+        to_sources: calloop::channel::SyncSender<SourceMessage>,
         cursor_mode: CursorMode,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
     ) -> Self {
         Self {
             id,
             session_id,
-            target,
+            to_sources,
             cursor_mode,
             was_started: Arc::new(AtomicBool::new(false)),
             to_niri,
@@ -371,31 +408,19 @@ impl Stream {
     }
 
     fn start(&self, ctxt: SignalEmitter<'static>) {
-        if self.was_started.load(Ordering::SeqCst) {
+        if self.was_started.swap(true, Ordering::SeqCst) {
             return;
         }
 
         let msg = ScreenCastToNiri::StartCast {
             session_id: self.session_id,
             stream_id: self.id,
-            target: self.target.make_id(),
             cursor_mode: self.cursor_mode,
             signal_ctx: ctxt,
         };
 
         if let Err(err) = self.to_niri.send(msg) {
             warn!("error sending StartCast to niri: {err:?}");
-        }
-    }
-}
-
-impl StreamTarget {
-    fn make_id(&self) -> StreamTargetId {
-        match self {
-            StreamTarget::Output(output) => StreamTargetId::Output {
-                name: output.name.clone(),
-            },
-            StreamTarget::Window { id } => StreamTargetId::Window { id: *id },
         }
     }
 }
