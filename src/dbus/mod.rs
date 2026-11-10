@@ -131,7 +131,15 @@ impl DBusServers {
                         }
                     })
                     .unwrap();
-                let screen_cast = ScreenCast::new(backend.ipc_outputs(), to_niri);
+                let (to_sources, from_sources) = calloop::channel::sync_channel(8);
+                niri.event_loop
+                    .insert_source(from_sources, move |event, _, state| {
+                        if let calloop::channel::Event::Msg(msg) = event {
+                            crate::screencasting::sources::handle(state, msg);
+                        }
+                    })
+                    .unwrap();
+                let screen_cast = ScreenCast::new(to_sources, to_niri);
                 dbus.conn_screen_cast = try_start(screen_cast, is_session_instance);
             }
 
