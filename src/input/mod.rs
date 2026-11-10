@@ -66,6 +66,8 @@ pub mod pick_window_grab;
 pub mod pointer_buttons;
 #[cfg(feature = "dbus")]
 pub mod remote_keyboard;
+#[cfg(feature = "dbus")]
+pub mod remote_pointer;
 pub mod resize_grab;
 pub mod scroll_swipe_gesture;
 pub mod scroll_tracker;
@@ -2939,11 +2941,16 @@ impl State {
         // Any of the early returns here mean that the pointer is not inside the hot corner.
         self.niri.pointer_inside_hot_corner = false;
 
-        let Some(pos) = self.compute_absolute_location(&event, None).or_else(|| {
-            self.global_bounding_rectangle().map(|output_geo| {
-                event.position_transformed(output_geo.size) + output_geo.loc.to_f64()
+        let resolved = if event.device().absolute_position_is_global() {
+            Some((event.x(), event.y()).into())
+        } else {
+            self.compute_absolute_location(&event, None).or_else(|| {
+                self.global_bounding_rectangle().map(|output_geo| {
+                    event.position_transformed(output_geo.size) + output_geo.loc.to_f64()
+                })
             })
-        }) else {
+        };
+        let Some(pos) = resolved else {
             return;
         };
 

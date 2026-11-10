@@ -12,6 +12,7 @@ use crate::niri::{CastTarget, Niri, State};
 use crate::utils::{CastSessionId, CastStreamId};
 
 mod identity;
+pub mod mapping;
 const MAX_PINS: usize = 64;
 
 pub enum Request {
