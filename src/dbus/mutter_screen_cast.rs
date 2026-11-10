@@ -1,23 +1,28 @@
 use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
+use futures_util::future::{select, Either};
+use futures_util::StreamExt;
 use serde::Deserialize;
+use zbus::message::Header;
+use zbus::names::UniqueName;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
-use zbus::zvariant::{DeserializeDict, OwnedObjectPath, SerializeDict, Type, Value};
+use zbus::zvariant::{DeserializeDict, NoneValue, OwnedObjectPath, SerializeDict, Type, Value};
 use zbus::{fdo, interface, ObjectServer};
 
 use super::{request_name, Start};
 use crate::backend::IpcOutputMap;
 use crate::utils::{CastSessionId, CastStreamId};
 
+type Sessions = Mutex<Vec<(Session, InterfaceRef<Session>)>>;
+
 #[derive(Clone)]
 pub struct ScreenCast {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
-    #[allow(clippy::type_complexity)]
-    sessions: Arc<Mutex<Vec<(Session, InterfaceRef<Session>)>>>,
+    sessions: Arc<Sessions>,
 }
 
 #[derive(Clone)]
@@ -28,6 +33,8 @@ pub struct Session {
     #[allow(clippy::type_complexity)]
     streams: Arc<Mutex<Vec<(Stream, InterfaceRef<Stream>)>>>,
     stopped: Arc<AtomicBool>,
+    registry: Weak<Sessions>,
+    monitor_end: async_channel::Sender<()>,
 }
 
 #[derive(Debug, Default, Deserialize, Type, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +115,8 @@ impl ScreenCast {
     async fn create_session(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
         properties: HashMap<&str, Value<'_>>,
     ) -> fdo::Result<OwnedObjectPath> {
         if properties.contains_key("remote-desktop-session-id") {
@@ -116,15 +125,39 @@ impl ScreenCast {
             ));
         }
 
+        let owner = header
+            .sender()
+            .ok_or_else(|| fdo::Error::Failed("capture creator has no unique name".into()))?
+            .as_str()
+            .to_owned();
+        let proxy = fdo::DBusProxy::new(connection)
+            .await
+            .map_err(|err| fdo::Error::Failed(format!("capture owner monitor: {err}")))?;
+        // Subscribe before publishing the session; the creator can disappear
+        // while object registration is awaiting the server.
+        let mut owner_changes = proxy
+            .receive_name_owner_changed_with_args(&[
+                (0, owner.as_str()),
+                (2, UniqueName::null_value()),
+            ])
+            .await
+            .map_err(|err| fdo::Error::Failed(format!("capture owner monitor: {err}")))?;
+
         let session_id = CastSessionId::next();
         let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{}", session_id.get());
         let path = OwnedObjectPath::try_from(path).unwrap();
 
-        let session = Session::new(session_id, self.ipc_outputs.clone(), self.to_niri.clone());
-        match server.at(&path, session.clone()).await {
+        let (session, monitor_end) = Session::new(
+            session_id,
+            self.ipc_outputs.clone(),
+            self.to_niri.clone(),
+            Arc::downgrade(&self.sessions),
+        );
+        let iface = match server.at(&path, session.clone()).await {
             Ok(true) => {
                 let iface = server.interface(&path).await.unwrap();
-                self.sessions.lock().unwrap().push((session, iface));
+                self.sessions.lock().unwrap().push((session, iface.clone()));
+                iface
             }
             Ok(false) => return Err(fdo::Error::Failed("session path already exists".to_owned())),
             Err(err) => {
@@ -132,9 +165,49 @@ impl ScreenCast {
                     "error creating session object: {err:?}"
                 )))
             }
+        };
+
+        let present = proxy
+            .name_has_owner(owner.as_str().try_into().unwrap())
+            .await;
+        if !matches!(present, Ok(true)) {
+            iface
+                .get()
+                .await
+                .stop(server, iface.signal_emitter().clone())
+                .await;
+            return Err(fdo::Error::Failed("capture creator disappeared".into()));
         }
 
+        let owner_connection = connection.clone();
+        let monitor = async move {
+            // A unique owner cannot be replaced. A lost notification stream is
+            // also revocation, while normal Stop cancels this monitor.
+            let outcome =
+                select(Box::pin(owner_changes.next()), Box::pin(monitor_end.recv())).await;
+            if matches!(outcome, Either::Left(_)) {
+                iface
+                    .get()
+                    .await
+                    .stop(
+                        owner_connection.object_server(),
+                        iface.signal_emitter().clone(),
+                    )
+                    .await;
+            }
+        };
+        connection
+            .executor()
+            .spawn(monitor, "monitor capture creator")
+            .detach();
+
         Ok(path)
+    }
+
+    /// Creator disconnect retires this client's sessions and their producers.
+    #[zbus(property)]
+    fn canopa_capture_owner_version(&self) -> u32 {
+        1
     }
 
     #[zbus(property)]
@@ -165,7 +238,17 @@ impl Session {
             return;
         }
 
-        Session::closed(&ctxt).await.unwrap();
+        self.monitor_end.close();
+        if let Some(registry) = self.registry.upgrade() {
+            registry
+                .lock()
+                .unwrap()
+                .retain(|(session, _)| session.id != self.id);
+        }
+
+        if let Err(err) = Session::closed(&ctxt).await {
+            warn!("error emitting capture Closed: {err:?}");
+        }
 
         if let Err(err) = self.to_niri.send(ScreenCastToNiri::StopCast {
             session_id: self.id,
@@ -333,14 +416,21 @@ impl Session {
         id: CastSessionId,
         ipc_outputs: Arc<Mutex<IpcOutputMap>>,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
-    ) -> Self {
-        Self {
-            id,
-            ipc_outputs,
-            streams: Arc::new(Mutex::new(vec![])),
-            to_niri,
-            stopped: Arc::new(AtomicBool::new(false)),
-        }
+        registry: Weak<Sessions>,
+    ) -> (Self, async_channel::Receiver<()>) {
+        let (monitor_end, stopped) = async_channel::bounded(1);
+        (
+            Self {
+                id,
+                ipc_outputs,
+                streams: Arc::new(Mutex::new(vec![])),
+                to_niri,
+                stopped: Arc::new(AtomicBool::new(false)),
+                registry,
+                monitor_end,
+            },
+            stopped,
+        )
     }
 }
 
