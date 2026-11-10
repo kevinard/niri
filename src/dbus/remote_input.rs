@@ -25,6 +25,7 @@ use crate::niri::State;
 
 mod pointer;
 mod symbols;
+pub(crate) mod touch;
 mod wire;
 use symbols::{Key, Planner};
 use wire::{HeldKeys, Reader, TypedReader, FRAMES_PER_DISPATCH};
@@ -68,6 +69,13 @@ impl Drop for Permit {
 }
 
 pub enum Message {
+    OpenMappedTouch {
+        stream: UnixStream,
+        permit: Permit,
+        session: String,
+        streams: Vec<String>,
+        reply: async_channel::Sender<fdo::Result<MappingDescriptors>>,
+    },
     Open {
         stream: UnixStream,
         protocol: Protocol,
@@ -207,6 +215,42 @@ impl RemoteInput {
         ))
     }
 
+    /// Touch has independent contact ownership and requires live capture mappings.
+    async fn open_mapped_touch(
+        &self,
+        session: zvariant::ObjectPath<'_>,
+        streams: Vec<zvariant::ObjectPath<'_>>,
+    ) -> fdo::Result<(zvariant::OwnedFd, MappingDescriptors)> {
+        if streams.is_empty() || streams.len() > 16 {
+            return Err(fdo::Error::InvalidArgs(
+                "expected 1 to 16 capture streams".into(),
+            ));
+        }
+        let permit = Permit::acquire(&self.admission)?;
+        let (client, stream) = UnixStream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let (reply, receive) = async_channel::bounded(1);
+        self.send(Message::OpenMappedTouch {
+            stream,
+            permit,
+            session: session.to_string(),
+            streams: streams.into_iter().map(|s| s.to_string()).collect(),
+            reply,
+        })?;
+        let descriptors = receive
+            .recv()
+            .await
+            .map_err(|_| fdo::Error::Failed("compositor stopped".into()))??;
+        Ok((zvariant::OwnedFd::from(OwnedFd::from(client)), descriptors))
+    }
+
+    #[zbus(property)]
+    fn touch_version(&self) -> u32 {
+        1
+    }
+
     #[zbus(property)]
     fn mapped_pointer_version(&self) -> u32 {
         2
@@ -255,7 +299,11 @@ fn snapshot(state: &mut State) -> fdo::Result<Snapshot> {
 }
 
 #[derive(Default, Clone)]
-pub struct Leases(Rc<RefCell<Vec<Weak<RefCell<Lease>>>>>, pointer::Leases);
+pub struct Leases(
+    Rc<RefCell<Vec<Weak<RefCell<Lease>>>>>,
+    pointer::Leases,
+    touch::Leases,
+);
 
 /// Publish seat state after compositor work and before its clients are flushed.
 /// Slow readers are retired instead of accumulating an unbounded output queue.
@@ -269,6 +317,7 @@ pub fn refresh(state: &mut State) {
         return;
     };
     pointer::refresh(state, &leases.1);
+    touch::refresh(state, &leases.2);
     let active: Vec<_> = {
         let mut entries = leases.0.borrow_mut();
         entries.retain(|entry| entry.strong_count() != 0);
@@ -302,6 +351,15 @@ pub fn refresh(state: &mut State) {
 
 pub fn handle(state: &mut State, msg: Message, leases: &Leases) {
     match msg {
+        Message::OpenMappedTouch {
+            stream,
+            permit,
+            session,
+            streams,
+            reply,
+        } => {
+            touch::open_mapped(state, stream, permit, reply, &leases.2, &session, &streams);
+        }
         Message::OpenMappedPointer {
             stream,
             permit,
