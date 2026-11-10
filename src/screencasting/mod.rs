@@ -15,7 +15,7 @@ use smithay::reexports::gbm::Modifier;
 use smithay::utils::{DeviceFd, Physical, Point, Scale, Size};
 use zbus::object_server::SignalEmitter;
 
-use crate::dbus::mutter_screen_cast::{self, CursorMode, ScreenCastToNiri, StreamTargetId};
+use crate::dbus::mutter_screen_cast::{self, CursorMode, ScreenCastToNiri};
 use crate::niri::{CastTarget, Niri, OutputRenderElements, PointerRenderElements, State};
 use crate::niri_render_elements;
 use crate::render_helpers::{RenderCtx, RenderTarget};
@@ -23,9 +23,11 @@ use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
 use crate::window::mapped::{MappedId, WindowCastRenderElements};
 
 mod pw_utils;
+pub mod sources;
 use pw_utils::{Cast, CastSizeChange, CursorData, PipeWire, PwToNiri};
 
 pub struct Screencasting {
+    pub sources: sources::Sources,
     pub casts: Vec<Cast>,
 
     /// Dynamic-target casts waiting for their first target to start.
@@ -65,6 +67,7 @@ impl Screencasting {
         };
 
         Self {
+            sources: sources::Sources::default(),
             casts: vec![],
             pending_dynamic_casts: vec![],
             pw_to_niri,
@@ -390,29 +393,34 @@ impl State {
             ScreenCastToNiri::StartCast {
                 session_id,
                 stream_id,
-                target,
                 cursor_mode,
                 signal_ctx,
             } => {
                 let _span = tracy_client::span!("StartCast");
                 let _span = debug_span!("StartCast", %session_id, %stream_id).entered();
 
+                let Some(target) = self.niri.casting.sources.target(session_id, stream_id) else {
+                    self.niri.stop_cast(session_id);
+                    return;
+                };
                 let (target, size, refresh, alpha) = match target {
-                    StreamTargetId::Output { name } => {
-                        let global_space = &self.niri.global_space;
-                        let output = global_space.outputs().find(|out| out.name() == name);
+                    sources::Target::Fixed {
+                        target: CastTarget::Output { output, .. },
+                        ..
+                    } => {
+                        let output = output
+                            .upgrade()
+                            .filter(|output| self.niri.output_exists(output));
                         let Some(output) = output else {
                             warn!("error starting screencast: requested output is missing");
                             self.niri.stop_cast(session_id);
                             return;
                         };
 
-                        let (size, refresh) = cast_params_for_output(output);
-                        (CastTarget::output(output), size, refresh, false)
+                        let (size, refresh) = cast_params_for_output(&output);
+                        (CastTarget::output(&output), size, refresh, false)
                     }
-                    StreamTargetId::Window { id }
-                        if id == self.niri.casting.dynamic_cast_id_for_portal.get() =>
-                    {
+                    sources::Target::Dynamic => {
                         debug!("delaying dynamic cast until target is set");
                         self.niri.casting.pending_dynamic_casts.push(PendingCast {
                             session_id,
@@ -422,7 +430,10 @@ impl State {
                         });
                         return;
                     }
-                    StreamTargetId::Window { id } => {
+                    sources::Target::Fixed {
+                        target: CastTarget::Window { id },
+                        ..
+                    } => {
                         let Some((size, refresh)) = self.niri.cast_params_for_window(id) else {
                             warn!("error starting screencast: requested window is missing");
                             self.niri.stop_cast(session_id);
@@ -430,6 +441,10 @@ impl State {
                         };
                         (CastTarget::Window { id }, size, refresh, true)
                     }
+                    sources::Target::Fixed {
+                        target: CastTarget::Nothing,
+                        ..
+                    } => unreachable!(),
                 };
 
                 let gbm = match self.prepare_pw_cast() {
@@ -709,6 +724,7 @@ impl Niri {
     pub fn stop_cast(&mut self, session_id: CastSessionId) {
         let _span = tracy_client::span!("Niri::stop_cast");
         let _span = debug_span!("stop_cast", %session_id).entered();
+        self.casting.sources.stop(session_id);
 
         self.casting
             .pending_dynamic_casts
