@@ -395,6 +395,11 @@ pub struct Niri {
     pub cursor_texture_cache: CursorTextureCache,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     pub dnd_icon: Option<DndIcon>,
+    /// Whether a pointer drag-and-drop grab is in progress.
+    ///
+    /// The grab takes pointer focus away from clients, so the drag source cannot set its cursor;
+    /// we show the grabbing cursor instead.
+    pub pointer_dnd_active: bool,
     /// Contents under pointer.
     ///
     /// Periodically updated: on motion and other events and in the loop callback. If you require
@@ -2869,6 +2874,7 @@ impl Niri {
             cursor_texture_cache: Default::default(),
             cursor_shape_manager_state,
             dnd_icon: None,
+            pointer_dnd_active: false,
             pointer_contents: PointContents::default(),
             pointer_visibility: PointerVisibility::Visible,
             pointer_inactivity_timer: None,
