@@ -99,6 +99,8 @@ impl SeatHandler for State {
         // PointerFocus properly.
         if self.niri.screenshot_ui.is_open() {
             image = CursorImageStatus::Named(CursorIcon::Crosshair);
+        } else if self.niri.pointer_dnd_active {
+            image = CursorImageStatus::Named(CursorIcon::Grabbing);
         }
         self.niri.cursor_manager.set_cursor_image(image);
         // FIXME: more granular
@@ -332,6 +334,13 @@ impl WaylandDndGrabHandler for State {
 
         match type_ {
             dnd::GrabType::Pointer => {
+                self.niri.pointer_dnd_active = true;
+                if !self.niri.screenshot_ui.is_open() {
+                    self.niri
+                        .cursor_manager
+                        .set_cursor_image(CursorImageStatus::Named(CursorIcon::Grabbing));
+                }
+
                 let pointer = seat.get_pointer().unwrap();
                 let start_data = pointer.grab_start_data().unwrap();
                 let grab =
@@ -398,6 +407,14 @@ impl crate::niri::Niri {
     fn on_maybe_dnd_ended(&mut self) {
         self.layout.dnd_end();
         self.dnd_icon = None;
+        if self.pointer_dnd_active {
+            self.pointer_dnd_active = false;
+            // Clients set their own cursor again on the next pointer enter.
+            if !self.screenshot_ui.is_open() {
+                self.cursor_manager
+                    .set_cursor_image(CursorImageStatus::default_named());
+            }
+        }
         // FIXME: more granular
         self.queue_redraw_all();
     }
