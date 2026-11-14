@@ -24,6 +24,7 @@ pub mod screencasting;
 pub mod ui;
 pub mod utils;
 pub mod window;
+pub mod window_preview;
 
 #[cfg(test)]
 mod tests;
