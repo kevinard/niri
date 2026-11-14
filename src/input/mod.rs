@@ -1837,6 +1837,24 @@ impl State {
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
+            Action::PinColumn(side) => {
+                self.niri.layout.pin_column(None, side);
+                self.maybe_warp_cursor_to_focus();
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
+            Action::UnpinColumn => {
+                self.niri.layout.unpin_column(None);
+                self.maybe_warp_cursor_to_focus();
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
+            Action::TogglePinnedColumn(side) => {
+                self.niri.layout.toggle_pinned_column(None, side);
+                self.maybe_warp_cursor_to_focus();
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
             Action::SwitchPresetColumnWidth => {
                 self.niri.layout.toggle_width(true);
             }

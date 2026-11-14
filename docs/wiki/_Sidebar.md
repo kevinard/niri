@@ -5,6 +5,7 @@
 * [Workspaces](./Workspaces.md)
 * [Floating Windows](./Floating-Windows.md)
 * [Tabs](./Tabs.md)
+* [Pinned Columns](./Pinned-Columns.md)
 * [Overview](./Overview.md)
 * [Screencasting](./Screencasting.md)
 * [Layer‐Shell Components](./Layer%E2%80%90Shell-Components.md)
