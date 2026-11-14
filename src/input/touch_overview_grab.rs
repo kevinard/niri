@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::Duration;
 
 use smithay::backend::input::InputTime;
@@ -31,6 +32,8 @@ pub struct TouchOverviewGrab {
     workspace_matched_narrow: bool,
     window: Option<Window>,
     gesture: GestureState,
+    /// Set when a multi-finger touchscreen swipe took over the touches.
+    abandoned: Cell<bool>,
 
     // Accumulated and applied in frame().
     new_location: Point<f64, Logical>,
@@ -67,9 +70,22 @@ impl TouchOverviewGrab {
             workspace_matched_narrow,
             window,
             gesture: GestureState::Recognizing,
+            abandoned: Cell::new(false),
             new_location: location,
             event_timestamp: None,
         }
+    }
+
+    /// Whether the grab hasn't yet decided what to do with the touch.
+    pub fn is_recognizing(&self) -> bool {
+        matches!(self.gesture, GestureState::Recognizing)
+    }
+
+    /// Makes the grab do nothing when it ends, not even activate what was tapped.
+    ///
+    /// Used when a multi-finger touchscreen swipe takes over the touches.
+    pub fn abandon(&self) {
+        self.abandoned.set(true);
     }
 
     fn on_frame(&mut self, data: &mut State) -> bool {
@@ -176,6 +192,11 @@ impl TouchOverviewGrab {
     }
 
     fn on_ungrab(&mut self, state: &mut State) {
+        if self.abandoned.get() {
+            state.niri.queue_redraw_all();
+            return;
+        }
+
         let layout = &mut state.niri.layout;
         match self.gesture {
             GestureState::Recognizing => {

@@ -2151,6 +2151,9 @@ mod tests {
                     bottom_left: false,
                     bottom_right: false,
                 },
+                touchscreen_swipe: TouchscreenSwipe {
+                    off: false,
+                },
             },
             overview: Overview {
                 zoom: 0.5,

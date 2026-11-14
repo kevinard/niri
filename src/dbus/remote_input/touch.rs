@@ -49,6 +49,11 @@ pub fn has_devices(state: &State) -> bool {
     })
 }
 
+/// Whether any remote touch lease is open.
+pub fn has_leases(state: &State) -> bool {
+    leases(state).is_some_and(|leases| !leases.0.borrow().leases.is_empty())
+}
+
 fn update_capability(state: &mut State, leases: &Leases) {
     let ownership = leases.0.borrow();
     if !ownership.leases.is_empty()

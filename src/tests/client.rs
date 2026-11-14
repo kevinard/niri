@@ -38,6 +38,7 @@ use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
+use wayland_client::protocol::wl_touch::{self, WlTouch};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 
 use crate::utils::id::IdCounter;
@@ -71,6 +72,9 @@ pub struct State {
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
+
+    /// Touch events received on any surface, in order.
+    pub touch_events: Vec<String>,
 }
 
 pub struct Window {
@@ -104,6 +108,7 @@ pub struct LayerSurface {
 #[derive(Debug, Default)]
 pub struct Seat {
     pub keyboard: Option<Keyboard>,
+    pub touch: Option<WlTouch>,
 }
 
 #[derive(Debug)]
@@ -272,6 +277,7 @@ impl Client {
             xdg_activation: None,
             windows: Vec::new(),
             layers: Vec::new(),
+            touch_events: Vec::new(),
         };
 
         Self {
@@ -746,10 +752,39 @@ impl Dispatch<WlSeat, ()> for State {
                         keyboard.proxy.release();
                     }
                 }
+
+                if capabilities.contains(wl_seat::Capability::Touch) {
+                    if data.touch.is_none() {
+                        data.touch = Some(seat.get_touch(qh, ()));
+                    }
+                } else if let Some(touch) = data.touch.take() {
+                    touch.release();
+                }
             }
             wl_seat::Event::Name { .. } => (),
             _ => unreachable!(),
         }
+    }
+}
+
+impl Dispatch<WlTouch, ()> for State {
+    fn event(
+        state: &mut Self,
+        _touch: &WlTouch,
+        event: <WlTouch as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let event = match event {
+            wl_touch::Event::Down { id, x, y, .. } => format!("down {id} {x:.0},{y:.0}"),
+            wl_touch::Event::Up { id, .. } => format!("up {id}"),
+            wl_touch::Event::Motion { id, x, y, .. } => format!("motion {id} {x:.0},{y:.0}"),
+            wl_touch::Event::Frame => String::from("frame"),
+            wl_touch::Event::Cancel => String::from("cancel"),
+            _ => return,
+        };
+        state.touch_events.push(event);
     }
 }
 

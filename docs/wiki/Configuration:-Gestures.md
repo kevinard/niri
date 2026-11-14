@@ -28,6 +28,10 @@ gestures {
         // bottom-left
         // bottom-right
     }
+
+    touchscreen-swipe {
+        // off
+    }
 }
 ```
 
@@ -113,3 +117,30 @@ gestures {
 ```
 
 You can also customize hot corners per-output [in the output config](./Configuration:-Outputs.md#hot-corners).
+
+### `touchscreen-swipe`
+
+<sup>Since: next release</sup>
+
+Multi-finger swipes on a touchscreen, matching the touchpad gestures:
+
+- three-finger horizontal swipes move the view horizontally,
+- three-finger vertical swipes switch workspaces,
+- four-finger vertical swipes open and close the overview.
+
+The fingers must touch down within a short time of each other.
+Touches reach the windows as usual until the fingers move together far enough to recognize the swipe; then niri cancels the touches that windows received and keeps the rest of the swipe to itself.
+One and two-finger touches are never affected.
+
+Swipes don't start during interactive moves, drag-and-drop, the screenshot UI, the window switcher, on the lock screen, or while a remote touch session is active.
+
+`off` disables these swipes, so that all touches reach the windows.
+
+```kdl
+// Disable touchscreen swipes.
+gestures {
+    touchscreen-swipe {
+        off
+    }
+}
+```
