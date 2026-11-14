@@ -1434,6 +1434,18 @@ pub struct WindowLayout {
     /// Tile position within the current view of the workspace.
     ///
     /// This is the same "workspace view" as in gradients' `relative-to` in the niri config.
+    ///
+    /// Set for both floating and tiled (scrolling layout) windows. For tiled windows, the X
+    /// coordinate is negative for columns scrolled (partly) out of view to the left, and the tile
+    /// extends past the workspace view width for columns scrolled out of view to the right. Tiles
+    /// in the same tabbed column share the same position.
+    ///
+    /// The position excludes animations: when the view or a window starts moving, this reports
+    /// the position it is moving to right away, rather than updating on every animation frame.
+    /// During an interactive view gesture (such as a touchpad swipe), the position stays at the
+    /// pre-gesture value until the gesture ends, then reports where the view will settle.
+    ///
+    /// Unset for windows that are being interactively moved.
     pub tile_pos_in_workspace_view: Option<(f64, f64)>,
     /// Location of the window's visual geometry within its tile.
     ///

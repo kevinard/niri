@@ -2328,6 +2328,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.column_x(self.active_column_idx) + self.view_offset.target()
     }
 
+    /// Returns the view position reported over IPC.
+    ///
+    /// This is the view position the layout is settling on: the end of an ongoing view
+    /// animation, or the view position from before an ongoing gesture (the gesture's own end
+    /// animation then reports where it lands). This way, IPC clients receive one update when the
+    /// view starts moving towards a new position, rather than one on every frame or gesture
+    /// event.
+    fn ipc_view_pos(&self) -> f64 {
+        self.column_x(self.active_column_idx) + self.view_offset.stationary()
+    }
+
     // HACK: pass a self.data iterator in manually as a workaround for the lack of method partial
     // borrowing. Note that this method's return value does not borrow the entire &Self!
     fn column_xs(&self, data: impl Iterator<Item = ColumnData>) -> impl Iterator<Item = f64> {
@@ -2463,18 +2474,29 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> {
-        self.columns
-            .iter()
+        let scale = self.scale;
+        let view_pos = self.ipc_view_pos();
+        let col_xs = self.column_xs(self.data.iter().copied());
+        zip(&self.columns, col_xs)
             .enumerate()
-            .flat_map(move |(col_idx, col)| {
-                col.tiles().enumerate().map(move |(tile_idx, (tile, _))| {
-                    let layout = WindowLayout {
-                        // Our indices are 1-based, consistent with the actions.
-                        pos_in_scrolling_layout: Some((col_idx + 1, tile_idx + 1)),
-                        ..tile.ipc_layout_template()
-                    };
-                    (tile, layout)
-                })
+            .flat_map(move |(col_idx, (col, col_x))| {
+                let col_pos = Point::from((col_x - view_pos, 0.));
+                col.tiles()
+                    .enumerate()
+                    .map(move |(tile_idx, (tile, tile_off))| {
+                        // Do not include animated render offsets here to avoid IPC spam.
+                        let pos = col_pos + tile_off;
+                        // Round to physical pixels.
+                        let pos = pos.to_physical_precise_round(scale).to_logical(scale);
+
+                        let layout = WindowLayout {
+                            // Our indices are 1-based, consistent with the actions.
+                            pos_in_scrolling_layout: Some((col_idx + 1, tile_idx + 1)),
+                            tile_pos_in_workspace_view: Some(pos.into()),
+                            ..tile.ipc_layout_template()
+                        };
+                        (tile, layout)
+                    })
             })
     }
 
