@@ -1365,6 +1365,14 @@ pub struct Window {
     pub pid: Option<i32>,
     /// Id of the workspace this window is on, if any.
     pub workspace_id: Option<u64>,
+    /// Id of this window's parent window, if any.
+    ///
+    /// This is the toplevel set with `xdg_toplevel.set_parent`, for example the main window of a
+    /// dialog. It is unset when the window has no parent, or when the parent is not a mapped
+    /// window that niri manages (for example, because it has not been mapped yet). A
+    /// [`Event::WindowOpenedOrChanged`] is sent when it changes.
+    #[serde(default)]
+    pub parent_id: Option<u64>,
     /// Whether this window is currently focused.
     ///
     /// There can be either one focused window or zero (e.g. when a layer-shell surface has focus).

@@ -9,6 +9,7 @@ mod animations;
 mod binds;
 mod floating;
 mod fullscreen;
+mod ipc_windows;
 mod layer_shell;
 mod remove_output;
 mod transactions;
