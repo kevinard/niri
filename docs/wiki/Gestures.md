@@ -80,6 +80,26 @@ You can customize the look of the window insertion preview in the [`insert-hint`
 
 <sup>Since: 25.11</sup> Tap with a second finger while moving to toggle between floating and tiling layout to put the window into.
 
+#### Workspace Switch
+
+<sup>Since: next release</sup>
+
+Switch workspaces with three-finger vertical swipes.
+
+#### Horizontal View Movement
+
+<sup>Since: next release</sup>
+
+Move the view horizontally with three-finger horizontal swipes.
+
+#### Open and Close the Overview
+
+<sup>Since: next release</sup>
+
+Open and close the overview with a four-finger vertical swipe.
+
+You can disable these swipes in the [gestures configuration](./Configuration:-Gestures.md#touchscreen-swipe).
+
 ### Tablet
 
 #### Interactive Move
