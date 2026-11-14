@@ -48,6 +48,7 @@ window-rule {
     open-fullscreen true
     open-floating true
     open-focused false
+    open-pinned "left"
 
     // Properties that apply continuously.
     draw-border-with-background false
@@ -529,6 +530,25 @@ window-rule {
     match app-id=r#"^org\.keepassxc\.KeePassXC$"# title="^Unlock Database - KeePassXC$"
 
     open-focused true
+}
+```
+
+#### `open-pinned`
+
+<sup>Since: next release</sup>
+
+Pin the window's column to the `"left"` or `"right"` edge of the workspace when it opens.
+See [Pinned Columns](./Pinned-Columns.md) for how pinned columns behave.
+
+The rule only applies to windows that open in the scrolling layout; floating windows are not pinned.
+If another column is already pinned to that edge, it is unpinned.
+
+```kdl
+// Keep the chat window on the right edge of its workspace.
+window-rule {
+    match app-id=r#"^org\.telegram\.desktop$"#
+
+    open-pinned "right"
 }
 ```
 

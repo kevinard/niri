@@ -6,7 +6,7 @@ use niri_config::utils::MergeWith as _;
 use niri_config::{
     CenterFocusedColumn, CornerRadius, OutputName, PresetSize, Workspace as WorkspaceConfig,
 };
-use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
+use niri_ipc::{ColumnDisplay, PinSide, PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::{layer_map_for_output, Window};
@@ -1203,6 +1203,40 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.center_visible_columns();
+    }
+
+    fn is_scrolling_target(&self, id: Option<&W::Id>) -> bool {
+        match id {
+            Some(id) => self.scrolling.has_window(id),
+            None => !self.floating_is_active.get(),
+        }
+    }
+
+    pub fn pin_column(&mut self, id: Option<&W::Id>, side: PinSide) {
+        if self.is_scrolling_target(id) {
+            self.scrolling.pin_column(id, side);
+        }
+    }
+
+    pub fn unpin_column(&mut self, id: Option<&W::Id>) {
+        if self.is_scrolling_target(id) {
+            self.scrolling.unpin_column(id);
+        }
+    }
+
+    pub fn toggle_pinned_column(&mut self, id: Option<&W::Id>, side: PinSide) {
+        if self.is_scrolling_target(id) {
+            self.scrolling.toggle_pinned_column(id, side);
+        }
+    }
+
+    /// Applies the open-pinned window rule to a newly added window.
+    ///
+    /// Floating windows are not pinned: only scrolling-layout columns can be.
+    pub fn open_pinned(&mut self, id: &W::Id, side: PinSide) {
+        if self.scrolling.has_window(id) {
+            self.scrolling.pin_column(Some(id), side);
+        }
     }
 
     pub fn toggle_width(&mut self, forwards: bool) {

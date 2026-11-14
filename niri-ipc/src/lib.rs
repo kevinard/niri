@@ -480,6 +480,23 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg())]
         display: ColumnDisplay,
     },
+    /// Pin the focused column to the left or right edge of the workspace view.
+    ///
+    /// A pinned column stays on screen while the other columns scroll. A column already pinned to
+    /// that side is unpinned first.
+    PinColumn {
+        /// Edge to pin the column to.
+        #[cfg_attr(feature = "clap", arg())]
+        side: PinSide,
+    },
+    /// Unpin the focused column, returning it to the scrolling columns.
+    UnpinColumn {},
+    /// Pin the focused column to the given edge, or unpin it if it is pinned.
+    TogglePinnedColumn {
+        /// Edge to pin the column to.
+        #[cfg_attr(feature = "clap", arg())]
+        side: PinSide,
+    },
     /// Center the focused column on the screen.
     CenterColumn {},
     /// Center a window on the screen.
@@ -1118,6 +1135,16 @@ pub enum ColumnDisplay {
     Tabbed,
 }
 
+/// Edge of the workspace view that a column is pinned to.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub enum PinSide {
+    /// The left edge of the workspace view.
+    Left,
+    /// The right edge of the workspace view.
+    Right,
+}
+
 /// Output actions that niri can perform.
 // Variants in this enum should match the spelling of the ones in niri-config. Most thigs from
 // niri-config should be present here.
@@ -1556,6 +1583,19 @@ pub struct WindowLayout {
     /// the distance from the corner of the black backdrop to the corner of the (centered) window
     /// contents.
     pub window_offset_in_tile: (f64, f64),
+    /// Edge of the workspace view that this window's column is pinned to, if any.
+    ///
+    /// A pinned column stays at that edge while the other columns scroll. Its
+    /// [`Self::pos_in_scrolling_layout`] column index is still meaningful: a column pinned to the
+    /// left is always the first column (index 1), and a column pinned to the right is always the
+    /// last one, so focusing columns by index reaches pinned columns too.
+    ///
+    /// While a pinned column is fullscreen or maximized, it keeps this value but temporarily
+    /// scrolls with the other columns at its end of the strip.
+    ///
+    /// Unset for floating windows and for unpinned columns.
+    #[serde(default)]
+    pub pinned: Option<PinSide>,
 }
 
 /// Output configuration change result.
@@ -2039,6 +2079,18 @@ impl FromStr for ColumnDisplay {
             "normal" => Ok(Self::Normal),
             "tabbed" => Ok(Self::Tabbed),
             _ => Err(r#"invalid column display, can be "normal" or "tabbed""#),
+        }
+    }
+}
+
+impl FromStr for PinSide {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            _ => Err(r#"invalid pin side, can be "left" or "right""#),
         }
     }
 }

@@ -5,7 +5,7 @@ use bitflags::bitflags;
 use knuffel::errors::DecodeError;
 use miette::miette;
 use niri_ipc::{
-    ColumnDisplay, LayoutSwitchTarget, PositionChange, SizeChange, WorkspaceReferenceArg,
+    ColumnDisplay, LayoutSwitchTarget, PinSide, PositionChange, SizeChange, WorkspaceReferenceArg,
 };
 use smithay::input::keyboard::keysyms::KEY_NoSymbol;
 use smithay::input::keyboard::xkb::{keysym_from_name, KEYSYM_CASE_INSENSITIVE, KEYSYM_NO_FLAGS};
@@ -333,6 +333,9 @@ pub enum Action {
     SwapWindowRight,
     ToggleColumnTabbedDisplay,
     SetColumnDisplay(#[knuffel(argument, str)] ColumnDisplay),
+    PinColumn(#[knuffel(argument, str)] PinSide),
+    UnpinColumn,
+    TogglePinnedColumn(#[knuffel(argument, str)] PinSide),
     CenterColumn,
     CenterWindow,
     #[knuffel(skip)]
@@ -632,6 +635,9 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::SwapWindowLeft {} => Self::SwapWindowLeft,
             niri_ipc::Action::ToggleColumnTabbedDisplay {} => Self::ToggleColumnTabbedDisplay,
             niri_ipc::Action::SetColumnDisplay { display } => Self::SetColumnDisplay(display),
+            niri_ipc::Action::PinColumn { side } => Self::PinColumn(side),
+            niri_ipc::Action::UnpinColumn {} => Self::UnpinColumn,
+            niri_ipc::Action::TogglePinnedColumn { side } => Self::TogglePinnedColumn(side),
             niri_ipc::Action::CenterColumn {} => Self::CenterColumn,
             niri_ipc::Action::CenterWindow { id: None } => Self::CenterWindow,
             niri_ipc::Action::CenterWindow { id: Some(id) } => Self::CenterWindowById(id),

@@ -2289,6 +2289,7 @@ mod tests {
                     open_focused: Some(
                         true,
                     ),
+                    open_pinned: None,
                     on_xdg_activate: Some(
                         Ignore,
                     ),

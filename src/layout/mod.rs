@@ -41,7 +41,7 @@ use niri_config::utils::MergeWith as _;
 use niri_config::{
     Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
 };
-use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
+use niri_ipc::{ColumnDisplay, PinSide, PositionChange, SizeChange, WindowLayout};
 use scrolling::{Column, ColumnWidth};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
@@ -986,6 +986,7 @@ impl<W: LayoutElement> Layout<W> {
         activate: ActivateWindow,
     ) -> Option<&Output> {
         let scrolling_height = height.map(SizeChange::from);
+        let open_pinned = window.rules().open_pinned;
         let id = window.id().clone();
 
         match &mut self.monitor_set {
@@ -1089,6 +1090,16 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
 
+                // Pin the new column if a window rule asks for it.
+                if let Some(side) = open_pinned {
+                    let ws = mon
+                        .workspaces
+                        .iter_mut()
+                        .find(|ws| ws.has_window(&id))
+                        .unwrap();
+                    ws.open_pinned(&id, side);
+                }
+
                 Some(&mon.output)
             }
             MonitorSet::NoOutputs { workspaces } => {
@@ -1170,6 +1181,11 @@ impl<W: LayoutElement> Layout<W> {
                     if let Some(change) = scrolling_height {
                         ws.set_window_height(Some(&id), change);
                     }
+                }
+
+                // Pin the new column if a window rule asks for it.
+                if let Some(side) = open_pinned {
+                    ws.open_pinned(&id, side);
                 }
 
                 None
@@ -2378,6 +2394,42 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         workspace.center_visible_columns();
+    }
+
+    fn workspace_for_column_action(&mut self, id: Option<&W::Id>) -> Option<&mut Workspace<W>> {
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if id.is_none() || id == Some(move_.tile.window().id()) {
+                return None;
+            }
+        }
+
+        if let Some(id) = id {
+            self.workspaces_mut().find(|ws| ws.has_window(id))
+        } else {
+            self.active_workspace_mut()
+        }
+    }
+
+    /// Pins the column of the window (or the focused column) to an edge of the workspace view.
+    pub fn pin_column(&mut self, id: Option<&W::Id>, side: PinSide) {
+        if let Some(workspace) = self.workspace_for_column_action(id) {
+            workspace.pin_column(id, side);
+        }
+    }
+
+    /// Unpins the column of the window (or the focused column).
+    pub fn unpin_column(&mut self, id: Option<&W::Id>) {
+        if let Some(workspace) = self.workspace_for_column_action(id) {
+            workspace.unpin_column(id);
+        }
+    }
+
+    /// Unpins the column of the window (or the focused column) if it is pinned, otherwise pins it
+    /// to the given edge.
+    pub fn toggle_pinned_column(&mut self, id: Option<&W::Id>, side: PinSide) {
+        if let Some(workspace) = self.workspace_for_column_action(id) {
+            workspace.toggle_pinned_column(id, side);
+        }
     }
 
     pub fn focus(&self) -> Option<&W> {

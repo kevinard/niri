@@ -1,5 +1,5 @@
 use knuffel::errors::DecodeError;
-use niri_ipc::ColumnDisplay;
+use niri_ipc::{ColumnDisplay, PinSide};
 
 use crate::appearance::{
     BackgroundEffect, BackgroundEffectRule, BlockOutFrom, BorderRule, CornerRadius, ShadowRule,
@@ -35,6 +35,8 @@ pub struct WindowRule {
     pub open_floating: Option<bool>,
     #[knuffel(child, unwrap(argument))]
     pub open_focused: Option<bool>,
+    #[knuffel(child, unwrap(argument, str))]
+    pub open_pinned: Option<PinSide>,
     #[knuffel(child, unwrap(argument))]
     pub on_xdg_activate: Option<OnXdgActivate>,
 

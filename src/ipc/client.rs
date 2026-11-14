@@ -8,7 +8,7 @@ use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
-    OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
+    OutputConfigChanged, Overview, PinSide, Request, Response, Transform, Window, WindowLayout,
 };
 use serde_json::json;
 
@@ -753,6 +753,7 @@ fn print_window(window: &Window) {
         window_size,
         tile_pos_in_workspace_view,
         window_offset_in_tile,
+        pinned,
     } = window.layout;
 
     println!("  Layout:");
@@ -764,6 +765,12 @@ fn print_window(window: &Window) {
 
     if let Some(pos) = pos_in_scrolling_layout {
         println!("    Scrolling position: column {}, tile {}", pos.0, pos.1);
+    }
+
+    match pinned {
+        Some(PinSide::Left) => println!("    Pinned: left"),
+        Some(PinSide::Right) => println!("    Pinned: right"),
+        None => (),
     }
 
     if let Some(pos) = tile_pos_in_workspace_view {
