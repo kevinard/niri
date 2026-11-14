@@ -42,6 +42,10 @@ xwayland-satellite {
     path "xwayland-satellite"
 }
 
+window-previews {
+    // off
+}
+
 clipboard {
     disable-primary
 }
@@ -267,6 +271,27 @@ By default, it's just `xwayland-satellite`, so it's looked up like any other non
 // Use a custom build of xwayland-satellite.
 xwayland-satellite {
     path "~/source/rs/xwayland-satellite/target/release/xwayland-satellite"
+}
+```
+
+### `window-previews`
+
+Settings for the window preview D-Bus service.
+
+niri serves `org.canopa.Niri.WindowPreview1` on the session bus at `/org/canopa/Niri/WindowPreview1`.
+Its `Capture(window_id: t, max_size: u) -> (width: u, height: u, png: ay)` method renders the window with the given IPC id as a PNG that fits in a `max_size`×`max_size` square (16 to 512, never upscaled), for example for taskbar hover previews.
+The preview contains only the window's own surfaces: no borders, focus ring, shadow or popups.
+Windows on any workspace can be captured, and `block-out-from` window rules apply.
+Each caller can have one capture in progress, and at most four run at the same time.
+
+Like the screenshot and screencast D-Bus services, it is available to every process on your session bus.
+`off` disables it: niri won't take the bus name, and captures fail.
+Turning it back on requires restarting niri.
+The service is only started in the session instance of niri, like niri's other D-Bus services.
+
+```kdl
+window-previews {
+    off
 }
 ```
 
