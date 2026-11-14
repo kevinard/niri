@@ -2179,6 +2179,7 @@ mod tests {
                         a: 0.3137255,
                     },
                 },
+                emit_typed_text: false,
             },
             environment: Environment(
                 [
