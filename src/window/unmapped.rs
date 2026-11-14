@@ -4,7 +4,7 @@ use smithay::output::Output;
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::wayland::xdg_activation::XdgActivationTokenData;
 
-use super::ResolvedWindowRules;
+use super::{ResolvedWindowRules, SpawnPlacement};
 
 #[derive(Debug)]
 pub struct Unmapped {
@@ -12,6 +12,8 @@ pub struct Unmapped {
     pub state: InitialConfigureState,
     /// Activation token, if one was used on this unmapped window.
     pub activation_token_data: Option<XdgActivationTokenData>,
+    /// Placement requested for this window when its command was spawned.
+    pub placement: Option<SpawnPlacement>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -87,6 +89,7 @@ impl Unmapped {
                 wants_maximized: false,
             },
             activation_token_data: None,
+            placement: None,
         }
     }
 

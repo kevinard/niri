@@ -84,6 +84,7 @@ impl CompositorHandler for State {
                         window,
                         state,
                         activation_token_data,
+                        placement,
                     } = entry.remove();
 
                     window.on_commit();
@@ -91,7 +92,7 @@ impl CompositorHandler for State {
                     let toplevel = window.toplevel().expect("no X11 support");
 
                     let (
-                        rules,
+                        mut rules,
                         width,
                         height,
                         is_full_width,
@@ -143,6 +144,12 @@ impl CompositorHandler for State {
                             false,
                         )
                     };
+
+                    // Already applied when configuring; this also covers windows that mapped
+                    // without a proper initial configure.
+                    if let Some(placement) = &placement {
+                        placement.apply_to_rules(&mut rules);
+                    }
 
                     // The GTK about dialog sets min/max size after the initial configure but
                     // before mapping, so we need to compute open_floating at the last possible
@@ -200,7 +207,41 @@ impl CompositorHandler for State {
                     };
                     let window = mapped.window.clone();
 
-                    let target = if let Some(p) = &parent {
+                    // A workspace requested when spawning wins over the parent and window rules,
+                    // as long as it still exists.
+                    let placement_workspace_id = placement
+                        .as_ref()
+                        .and_then(|p| p.workspace)
+                        .filter(|id| self.niri.layout.find_workspace_by_id(*id).is_some());
+                    // A requested column applies to tiled windows on the workspace they would
+                    // otherwise open on. Dialogs following their parent keep opening next to it.
+                    let placement_column = placement
+                        .as_ref()
+                        .and_then(|p| p.column_idx)
+                        .filter(|_| !is_floating)
+                        .and_then(|column_idx| {
+                            let ws_id = if let Some(id) = placement_workspace_id {
+                                Some(id)
+                            } else if parent.is_some() {
+                                None
+                            } else if let Some(id) = workspace_id {
+                                Some(id)
+                            } else if let Some(output) = &output {
+                                self.niri
+                                    .layout
+                                    .monitor_for_output(output)
+                                    .map(|mon| mon.active_workspace_ref().id())
+                            } else {
+                                self.niri.layout.active_workspace().map(|ws| ws.id())
+                            };
+                            ws_id.map(|id| (id, column_idx))
+                        });
+
+                    let target = if let Some((id, column_idx)) = placement_column {
+                        AddWindowTarget::WorkspaceColumn(id, column_idx)
+                    } else if let Some(id) = placement_workspace_id {
+                        AddWindowTarget::Workspace(id)
+                    } else if let Some(p) = &parent {
                         // Open dialogs next to their parent window.
                         AddWindowTarget::NextTo(p)
                     } else if let Some(id) = workspace_id {

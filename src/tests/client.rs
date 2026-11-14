@@ -15,6 +15,7 @@ use smithay::reexports::wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::
 use smithay::reexports::wayland_protocols::wp::single_pixel_buffer;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use smithay::reexports::wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
@@ -66,6 +67,7 @@ pub struct State {
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
     pub ksim: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
+    pub xdg_activation: Option<XdgActivationV1>,
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
@@ -267,6 +269,7 @@ impl Client {
             spbm: None,
             viewporter: None,
             ksim: None,
+            xdg_activation: None,
             windows: Vec::new(),
             layers: Vec::new(),
         };
@@ -431,6 +434,13 @@ impl State {
         let ksim = self.ksim.as_ref().unwrap();
         let seat = self.seats.keys().next().unwrap();
         ksim.inhibit_shortcuts(surface, seat, &self.qh, ())
+    }
+
+    /// Presents an activation token for the surface, like a spawned program does with
+    /// `XDG_ACTIVATION_TOKEN`.
+    pub fn activate(&self, token: &str, surface: &WlSurface) {
+        let xdg_activation = self.xdg_activation.as_ref().unwrap();
+        xdg_activation.activate(token.to_owned(), surface);
     }
 
     pub fn virtual_pointer(&mut self) -> ZwlrVirtualPointerV1 {
@@ -668,6 +678,9 @@ impl Dispatch<WlRegistry, ()> for State {
                         ZwpKeyboardShortcutsInhibitManagerV1::interface().version,
                     );
                     state.ksim = Some(registry.bind(name, version, qh, ()));
+                } else if interface == XdgActivationV1::interface().name {
+                    let version = min(version, XdgActivationV1::interface().version);
+                    state.xdg_activation = Some(registry.bind(name, version, qh, ()));
                 }
 
                 let global = Global {
@@ -1022,6 +1035,19 @@ impl Dispatch<WpViewport, ()> for State {
         _state: &mut Self,
         _proxy: &WpViewport,
         _event: <WpViewport as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<XdgActivationV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &XdgActivationV1,
+        _event: <XdgActivationV1 as wayland_client::Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,

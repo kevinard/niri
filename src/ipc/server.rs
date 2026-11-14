@@ -476,6 +476,13 @@ fn validate_action(action: &Action) -> Result<(), String> {
         }
     }
 
+    if let Action::SpawnPlaced { command, placement } = action {
+        if command.is_empty() {
+            return Err(String::from("command must not be empty"));
+        }
+        placement.validate()?;
+    }
+
     if let Action::LoadConfigFile { path: Some(path) } = action {
         let p = Path::new(path);
         if !p.is_file() {

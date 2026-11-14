@@ -45,7 +45,9 @@ use crate::utils::transaction::Transaction;
 use crate::utils::{
     get_monotonic_time, output_matches_name, send_scale_transform, update_tiled_state, ResizeEdge,
 };
-use crate::window::{InitialConfigureState, ResolvedWindowRules, Unmapped, WindowRef};
+use crate::window::{
+    InitialConfigureState, ResolvedWindowRules, SpawnPlacement, Unmapped, WindowRef,
+};
 
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -1085,13 +1087,21 @@ impl State {
         };
 
         let config = self.niri.config.borrow();
-        let rules = ResolvedWindowRules::compute(
+        let mut rules = ResolvedWindowRules::compute(
             &config.window_rules,
             WindowRef::Unmapped(unmapped),
             self.niri.is_at_startup,
         );
+        if let Some(placement) = &unmapped.placement {
+            placement.apply_to_rules(&mut rules);
+        }
 
-        let Unmapped { window, state, .. } = unmapped;
+        let Unmapped {
+            window,
+            state,
+            placement,
+            ..
+        } = unmapped;
 
         let InitialConfigureState::NotConfigured {
             wants_fullscreen,
@@ -1102,11 +1112,23 @@ impl State {
             return;
         };
 
+        // A workspace requested when spawning takes precedence over window rules.
+        let placement_ws = placement
+            .as_ref()
+            .and_then(|p| p.workspace)
+            .and_then(|id| self.niri.layout.find_workspace_by_id(id))
+            .map(|(_, ws)| ws);
+        let placement_mon = placement_ws
+            .and_then(|ws| ws.current_output())
+            .and_then(|o| self.niri.layout.monitor_for_output(o));
+
         // Pick the target monitor. First, check if we had a workspace set in the window rules.
-        let mon = rules
-            .open_on_workspace
-            .as_deref()
-            .and_then(|name| self.niri.layout.monitor_for_workspace(name));
+        let mon = placement_mon.or_else(|| {
+            rules
+                .open_on_workspace
+                .as_deref()
+                .and_then(|name| self.niri.layout.monitor_for_workspace(name))
+        });
 
         // If not, check if we had an output set in the window rules.
         let mon = mon.or_else(|| {
@@ -1164,14 +1186,16 @@ impl State {
         let is_floating = rules.compute_open_floating(toplevel);
 
         // Tell the surface the preferred size and bounds for its likely output.
-        let ws = rules
-            .open_on_workspace
-            .as_deref()
-            .and_then(|name| mon.map(|mon| mon.find_named_workspace(name)))
-            .unwrap_or_else(|| {
-                mon.map(|mon| mon.active_workspace_ref())
-                    .or_else(|| self.niri.layout.active_workspace())
-            });
+        let ws = placement_ws.or_else(|| {
+            rules
+                .open_on_workspace
+                .as_deref()
+                .and_then(|name| mon.map(|mon| mon.find_named_workspace(name)))
+                .unwrap_or_else(|| {
+                    mon.map(|mon| mon.active_workspace_ref())
+                        .or_else(|| self.niri.layout.active_workspace())
+                })
+        });
 
         let mut is_pending_maximized = false;
         if let Some(ws) = ws {
@@ -1247,6 +1271,100 @@ impl State {
                 }
             }
         });
+    }
+
+    /// Attaches a spawn placement to a toplevel that has not mapped yet.
+    ///
+    /// If the toplevel was already configured, it is configured again for the placement. Returns
+    /// `false` if the surface is not an unmapped toplevel.
+    pub fn set_unmapped_spawn_placement(
+        &mut self,
+        surface: &WlSurface,
+        placement: SpawnPlacement,
+    ) -> bool {
+        let Some(unmapped) = self.niri.unmapped_windows.get_mut(surface) else {
+            return false;
+        };
+
+        let toplevel = unmapped.window.toplevel().expect("no x11 support").clone();
+
+        match &mut unmapped.state {
+            InitialConfigureState::NotConfigured { .. } => {
+                // The initial configure will take the placement into account.
+            }
+            InitialConfigureState::Configured {
+                rules,
+                width,
+                height,
+                floating_width,
+                floating_height,
+                is_full_width,
+                output,
+                workspace_name,
+                ..
+            } => {
+                placement.apply_to_rules(rules);
+                if placement.width.is_some() {
+                    *is_full_width = false;
+                }
+
+                let placement_ws = placement
+                    .workspace
+                    .and_then(|id| self.niri.layout.find_workspace_by_id(id))
+                    .map(|(_, ws)| ws);
+                if let Some(ws) = placement_ws {
+                    if let Some(ws_output) = ws.current_output() {
+                        *output = Some(ws_output.clone());
+                    }
+                    *workspace_name = ws.name().cloned();
+                }
+
+                // Find the workspace similarly to the initial configure.
+                let ws = placement_ws.or_else(|| {
+                    let mon = output
+                        .as_ref()
+                        .and_then(|o| self.niri.layout.monitor_for_output(o));
+                    workspace_name
+                        .as_deref()
+                        .and_then(|name| self.niri.layout.find_workspace_by_name(name))
+                        .map(|(_, ws)| ws)
+                        .or_else(|| mon.map(|mon| mon.active_workspace_ref()))
+                        .or_else(|| self.niri.layout.active_workspace())
+                });
+
+                if let Some(ws) = ws {
+                    *width = ws.resolve_default_width(rules.default_width, false);
+                    *floating_width = ws.resolve_default_width(rules.default_width, true);
+
+                    let is_floating = rules.compute_open_floating(&toplevel);
+                    let configure_width = if is_floating {
+                        *floating_width
+                    } else if *is_full_width {
+                        Some(PresetSize::Proportion(1.))
+                    } else {
+                        *width
+                    };
+                    let configure_height = if is_floating {
+                        *floating_height
+                    } else {
+                        *height
+                    };
+                    ws.configure_new_window(
+                        &unmapped.window,
+                        configure_width,
+                        configure_height,
+                        is_floating,
+                        rules,
+                    );
+                }
+
+                // We already sent the initial configure, so reconfigure if anything changed.
+                toplevel.send_pending_configure();
+            }
+        }
+
+        unmapped.placement = Some(placement);
+        true
     }
 
     /// Should be called on `WlSurface::commit`
@@ -1435,11 +1553,14 @@ impl State {
         let window_rules = &config.window_rules;
 
         if let Some(unmapped) = self.niri.unmapped_windows.get_mut(toplevel.wl_surface()) {
-            let new_rules = ResolvedWindowRules::compute(
+            let mut new_rules = ResolvedWindowRules::compute(
                 window_rules,
                 WindowRef::Unmapped(unmapped),
                 self.niri.is_at_startup,
             );
+            if let Some(placement) = &unmapped.placement {
+                placement.apply_to_rules(&mut new_rules);
+            }
             if let InitialConfigureState::Configured { rules, .. } = &mut unmapped.state {
                 *rules = new_rules;
             }
