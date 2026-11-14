@@ -1,6 +1,7 @@
 use smithay::backend::input::{
-    Device, DeviceCapability, Event, InputBackend, InputTime, KeyState, KeyboardKeyEvent, Keycode,
-    UnusedEvent,
+    AbsolutePositionEvent, Device, DeviceCapability, Event, InputBackend, InputTime, KeyState,
+    KeyboardKeyEvent, Keycode, TouchCancelEvent, TouchDownEvent, TouchEvent, TouchFrameEvent,
+    TouchMotionEvent, TouchSlot, TouchUpEvent, UnusedEvent,
 };
 use smithay::output::Output;
 
@@ -36,11 +37,11 @@ impl InputBackend for TestInputBackend {
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
 
-    type TouchDownEvent = UnusedEvent;
-    type TouchUpEvent = UnusedEvent;
-    type TouchMotionEvent = UnusedEvent;
-    type TouchCancelEvent = UnusedEvent;
-    type TouchFrameEvent = UnusedEvent;
+    type TouchDownEvent = TestTouchEvent;
+    type TouchUpEvent = TestTouchEvent;
+    type TouchMotionEvent = TestTouchEvent;
+    type TouchCancelEvent = TestTouchEvent;
+    type TouchFrameEvent = TestTouchEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
     type TabletToolTipEvent = UnusedEvent;
@@ -61,7 +62,10 @@ impl Device for TestInputDevice {
     }
 
     fn has_capability(&self, capability: DeviceCapability) -> bool {
-        matches!(capability, DeviceCapability::Keyboard)
+        matches!(
+            capability,
+            DeviceCapability::Keyboard | DeviceCapability::Touch
+        )
     }
 
     fn usb_id(&self) -> Option<(u32, u32)> {
@@ -102,3 +106,51 @@ impl KeyboardKeyEvent<TestInputBackend> for TestKeyboardKeyEvent {
         self.count
     }
 }
+
+/// A touch event. The position is relative to the output size, from 0 to 1.
+pub struct TestTouchEvent {
+    pub time: InputTime,
+    pub slot: TouchSlot,
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Event<TestInputBackend> for TestTouchEvent {
+    fn time(&self) -> InputTime {
+        self.time
+    }
+
+    fn device(&self) -> <TestInputBackend as InputBackend>::Device {
+        TestInputDevice
+    }
+}
+
+impl TouchEvent<TestInputBackend> for TestTouchEvent {
+    fn slot(&self) -> TouchSlot {
+        self.slot
+    }
+}
+
+impl AbsolutePositionEvent<TestInputBackend> for TestTouchEvent {
+    fn x(&self) -> f64 {
+        self.x
+    }
+
+    fn y(&self) -> f64 {
+        self.y
+    }
+
+    fn x_transformed(&self, width: i32) -> f64 {
+        self.x * f64::from(width)
+    }
+
+    fn y_transformed(&self, height: i32) -> f64 {
+        self.y * f64::from(height)
+    }
+}
+
+impl TouchDownEvent<TestInputBackend> for TestTouchEvent {}
+impl TouchMotionEvent<TestInputBackend> for TestTouchEvent {}
+impl TouchUpEvent<TestInputBackend> for TestTouchEvent {}
+impl TouchFrameEvent<TestInputBackend> for TestTouchEvent {}
+impl TouchCancelEvent<TestInputBackend> for TestTouchEvent {}

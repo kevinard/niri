@@ -31,7 +31,8 @@ use smithay::input::pointer::{
 use smithay::input::tablet::tool::GrabStartData as TabletToolGrabStartData;
 use smithay::input::tablet::{TabletDescriptor, TabletSeatHandler, TabletSeatTrait};
 use smithay::input::touch::{
-    DownEvent, GrabStartData as TouchGrabStartData, MotionEvent as TouchMotionEvent, UpEvent,
+    DownEvent, GrabStartData as TouchGrabStartData, MotionEvent as TouchMotionEvent, TouchDownGrab,
+    UpEvent,
 };
 use smithay::input::{tablet, SeatHandler};
 use smithay::output::Output;
@@ -42,6 +43,7 @@ use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use smithay::wayland::virtual_keyboard::VirtualKeyboardDevice;
 use touch_overview_grab::TouchOverviewGrab;
+use touch_swipe::{FrameAction, TouchSwipeKind, UpAction};
 
 use self::move_grab::MoveGrab;
 use self::pick_color_grab::PickColorGrab;
@@ -76,6 +78,7 @@ pub mod scroll_tracker;
 pub mod spatial_movement_grab;
 pub mod swipe_tracker;
 pub mod touch_overview_grab;
+pub mod touch_swipe;
 
 use backend_ext::{NiriInputBackend as InputBackend, NiriInputDevice as _};
 
@@ -303,6 +306,10 @@ impl State {
 
     fn on_device_removed(&mut self, device: impl Device + 'static) {
         self.retire_pointer_device(&device);
+        if device.has_capability(DeviceCapability::Touch) && is_physical_touch(&device) {
+            // The touchscreen won't send the ups of its fingers anymore.
+            self.reset_touch_swipe();
+        }
         #[cfg(feature = "dbus")]
         crate::dbus::remote_input::touch::remove_device(self, &device);
         if device.has_capability(DeviceCapability::TabletTool) {
@@ -4712,6 +4719,17 @@ impl State {
         let Some(pos) = self.compute_touch_location(&evt) else {
             return;
         };
+        if is_physical_touch(&evt.device()) {
+            let allowed = self.touch_swipe_allowed();
+            let timestamp = Duration::from_micros(evt.time().micros());
+            if self
+                .niri
+                .touch_swipe
+                .down(evt.slot(), pos, timestamp, allowed)
+            {
+                return;
+            }
+        }
         self.touch_down_at(evt.slot(), pos, evt.time());
     }
 
@@ -4849,10 +4867,26 @@ impl State {
     where
         I::Device: 'static,
     {
+        let physical = is_physical_touch(&evt.device());
+        // Keep the remote touch slot bookkeeping even for touches of a swipe.
         #[cfg(feature = "dbus")]
-        if !remote_touch::is_device(&evt.device())
-            && !crate::dbus::remote_input::touch::physical_up(self, &evt.device(), evt.slot())
-        {
+        let owned = !physical
+            || crate::dbus::remote_input::touch::physical_up(self, &evt.device(), evt.slot());
+        #[cfg(not(feature = "dbus"))]
+        let owned = true;
+
+        if physical {
+            match self.niri.touch_swipe.up(evt.slot()) {
+                UpAction::Forward => (),
+                UpAction::Swallow => return,
+                UpAction::End(kind) => {
+                    self.end_touch_swipe(kind);
+                    return;
+                }
+            }
+        }
+
+        if !owned {
             return;
         }
         self.touch_up(evt.slot(), evt.time());
@@ -4893,6 +4927,12 @@ impl State {
         let Some(pos) = self.compute_touch_location(&evt) else {
             return;
         };
+        if is_physical_touch(&evt.device()) {
+            let timestamp = Duration::from_micros(evt.time().micros());
+            if self.niri.touch_swipe.motion(evt.slot(), pos, timestamp) {
+                return;
+            }
+        }
         self.touch_motion_at(evt.slot(), pos, evt.time());
     }
 
@@ -4961,19 +5001,192 @@ impl State {
         handle.frame(self);
     }
 
-    fn on_touch_frame<I: InputBackend>(&mut self, _evt: I::TouchFrameEvent) {
+    fn on_touch_frame<I: InputBackend>(&mut self, evt: I::TouchFrameEvent)
+    where
+        I::Device: 'static,
+    {
         let Some(handle) = self.niri.seat.get_touch() else {
             return;
         };
+
+        if is_physical_touch(&evt.device()) {
+            let allowed = self.niri.touch_swipe.is_tracking() && self.touch_swipe_allowed();
+            match self.niri.touch_swipe.frame(allowed) {
+                FrameAction::Forward => (),
+                FrameAction::Swallow => return,
+                FrameAction::Begin {
+                    kind,
+                    centroid,
+                    delta,
+                    timestamp,
+                } => {
+                    // Take the touches away from the overview grab and from clients. Clients
+                    // receive wl_touch.cancel in place of this frame.
+                    handle.with_grab(|_, grab| {
+                        if let Some(grab) = grab.as_any().downcast_ref::<TouchOverviewGrab>() {
+                            grab.abandon();
+                        }
+                    });
+                    handle.cancel(self);
+
+                    self.begin_touch_swipe(kind, centroid);
+                    self.update_touch_swipe(kind, delta, timestamp);
+                    return;
+                }
+                FrameAction::Update {
+                    kind,
+                    delta,
+                    timestamp,
+                } => {
+                    self.update_touch_swipe(kind, delta, timestamp);
+                    return;
+                }
+            }
+        }
+
         handle.frame(self);
     }
     fn on_touch_cancel<I: InputBackend>(&mut self, _evt: I::TouchCancelEvent) {
         #[cfg(feature = "dbus")]
         crate::dbus::remote_input::touch::physical_cancel(self);
+        self.reset_touch_swipe();
         let Some(handle) = self.niri.seat.get_touch() else {
             return;
         };
         handle.cancel(self);
+    }
+
+    /// Whether a multi-finger touchscreen swipe may start now.
+    fn touch_swipe_allowed(&self) -> bool {
+        if self.niri.config.borrow().gestures.touchscreen_swipe.off {
+            return false;
+        }
+
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.window_mru_ui.is_open()
+        {
+            return false;
+        }
+
+        // A remote touch lease shares the seat, and cancelling client touches would cancel the
+        // remote ones too.
+        #[cfg(feature = "dbus")]
+        if crate::dbus::remote_input::touch::has_leases(self) {
+            return false;
+        }
+
+        let Some(handle) = self.niri.seat.get_touch() else {
+            return false;
+        };
+
+        // Only the implicit grab of a touch down and an undecided overview touch can give way to
+        // a swipe. Other grabs (interactive move, drag-and-drop) keep their touches.
+        handle
+            .with_grab(|_, grab| {
+                let grab = grab.as_any();
+                grab.is::<TouchDownGrab<State>>()
+                    || grab
+                        .downcast_ref::<TouchOverviewGrab>()
+                        .is_some_and(TouchOverviewGrab::is_recognizing)
+            })
+            .unwrap_or(true)
+    }
+
+    fn begin_touch_swipe(&mut self, kind: TouchSwipeKind, centroid: Point<f64, Logical>) {
+        match kind {
+            TouchSwipeKind::ViewOffset => {
+                let output_ws = if self.niri.layout.is_overview_open() {
+                    self.niri.workspace_under(true, centroid)
+                } else {
+                    // We don't want to accidentally "catch" the wrong workspace during
+                    // animations.
+                    self.niri.output_under(centroid).and_then(|(output, _)| {
+                        let mon = self.niri.layout.monitor_for_output(output)?;
+                        Some((output.clone(), mon.active_workspace_ref()))
+                    })
+                };
+
+                if let Some((output, ws)) = output_ws {
+                    let ws_idx = self.niri.layout.find_workspace_by_id(ws.id()).unwrap().0;
+                    self.niri
+                        .layout
+                        .view_offset_gesture_begin(&output, Some(ws_idx), false);
+                }
+            }
+            TouchSwipeKind::WorkspaceSwitch => {
+                if let Some((output, _)) = self.niri.output_under(centroid) {
+                    let output = output.clone();
+                    self.niri
+                        .layout
+                        .workspace_switch_gesture_begin(&output, false);
+                }
+            }
+            TouchSwipeKind::Overview => {
+                self.niri.layout.overview_gesture_begin();
+                self.niri.queue_redraw_all();
+            }
+        }
+    }
+
+    fn update_touch_swipe(
+        &mut self,
+        kind: TouchSwipeKind,
+        delta: Point<f64, Logical>,
+        timestamp: Duration,
+    ) {
+        // The content follows the fingers, like with the touch overview gestures.
+        let layout = &mut self.niri.layout;
+        match kind {
+            TouchSwipeKind::ViewOffset => {
+                if let Some(Some(output)) =
+                    layout.view_offset_gesture_update(-delta.x, timestamp, false)
+                {
+                    self.niri.queue_redraw(&output);
+                }
+            }
+            TouchSwipeKind::WorkspaceSwitch => {
+                if let Some(Some(output)) =
+                    layout.workspace_switch_gesture_update(-delta.y, timestamp, false)
+                {
+                    self.niri.queue_redraw(&output);
+                }
+            }
+            TouchSwipeKind::Overview => {
+                // Swiping up opens the overview, like on a touchpad.
+                if layout.overview_gesture_update(-delta.y, timestamp) == Some(true) {
+                    self.niri.queue_redraw_all();
+                }
+            }
+        }
+    }
+
+    fn end_touch_swipe(&mut self, kind: TouchSwipeKind) {
+        let layout = &mut self.niri.layout;
+        match kind {
+            TouchSwipeKind::ViewOffset => {
+                if let Some(output) = layout.view_offset_gesture_end(Some(false)) {
+                    self.niri.queue_redraw(&output);
+                }
+            }
+            TouchSwipeKind::WorkspaceSwitch => {
+                if let Some(output) = layout.workspace_switch_gesture_end(Some(false)) {
+                    self.niri.queue_redraw(&output);
+                }
+            }
+            TouchSwipeKind::Overview => {
+                if layout.overview_gesture_end() {
+                    self.niri.queue_redraw_all();
+                }
+            }
+        }
+    }
+
+    /// Forgets the fingers of the touchscreen swipe recognizer, ending an ongoing swipe.
+    fn reset_touch_swipe(&mut self) {
+        if let Some(kind) = self.niri.touch_swipe.reset() {
+            self.end_touch_swipe(kind);
+        }
     }
 
     fn on_switch_toggle<I: InputBackend>(&mut self, evt: I::SwitchToggleEvent) {
@@ -5016,6 +5229,19 @@ impl Niri {
         retain_press_binds(&mut self.pending_release_binds);
         retain_press_binds(&mut self.pending_mouse_release_binds);
         retain_press_binds(&mut self.pending_tablet_release_binds);
+    }
+}
+
+/// Whether the touch device is a physical touchscreen rather than a remote touch lease.
+fn is_physical_touch(device: &dyn Any) -> bool {
+    #[cfg(feature = "dbus")]
+    {
+        !remote_touch::is_device(device)
+    }
+    #[cfg(not(feature = "dbus"))]
+    {
+        let _ = device;
+        true
     }
 }
 
