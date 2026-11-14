@@ -740,6 +740,10 @@ fn print_window(window: &Window) {
         println!("  Workspace ID: (none)");
     }
 
+    if let Some(parent_id) = window.parent_id {
+        println!("  Parent window ID: {parent_id}");
+    }
+
     let WindowLayout {
         pos_in_scrolling_layout,
         tile_size,
