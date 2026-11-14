@@ -25,6 +25,8 @@ Windows can also control maximizing-to-edges: when you click on the square icon 
 
 You can put multiple maximized windows into a [tabbed column](./Tabs.md), but not into a regular column.
 
+A fullscreen or maximized [pinned column](./Pinned-Columns.md) keeps its pin, but scrolls like an ordinary column at its end of the workspace until it returns to normal.
+
 ![Screenshot of a window maximized to edges.](./img/window-maximized-to-edges.png)
 
 You can make a window open maximized-to-edges, or prevent a window from maximizing upon opening, with the [`open-maximized-to-edges`](./Configuration:-Window-Rules.md#open-maximized-to-edges) window rule.

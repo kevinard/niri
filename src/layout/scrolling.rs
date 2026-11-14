@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use niri_config::utils::MergeWith as _;
 use niri_config::{CenterFocusedColumn, PresetSize, Struts};
-use niri_ipc::{ColumnDisplay, SizeChange, WindowLayout};
+use niri_ipc::{ColumnDisplay, PinSide, SizeChange, WindowLayout};
 use ordered_float::NotNan;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
@@ -25,13 +25,28 @@ use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::RenderCtx;
 use crate::utils::id::IdCounter;
 use crate::utils::transaction::{Transaction, TransactionBlocker};
-use crate::utils::ResizeEdge;
+use crate::utils::{round_logical_in_physical, ResizeEdge};
 use crate::window::ResolvedWindowRules;
 
 /// Amount of touchpad movement to scroll the view for the width of one working area.
 const VIEW_GESTURE_WORKING_AREA_MOVEMENT: f64 = 1200.;
 
+/// Largest fraction of the working area width that pinned columns may reserve.
+///
+/// Pinned columns that are wider than this still draw at their edges, but overlap the scrolling
+/// columns instead of squeezing them into nothing.
+const MAX_PINNED_FRACTION: f64 = 0.75;
+
 /// A scrollable-tiling space for windows.
+///
+/// A column can be pinned to the left or right edge of the view. Pinned columns stay in
+/// `columns` so that indices, focus movement and IPC positions keep working, but they always sit
+/// at the ends: a column pinned to the left is at index 0 and a column pinned to the right is at
+/// the last index. While a pinned column is in the normal sizing mode, it is taken out of the
+/// scrolling strip (it has no width in [`Self::column_xs`]), it is drawn at its edge of the view,
+/// and the working area of the other columns shrinks by its width plus a gap. A fullscreen or
+/// maximized pinned column keeps its pin but behaves like an ordinary column at its end of the
+/// strip until it returns to the normal sizing mode.
 #[derive(Debug)]
 pub struct ScrollingSpace<W: LayoutElement> {
     /// Columns of windows on this space.
@@ -74,10 +89,17 @@ pub struct ScrollingSpace<W: LayoutElement> {
     /// View size for this space.
     view_size: Size<f64, Logical>,
 
-    /// Working area for this space.
+    /// Working area for the scrolling columns of this space.
     ///
-    /// Takes into account layer-shell exclusive zones and niri struts.
+    /// Takes into account layer-shell exclusive zones and niri struts, and leaves out the space
+    /// taken by pinned columns.
     working_area: Rectangle<f64, Logical>,
+
+    /// Working area for this space including the space taken by pinned columns.
+    ///
+    /// Takes into account layer-shell exclusive zones and niri struts. Pinned columns size and
+    /// position themselves within this area. Equal to `working_area` when nothing is pinned.
+    full_working_area: Rectangle<f64, Logical>,
 
     /// Working area for this space excluding struts.
     ///
@@ -108,6 +130,10 @@ niri_render_elements! {
 struct ColumnData {
     /// Cached actual column width.
     width: f64,
+    /// Cached edge the column is drawn at, if it is pinned and in the normal sizing mode.
+    ///
+    /// Such columns are left out of the scrolling strip.
+    pinned: Option<PinSide>,
 }
 
 #[derive(Debug)]
@@ -240,6 +266,11 @@ pub struct Column<W: LayoutElement> {
 
     /// Unique ID of this column.
     id: ColumnId,
+
+    /// Edge of the view this column is pinned to.
+    ///
+    /// Managed by the [`ScrollingSpace`]; cleared when the column leaves its workspace.
+    pinned: Option<PinSide>,
 }
 
 /// Extra per-tile data.
@@ -302,6 +333,17 @@ pub enum ScrollDirection {
     Right,
 }
 
+/// How scrolling columns follow a change of the left edge of the scrolling area.
+#[derive(Debug, Clone, Copy)]
+enum StripShift {
+    /// Leave the view as is.
+    None,
+    /// Move the scrolling columns together with the edge.
+    Jump,
+    /// Move the scrolling columns together with the edge, animating the movement.
+    Animate(niri_config::Animation),
+}
+
 #[derive(Debug)]
 struct MoveAnimation {
     anim: Animation,
@@ -333,6 +375,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             closing_windows: Vec::new(),
             view_size,
             working_area,
+            full_working_area: working_area,
             parent_area,
             scale,
             clock,
@@ -347,18 +390,38 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         scale: f64,
         options: Rc<Options>,
     ) {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let full_working_area = compute_working_area(parent_area, scale, options.layout.struts);
 
+        // Pinned columns size themselves within the whole working area.
         for (column, data) in zip(&mut self.columns, &mut self.data) {
-            column.update_config(view_size, working_area, parent_area, scale, options.clone());
-            data.update(column);
+            if column.pinned.is_some() {
+                let area = full_working_area;
+                column.update_config(view_size, area, parent_area, scale, options.clone());
+                data.update(column);
+            }
         }
 
         self.view_size = view_size;
-        self.working_area = working_area;
+        self.full_working_area = full_working_area;
         self.parent_area = parent_area;
         self.scale = scale;
         self.options = options;
+
+        // The other columns get the space that the pinned columns leave.
+        let working_area = self.compute_scrolling_area();
+        self.working_area = working_area;
+        for (column, data) in zip(&mut self.columns, &mut self.data) {
+            if column.pinned.is_none() {
+                column.update_config(
+                    view_size,
+                    working_area,
+                    parent_area,
+                    scale,
+                    self.options.clone(),
+                );
+                data.update(column);
+            }
+        }
 
         // Apply always-center and such right away.
         if !self.columns.is_empty() && !self.view_offset.is_gesture() {
@@ -427,10 +490,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn update_render_elements(&mut self, is_active: bool, layer: RenderLayer) {
-        let view_pos = Point::from((self.view_pos(), 0.));
+        let view_pos = self.view_pos();
+        let col_xs = self.column_render_xs(view_pos);
+        let view_pos = Point::from((view_pos, 0.));
         let view_size = self.view_size;
         let active_idx = self.active_column_idx;
-        for (col_idx, (col, col_x)) in self.columns_mut().enumerate() {
+        for (col_idx, (col, col_x)) in zip(&mut self.columns, col_xs).enumerate() {
             // Skip columns belonging to a different render layer.
             if layer.is_normal() == col.is_moving_between_workspaces() {
                 continue;
@@ -454,6 +519,355 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
+    }
+
+    pub fn has_window(&self, window: &W::Id) -> bool {
+        self.columns.iter().any(|col| col.contains(window))
+    }
+
+    /// Returns the range of column indices that are not pinned, as `start..end`.
+    ///
+    /// New and moved columns always go within (or at the end of) this range.
+    fn scrolling_range(&self) -> (usize, usize) {
+        let len = self.columns.len();
+        let start = usize::from(
+            self.columns
+                .first()
+                .is_some_and(|col| col.pinned == Some(PinSide::Left)),
+        );
+        let end = len
+            - usize::from(
+                len > start
+                    && self
+                        .columns
+                        .last()
+                        .is_some_and(|col| col.pinned == Some(PinSide::Right)),
+            );
+        (start, end)
+    }
+
+    /// Clamps a new column index so that it does not go past a pinned column.
+    fn clamp_insert_idx(&self, idx: usize) -> usize {
+        let (start, end) = self.scrolling_range();
+        idx.clamp(start, end)
+    }
+
+    /// Returns whether any column scrolls (is not pinned in place).
+    fn has_scrolling_columns(&self) -> bool {
+        self.data.iter().any(|data| data.pinned.is_none())
+    }
+
+    fn column_idx_for_window(&self, window: Option<&W::Id>) -> Option<usize> {
+        match window {
+            Some(window) => self.columns.iter().position(|col| col.contains(window)),
+            None => (!self.columns.is_empty()).then_some(self.active_column_idx),
+        }
+    }
+
+    /// Returns the space that pinned columns take at the left and right of the working area.
+    fn pinned_reserves(&self) -> (f64, f64) {
+        let gaps = self.options.layout.gaps;
+
+        let mut left = 0.;
+        let mut right = 0.;
+        for data in &self.data {
+            match data.pinned {
+                Some(PinSide::Left) => left = data.width + gaps,
+                Some(PinSide::Right) => right = data.width + gaps,
+                None => (),
+            }
+        }
+
+        let max = self.full_working_area.size.w * MAX_PINNED_FRACTION;
+        let total = left + right;
+        if total > max {
+            let factor = max / total;
+            left *= factor;
+            right *= factor;
+        }
+
+        (
+            round_logical_in_physical(self.scale, left),
+            round_logical_in_physical(self.scale, right),
+        )
+    }
+
+    /// Computes the working area left for the scrolling columns.
+    fn compute_scrolling_area(&self) -> Rectangle<f64, Logical> {
+        let (left, right) = self.pinned_reserves();
+        let mut area = self.full_working_area;
+        area.loc.x += left;
+        area.size.w = f64::max(0., area.size.w - left - right);
+        area
+    }
+
+    /// Updates the working area of the scrolling columns after pinned columns changed.
+    ///
+    /// Gives every column the area it sizes itself within: the whole working area for pinned
+    /// columns and the scrolling area for the others. Returns whether the scrolling area changed.
+    fn update_scrolling_area(&mut self, shift: StripShift) -> bool {
+        let old_area = self.working_area;
+        let area = self.compute_scrolling_area();
+        self.working_area = area;
+
+        let full = self.full_working_area;
+        for (col, data) in zip(&mut self.columns, &mut self.data) {
+            let col_area = if col.pinned.is_some() { full } else { area };
+            if col.working_area != col_area {
+                col.working_area = col_area;
+                col.update_tile_sizes(true);
+                data.update(col);
+            }
+        }
+
+        if area == old_area {
+            return false;
+        }
+
+        // When the left edge of the scrolling area moves, optionally move the scrolling columns
+        // with it so that they keep their place next to a pinned column.
+        let delta = area.loc.x - old_area.loc.x;
+        if !self.columns.is_empty() && delta != 0. {
+            match shift {
+                StripShift::None => (),
+                StripShift::Jump => self.view_offset.offset(-delta),
+                StripShift::Animate(config) => {
+                    self.view_offset.offset(-delta);
+                    for col in &mut self.columns {
+                        col.animate_move_x_from_with_config(-delta, config);
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Updates the scrolling area and keeps the active column in view if the area changed.
+    fn sync_scrolling_area(&mut self, shift: StripShift) {
+        if self.update_scrolling_area(shift) {
+            self.refit_active_column();
+        }
+    }
+
+    fn refit_active_column(&mut self) {
+        if self.columns.is_empty()
+            || self.interactive_resize.is_some()
+            || self.view_offset.is_gesture()
+        {
+            return;
+        }
+
+        self.animate_view_offset_to_column(None, self.active_column_idx, None);
+    }
+
+    /// Returns the X of each column in the strip space of [`Self::column_xs`], with columns
+    /// pinned in place moved to their edge of a view at `view_pos`.
+    ///
+    /// Subtracting `view_pos` gives the column position in the view.
+    fn column_render_xs(&self, view_pos: f64) -> Vec<f64> {
+        let area = self.full_working_area;
+        let gaps = self.options.layout.gaps;
+        zip(self.column_xs(self.data.iter().copied()), &self.data)
+            .map(|(x, data)| match data.pinned {
+                Some(side) => view_pos + pinned_view_x(area, gaps, side, data.width),
+                None => x,
+            })
+            .collect()
+    }
+
+    /// Returns each column's position in the view, excluding render offsets.
+    fn column_view_xs(&self) -> Vec<(ColumnId, f64)> {
+        let view_pos = self.view_pos();
+        zip(&self.columns, self.column_render_xs(view_pos))
+            .map(|(col, x)| (col.id(), x - view_pos))
+            .collect()
+    }
+
+    /// Returns the column indices in render order, topmost first.
+    ///
+    /// The active column comes first, as without pinning. Columns pinned in place draw above the
+    /// scrolling columns, since those scroll underneath them; they draw below the active column
+    /// only when it is fullscreen or maximized (or pinned itself).
+    fn column_render_order(&self) -> Vec<usize> {
+        let len = self.columns.len();
+        let mut order = Vec::with_capacity(len);
+        if len == 0 {
+            return order;
+        }
+
+        let active = self.active_column_idx;
+        let active_on_top =
+            self.data[active].pinned.is_some() || !self.columns[active].sizing_mode().is_normal();
+
+        if active_on_top {
+            order.push(active);
+        }
+        order.extend((0..len).filter(|&idx| idx != active && self.data[idx].pinned.is_some()));
+        if !active_on_top {
+            order.push(active);
+        }
+        order.extend((0..len).filter(|&idx| idx != active && self.data[idx].pinned.is_none()));
+        order
+    }
+
+    /// Pins the column to an edge of the view.
+    ///
+    /// The column moves to that end of the column list and stays on screen while the other
+    /// columns scroll. A column already pinned to that edge is unpinned and becomes the first (or
+    /// last) scrolling column.
+    pub fn pin_column(&mut self, window: Option<&W::Id>, side: PinSide) {
+        let Some(col_idx) = self.column_idx_for_window(window) else {
+            return;
+        };
+        if self.columns[col_idx].pinned == Some(side) {
+            return;
+        }
+
+        let old_xs = self.column_view_xs();
+        let active_id = self.columns[self.active_column_idx].id();
+        let col_id = self.columns[col_idx].id();
+
+        // Remember the columns next to this one, to keep one of them in place on screen.
+        let neighbors: Vec<ColumnId> = [col_idx.checked_add(1), col_idx.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|idx| self.columns.get(idx).map(Column::id))
+            .collect();
+
+        if let Some(other) = self.columns.iter().position(|c| c.pinned == Some(side)) {
+            self.columns[other].pinned = None;
+            let col = &self.columns[other];
+            self.data[other].update(col);
+        }
+
+        let mut column = self.columns.remove(col_idx);
+        let mut data = self.data.remove(col_idx);
+        cancel_resize_for_column(&mut self.interactive_resize, &mut column);
+        column.pinned = Some(side);
+        data.update(&column);
+
+        let target_idx = match side {
+            PinSide::Left => 0,
+            PinSide::Right => self.columns.len(),
+        };
+        self.columns.insert(target_idx, column);
+        self.data.insert(target_idx, data);
+
+        self.active_column_idx = self
+            .columns
+            .iter()
+            .position(|col| col.id() == active_id)
+            .unwrap();
+        self.activate_prev_column_on_removal = None;
+        if col_id == active_id {
+            // The saved offset was relative to the column's old place in the strip.
+            self.view_offset_to_restore = None;
+        }
+
+        self.update_scrolling_area(StripShift::None);
+
+        let anchor = if self.data[self.active_column_idx].pinned.is_none() {
+            Some(active_id)
+        } else {
+            neighbors.into_iter().find(|id| {
+                self.columns
+                    .iter()
+                    .zip(&self.data)
+                    .any(|(col, data)| col.id() == *id && data.pinned.is_none())
+            })
+        };
+        self.reposition_after_pinning(&old_xs, anchor);
+    }
+
+    /// Unpins the column, returning it to the scrolling columns at the end it was pinned to.
+    pub fn unpin_column(&mut self, window: Option<&W::Id>) {
+        let Some(col_idx) = self.column_idx_for_window(window) else {
+            return;
+        };
+        if self.columns[col_idx].pinned.is_none() {
+            return;
+        }
+
+        let old_xs = self.column_view_xs();
+        let col_id = self.columns[col_idx].id();
+
+        let col = &mut self.columns[col_idx];
+        cancel_resize_for_column(&mut self.interactive_resize, col);
+        col.pinned = None;
+        self.data[col_idx].update(col);
+
+        self.update_scrolling_area(StripShift::None);
+
+        // Keep the active column where it is on screen. If the active column is pinned (or is the
+        // one being unpinned), keep the unpinned column in place instead, so the strip continues
+        // from where it is drawn now.
+        let active = self.active_column_idx;
+        let anchor = if active == col_idx || self.data[active].pinned.is_some() {
+            col_id
+        } else {
+            self.columns[active].id()
+        };
+        self.reposition_after_pinning(&old_xs, Some(anchor));
+    }
+
+    /// Unpins the column if it is pinned, otherwise pins it to the given edge.
+    pub fn toggle_pinned_column(&mut self, window: Option<&W::Id>, side: PinSide) {
+        let Some(col_idx) = self.column_idx_for_window(window) else {
+            return;
+        };
+
+        if self.columns[col_idx].pinned.is_some() {
+            self.unpin_column(window);
+        } else {
+            self.pin_column(window, side);
+        }
+    }
+
+    /// Updates the view after columns were pinned or unpinned.
+    ///
+    /// Keeps the anchor column at its previous position on screen, animates every column from
+    /// its previous position, then brings the active column into view (or the anchor, when the
+    /// active column is pinned and the view does not follow it).
+    fn reposition_after_pinning(&mut self, old_xs: &[(ColumnId, f64)], anchor: Option<ColumnId>) {
+        if self.columns.is_empty() {
+            return;
+        }
+
+        let active = self.active_column_idx;
+        let anchor_idx = anchor
+            .and_then(|id| self.columns.iter().position(|col| col.id() == id))
+            .filter(|&idx| self.data[idx].pinned.is_none());
+
+        if let Some(anchor_idx) = anchor_idx {
+            let id = self.columns[anchor_idx].id();
+            if let Some(&(_, old_x)) = old_xs.iter().find(|(old_id, _)| *old_id == id) {
+                let view_pos = self.column_x(anchor_idx) - old_x;
+                self.view_offset = ViewOffset::Static(view_pos - self.view_anchor_x(active));
+            }
+        }
+
+        let config = self.options.animations.window_movement.0;
+        let new_xs = self.column_view_xs();
+        for (col, (id, new_x)) in zip(&mut self.columns, new_xs) {
+            if let Some(&(_, old_x)) = old_xs.iter().find(|(old_id, _)| *old_id == id) {
+                if old_x != new_x {
+                    col.start_move_x_animation(old_x - new_x, config);
+                }
+            }
+        }
+
+        if self.interactive_resize.is_some() {
+            return;
+        }
+
+        if self.data[active].pinned.is_none() {
+            self.animate_view_offset_to_column(None, active, None);
+        } else if let Some(anchor_idx) = anchor_idx {
+            let offset = self.compute_new_view_offset_for_column(None, anchor_idx, None);
+            let view_pos = self.column_x(anchor_idx) + offset;
+            self.animate_view_offset(active, view_pos - self.view_anchor_x(active));
+        }
     }
 
     pub fn active_window(&self) -> Option<&W> {
@@ -573,8 +987,22 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn is_centering_focused_column(&self) -> bool {
+        // Columns pinned in place don't count: they don't share the scrolling area.
         self.options.layout.center_focused_column == CenterFocusedColumn::Always
-            || (self.options.layout.always_center_single_column && self.columns.len() <= 1)
+            || (self.options.layout.always_center_single_column
+                && self
+                    .data
+                    .iter()
+                    .filter(|data| data.pinned.is_none())
+                    .count()
+                    <= 1)
+    }
+
+    /// Returns the view offset for a column pinned in place: the one that keeps the view where it
+    /// is, since the pinned column is always on screen.
+    fn compute_view_offset_keeping_view(&self, target_x: Option<f64>, idx: usize) -> f64 {
+        let target_x = target_x.unwrap_or_else(|| self.target_view_pos());
+        target_x - self.view_anchor_x(idx)
     }
 
     fn compute_new_view_offset_fit(
@@ -629,6 +1057,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     fn compute_new_view_offset_for_column_fit(&self, target_x: Option<f64>, idx: usize) -> f64 {
+        if self.data[idx].pinned.is_some() {
+            return self.compute_view_offset_keeping_view(target_x, idx);
+        }
+
         let col = &self.columns[idx];
         self.compute_new_view_offset_fit(
             target_x,
@@ -643,6 +1075,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         target_x: Option<f64>,
         idx: usize,
     ) -> f64 {
+        if self.data[idx].pinned.is_some() {
+            return self.compute_view_offset_keeping_view(target_x, idx);
+        }
+
         let col = &self.columns[idx];
         self.compute_new_view_offset_centered(
             target_x,
@@ -682,6 +1118,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 } else {
                     idx.saturating_sub(1)
                 };
+
+                // A pinned neighbor is always on screen, so it doesn't need to fit with the target.
+                if self.data[source_idx].pinned.is_some() {
+                    return self.compute_new_view_offset_for_column_fit(target_x, idx);
+                }
 
                 let source_col_x = self.column_x(source_idx);
                 let source_col_width = self.columns[source_idx].width();
@@ -726,8 +1167,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         new_view_offset: f64,
         config: niri_config::Animation,
     ) {
-        let new_col_x = self.column_x(idx);
-        let old_col_x = self.column_x(self.active_column_idx);
+        let new_col_x = self.view_anchor_x(idx);
+        let old_col_x = self.view_anchor_x(self.active_column_idx);
         let offset_delta = old_col_x - new_col_x;
         self.view_offset.offset(offset_delta);
 
@@ -838,57 +1279,62 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return InsertPosition::NewColumn(0);
         }
 
+        let gaps = self.options.layout.gaps;
+
+        // Aim for the center of the gap.
+        let y = pos.y + gaps / 2.;
+
+        // Columns pinned in place cover their part of the view.
+        for (col_idx, data) in self.data.iter().enumerate() {
+            let Some(side) = data.pinned else {
+                continue;
+            };
+
+            let col_x = self.pinned_view_x(side, data.width);
+            if col_x - gaps / 2. <= pos.x && pos.x < col_x + data.width + gaps / 2. {
+                let (tile_idx, _) = self.columns[col_idx].closest_tile_gap(y);
+                return InsertPosition::InColumn(col_idx, tile_idx);
+            }
+        }
+
+        // New columns go between the pinned columns.
+        let (start, end) = self.scrolling_range();
+
         let x = pos.x + self.view_pos();
 
         // Aim for the center of the gap.
-        let x = x + self.options.layout.gaps / 2.;
-        let y = pos.y + self.options.layout.gaps / 2.;
+        let x = x + gaps / 2.;
 
         // Insert position is before the first column.
         if x < 0. {
-            return InsertPosition::NewColumn(0);
+            return InsertPosition::NewColumn(start);
         }
 
+        let col_xs = || {
+            self.column_xs(self.data.iter().copied())
+                .enumerate()
+                .take(end + 1)
+                .skip(start)
+        };
+
         // Find the closest gap between columns.
-        let (closest_col_idx, col_x) = self
-            .column_xs(self.data.iter().copied())
-            .enumerate()
+        let (closest_col_idx, col_x) = col_xs()
             .min_by_key(|(_, col_x)| NotNan::new((col_x - x).abs()).unwrap())
             .unwrap();
 
         // Find the column containing the position.
-        let (col_idx, _) = self
-            .column_xs(self.data.iter().copied())
-            .enumerate()
+        let (col_idx, _) = col_xs()
             .take_while(|(_, col_x)| *col_x <= x)
             .last()
-            .unwrap_or((0, 0.));
+            .unwrap_or((start, 0.));
 
         // Insert position is past the last column.
-        if col_idx == self.columns.len() {
+        if col_idx == end {
             return InsertPosition::NewColumn(closest_col_idx);
         }
 
         // Find the closest gap between tiles.
-        let col = &self.columns[col_idx];
-
-        let (closest_tile_idx, tile_y) = if col.display_mode == ColumnDisplay::Tabbed {
-            // In tabbed mode, there's only one tile visible, and we want to check its top and
-            // bottom.
-            let top = col.tile_offsets().nth(col.active_tile_idx).unwrap().y;
-            let bottom = top + col.data[col.active_tile_idx].size.h;
-            if (top - y).abs() <= (bottom - y).abs() {
-                (col.active_tile_idx, top)
-            } else {
-                (col.active_tile_idx + 1, bottom)
-            }
-        } else {
-            col.tile_offsets()
-                .map(|tile_off| tile_off.y)
-                .enumerate()
-                .min_by_key(|(_, tile_y)| NotNan::new((tile_y - y).abs()).unwrap())
-                .unwrap()
-        };
+        let (closest_tile_idx, tile_y) = self.columns[col_idx].closest_tile_gap(y);
 
         // Return the closest among the vertical and the horizontal gap.
         let vert_dist = (col_x - x).abs();
@@ -966,7 +1412,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Adding a wider window into a column increases its width now (even if the window will
         // shrink later). Move the columns to account for this.
         let offset = self.column_x(col_idx + 1) - prev_next_x;
-        if self.active_column_idx <= col_idx {
+        if self.view_anchor_idx() <= col_idx {
             for col in &mut self.columns[col_idx + 1..] {
                 col.animate_move_x_from(-offset);
             }
@@ -975,6 +1421,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 col.animate_move_x_from(offset);
             }
         }
+
+        // A pinned column can change its width (or stop being pinned in place) here.
+        let config = self.options.animations.window_movement.0;
+        self.sync_scrolling_area(StripShift::Animate(config));
     }
 
     pub fn add_tile_right_of(
@@ -1004,6 +1454,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         anim_config: Option<niri_config::Animation>,
     ) {
         let was_empty = self.columns.is_empty();
+        let had_scrolling_columns = self.has_scrolling_columns();
 
         let idx = idx.unwrap_or_else(|| {
             if was_empty {
@@ -1012,7 +1463,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 self.active_column_idx + 1
             }
         });
+        // Columns pinned to an edge stay at the ends.
+        let idx = self.clamp_insert_idx(idx);
 
+        // A column coming from elsewhere does not bring its pin along.
+        column.pinned = None;
         column.update_config(
             self.view_size,
             self.working_area,
@@ -1030,7 +1485,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Animate movement of other columns.
         let offset = self.column_x(idx + 1) - self.column_x(idx);
         let config = anim_config.unwrap_or(self.options.animations.window_movement.0);
-        if self.active_column_idx <= idx {
+        if self.view_anchor_idx() <= idx {
             for col in &mut self.columns[idx + 1..] {
                 col.animate_move_x_from_with_config(-offset, config);
             }
@@ -1047,6 +1502,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 self.view_offset = ViewOffset::Static(0.);
                 self.view_offset =
                     ViewOffset::Static(self.compute_new_view_offset_for_column(None, idx, None));
+            } else if !had_scrolling_columns {
+                // Only pinned columns were there: place the view as for the first column on an
+                // empty workspace, keeping it relative to the active (pinned) column.
+                let col_x = self.column_x(idx);
+                let offset = self.compute_new_view_offset_for_column(Some(col_x), idx, None);
+                let active_x = self.view_anchor_x(self.active_column_idx);
+                self.view_offset = ViewOffset::Static(col_x + offset - active_x);
             }
 
             let prev_offset = (!was_empty && idx == self.active_column_idx + 1)
@@ -1160,7 +1622,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let offset = prev_width - column.width();
 
         // Animate movement of the other columns.
-        if self.active_column_idx <= column_idx {
+        if self.view_anchor_idx() <= column_idx {
             for col in &mut self.columns[column_idx + 1..] {
                 col.animate_move_x_from_with_config(offset, movement_config);
             }
@@ -1169,6 +1631,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 col.animate_move_x_from_with_config(-offset, movement_config);
             }
         }
+
+        // A pinned column can change its width (or start being pinned in place) here.
+        self.sync_scrolling_area(StripShift::Animate(movement_config));
 
         tile
     }
@@ -1197,7 +1662,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Animate movement of the other columns.
         let movement_config = anim_config.unwrap_or(self.options.animations.window_movement.0);
         let offset = self.column_x(column_idx + 1) - self.column_x(column_idx);
-        if self.active_column_idx <= column_idx {
+        if self.view_anchor_idx() <= column_idx {
             for col in &mut self.columns[column_idx + 1..] {
                 col.animate_move_x_from_with_config(offset, movement_config);
             }
@@ -1207,8 +1672,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             }
         }
 
-        let column = self.columns.remove(column_idx);
-        self.data.remove(column_idx);
+        let mut column = self.columns.remove(column_idx);
+        let removed_data = self.data.remove(column_idx);
+
+        // A column leaving the workspace (or merging into another column) is no longer pinned.
+        column.pinned = None;
+
+        // While a pinned column was focused, the view was relative to the start of the strip (see
+        // view_anchor_x()). The code below treats the view as relative to the removed column's X
+        // in the strip, so convert it to keep the view in place.
+        if column_idx == self.active_column_idx && removed_data.pinned.is_some() {
+            self.view_offset.offset(-self.column_x(column_idx));
+        }
 
         // Stop interactive resize.
         if let Some(resize) = &self.interactive_resize {
@@ -1232,6 +1707,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         if self.columns.is_empty() {
+            self.update_scrolling_area(StripShift::None);
             return column;
         }
 
@@ -1272,10 +1748,25 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             );
         }
 
+        // When a pinned column goes away, the scrolling columns take over its space: move them
+        // together with the edge so they fill it.
+        let shift = if removed_data.pinned.is_some() {
+            StripShift::Animate(movement_config)
+        } else {
+            StripShift::None
+        };
+        self.sync_scrolling_area(shift);
+
         column
     }
 
     pub fn update_window(&mut self, window: &W::Id, serial: Option<Serial>) {
+        let old_anchor_x = if self.columns.is_empty() {
+            0.
+        } else {
+            self.view_anchor_x(self.active_column_idx)
+        };
+
         let (col_idx, column) = self
             .columns
             .iter_mut()
@@ -1300,17 +1791,20 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let prev_width = self.data[col_idx].width;
+        let was_pinned = self.data[col_idx].pinned.is_some();
 
         column.update_window(window);
         self.data[col_idx].update(column);
         column.update_tile_sizes(false);
 
         let offset = prev_width - self.data[col_idx].width;
+        let is_pinned = self.data[col_idx].pinned.is_some();
 
-        // Move other columns in tandem with resizing.
+        // Move other columns in tandem with resizing. A column pinned in place takes no space in
+        // the strip; the scrolling area update below handles it instead.
         let ongoing_resize_anim = column.tiles[tile_idx].resize_animation().is_some();
-        if offset != 0. {
-            if self.active_column_idx <= col_idx {
+        if offset != 0. && !was_pinned && !is_pinned {
+            if self.view_anchor_idx() <= col_idx {
                 for col in &mut self.columns[col_idx + 1..] {
                     // If there's a resize animation on the tile (that may have just started in
                     // column.update_window()), then the apparent size change is smooth with no
@@ -1365,11 +1859,39 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             }
         }
 
+        // A pinned column resizing, or going in or out of fullscreen, changes the space left for
+        // the scrolling columns. While it stays pinned in place, the scrolling columns move
+        // together with its inner edge. When it goes in or out of fullscreen, the view is handled
+        // below like for any other column (including the saved unfullscreen view offset).
+        let shift = if was_pinned && is_pinned {
+            if ongoing_resize_anim {
+                StripShift::Animate(self.options.animations.window_resize.anim)
+            } else {
+                StripShift::Jump
+            }
+        } else {
+            StripShift::None
+        };
+        let area_changed = self.update_scrolling_area(shift);
+
         if col_idx == self.active_column_idx {
+            // A pinned column going in or out of fullscreen changes what the view offset is
+            // relative to (see view_anchor_x()). Keep the view where it is.
+            let anchor_delta = old_anchor_x - self.view_anchor_x(col_idx);
+            if anchor_delta != 0. {
+                self.view_offset.offset(anchor_delta);
+            }
+
             // If offset == 0, then don't mess with the view or the gesture. Some clients (Firefox,
             // Chromium, Electron) currently don't commit after the ack of a configure that drops
             // the Resizing state, which can trigger this code path for a while.
-            let resize = if offset != 0. { resize } else { None };
+            //
+            // A column pinned in place does not scroll, so its resizes don't move the view.
+            let resize = if offset != 0. && !is_pinned {
+                resize
+            } else {
+                None
+            };
             if let Some(resize) = resize {
                 // Don't bother with the gesture.
                 self.view_offset.cancel_gesture();
@@ -1396,7 +1918,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // When the active column goes fullscreen, store the view offset to restore later.
             let is_normal = self.columns[col_idx].sizing_mode().is_normal();
             if was_normal && !is_normal {
-                self.view_offset_to_restore = Some(self.view_offset.stationary());
+                // Saved relative to the column's normal anchor, which is in effect again when the
+                // column returns to normal.
+                self.view_offset_to_restore = Some(self.view_offset.stationary() - anchor_delta);
             }
 
             // Upon unfullscreening, restore the view offset.
@@ -1434,6 +1958,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 // resizing windows not look janky.
                 self.animate_view_offset_to_column_with_config(None, col_idx, None, config);
             }
+        } else if area_changed {
+            self.refit_active_column();
         }
     }
 
@@ -1444,7 +1970,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             .position(|col| col.contains(window))
             .unwrap();
 
-        if self.active_column_idx == column_idx {
+        // Pinned columns are always on screen.
+        if self.active_column_idx == column_idx || self.data[column_idx].pinned.is_some() {
             return 0.;
         }
 
@@ -1514,7 +2041,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         tile_pos.x += self.view_pos();
 
-        if col_idx < self.active_column_idx {
+        if col_idx < self.view_anchor_idx() {
             let offset = if removing_last {
                 self.column_x(col_idx + 1) - self.column_x(col_idx)
             } else {
@@ -1708,6 +2235,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     fn move_column_to(&mut self, new_idx: usize) {
+        if self.columns.is_empty() {
+            return;
+        }
+
+        // Pinned columns stay at their edge, and other columns don't move past them.
+        if self.columns[self.active_column_idx].pinned.is_some() {
+            return;
+        }
+        let (start, end) = self.scrolling_range();
+        let new_idx = new_idx.clamp(start, end - 1);
+
         if self.active_column_idx == new_idx {
             return;
         }
@@ -1749,6 +2287,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return false;
         }
 
+        // Moving a pinned column, or a column into a pinned one, does nothing (but still counts as
+        // handled, so that the column doesn't go to another monitor instead).
         self.move_column_to(self.active_column_idx - 1);
         true
     }
@@ -1759,6 +2299,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return false;
         }
 
+        // Moving a pinned column, or a column into a pinned one, does nothing (but still counts as
+        // handled, so that the column doesn't go to another monitor instead).
         self.move_column_to(new_idx);
         true
     }
@@ -1828,7 +2370,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // Move into adjacent column.
             let target_column_idx = source_col_idx - 1;
 
-            let offset = if self.active_column_idx <= source_col_idx {
+            let offset = if self.view_anchor_idx() <= source_col_idx {
                 // Tiles to the right animate from the following column.
                 self.column_x(source_col_idx) - self.column_x(target_column_idx)
             } else {
@@ -1872,8 +2414,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let removed =
                 self.remove_tile_by_idx(source_col_idx, source_tile_idx, Transaction::new(), None);
 
-            // We're inserting into the source column position.
-            let target_column_idx = source_col_idx;
+            // We're inserting into the source column position, but never left of a column pinned
+            // to the left (expelling from that column puts the window right of it).
+            let target_column_idx = self.clamp_insert_idx(source_col_idx);
 
             self.add_tile(
                 Some(target_column_idx),
@@ -1889,7 +2432,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 self.activate_prev_column_on_removal = None;
             }
 
-            if target_column_idx <= self.active_column_idx {
+            if target_column_idx <= self.view_anchor_idx() {
                 // Tiles to the left animate from the following column.
                 offset.x += self.column_x(target_column_idx + 1) - self.column_x(target_column_idx);
             }
@@ -1967,7 +2510,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let removed =
                 self.remove_tile_by_idx(source_col_idx, source_tile_idx, Transaction::new(), None);
 
-            let target_column_idx = source_col_idx + 1;
+            // Never right of a column pinned to the right (expelling from that column puts the
+            // window left of it).
+            let target_column_idx = self.clamp_insert_idx(source_col_idx + 1);
 
             self.add_tile(
                 Some(target_column_idx),
@@ -1978,7 +2523,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 Some(self.options.animations.window_movement.0),
             );
 
-            offset.x += if self.active_column_idx <= target_column_idx {
+            offset.x += if self.view_anchor_idx() <= target_column_idx {
                 // Tiles to the right animate to the following column.
                 cur_x - self.column_x(target_column_idx)
             } else {
@@ -2026,7 +2571,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let source_col_idx = self.active_column_idx;
-        let target_col_idx = self.active_column_idx + 1;
+        let target_col_idx = self.clamp_insert_idx(self.active_column_idx + 1);
         let cur_x = self.column_x(source_col_idx);
 
         let source_column = &self.columns[self.active_column_idx];
@@ -2083,6 +2628,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             ScrollDirection::Left => -1,
             ScrollDirection::Right => 1,
         });
+
+        // Pinned columns don't swap windows with their neighbors.
+        if self.columns[source_column_idx].pinned.is_some()
+            || self.columns[target_column_idx].pinned.is_some()
+        {
+            return;
+        }
 
         // if both source and target columns contain a single tile, then the operation is equivalent
         // to a simple column move
@@ -2223,6 +2775,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.set_fullscreen(&window, false);
             self.set_maximized(&window, false);
         }
+
+        let config = self.options.animations.window_movement.0;
+        self.sync_scrolling_area(StripShift::Animate(config));
     }
 
     pub fn center_column(&mut self) {
@@ -2271,6 +2826,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
+        // A pinned column is always on screen and can't be centered.
+        if self.data[self.active_column_idx].pinned.is_some() {
+            return;
+        }
+
         // Consider the end of an ongoing animation because that's what compute to fit does too.
         let view_x = self.target_view_pos();
         let working_x = self.working_area.loc.x;
@@ -2284,6 +2844,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let gap = self.options.layout.gaps;
         let col_xs = self.column_xs(self.data.iter().copied());
         for (idx, col_x) in col_xs.take(self.columns.len()).enumerate() {
+            if self.data[idx].pinned.is_some() {
+                // Pinned columns don't share the scrolling area.
+                continue;
+            }
+
             if col_x < view_x + working_x + gap {
                 // Column goes off-screen to the left.
                 continue;
@@ -2320,12 +2885,52 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.animate_view_offset_to_column(None, self.active_column_idx, None);
     }
 
+    /// Returns the index of the column that the view position is relative to.
+    ///
+    /// Normally the active column. A focused column pinned in place doesn't scroll, so the view
+    /// is relative to the start of the strip instead (see [`Self::view_anchor_x`]): changes to the
+    /// scrolling columns then move the columns after them, as for columns right of an active
+    /// column.
+    fn view_anchor_idx(&self) -> usize {
+        let active = self.active_column_idx;
+        if self
+            .data
+            .get(active)
+            .is_some_and(|data| data.pinned.is_some())
+        {
+            0
+        } else {
+            active
+        }
+    }
+
+    /// Returns the X that the view offset of column `idx` is relative to, when it is active.
+    ///
+    /// This is the column X, except for columns pinned in place: their X in the strip moves as
+    /// scrolling columns change, so the view offset is relative to the start of the strip.
+    fn view_anchor_x(&self, idx: usize) -> f64 {
+        if self.data.get(idx).is_some_and(|data| data.pinned.is_some()) {
+            0.
+        } else {
+            self.column_x(idx)
+        }
+    }
+
+    fn pinned_view_x(&self, side: PinSide, width: f64) -> f64 {
+        pinned_view_x(
+            self.full_working_area,
+            self.options.layout.gaps,
+            side,
+            width,
+        )
+    }
+
     pub fn view_pos(&self) -> f64 {
-        self.column_x(self.active_column_idx) + self.view_offset.current()
+        self.view_anchor_x(self.active_column_idx) + self.view_offset.current()
     }
 
     pub fn target_view_pos(&self) -> f64 {
-        self.column_x(self.active_column_idx) + self.view_offset.target()
+        self.view_anchor_x(self.active_column_idx) + self.view_offset.target()
     }
 
     // HACK: pass a self.data iterator in manually as a workaround for the lack of method partial
@@ -2335,12 +2940,19 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let mut x = 0.;
 
         // Chain with a dummy value to be able to get one past all columns' X.
-        let dummy = ColumnData { width: 0. };
+        let dummy = ColumnData {
+            width: 0.,
+            pinned: None,
+        };
         let data = data.chain(iter::once(dummy));
 
+        // Pinned columns take no space in the strip: a column pinned to the left gets the X of the
+        // first scrolling column and a column pinned to the right the X past the last one.
         data.map(move |data| {
             let rv = x;
-            x += data.width + gaps;
+            if data.pinned.is_none() {
+                x += data.width + gaps;
+            }
             rv
         })
     }
@@ -2351,56 +2963,24 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             .unwrap()
     }
 
-    fn column_xs_in_render_order(
-        &self,
-        data: impl Iterator<Item = ColumnData>,
-    ) -> impl Iterator<Item = f64> {
-        let active_idx = self.active_column_idx;
-        let active_pos = self.column_x(active_idx);
-        let offsets = self
-            .column_xs(data)
-            .enumerate()
-            .filter_map(move |(idx, pos)| (idx != active_idx).then_some(pos));
-        iter::once(active_pos).chain(offsets)
-    }
-
     pub fn columns(&self) -> impl Iterator<Item = &Column<W>> {
         self.columns.iter()
     }
 
-    fn columns_mut(&mut self) -> impl Iterator<Item = (&mut Column<W>, f64)> + '_ {
-        let offsets = self.column_xs(self.data.iter().copied());
-        zip(&mut self.columns, offsets)
-    }
-
     fn columns_in_render_order(&self) -> impl Iterator<Item = (&Column<W>, f64)> + '_ {
-        let offsets = self.column_xs_in_render_order(self.data.iter().copied());
-
-        let (first, active, rest) = if self.columns.is_empty() {
-            (&[][..], &[][..], &[][..])
-        } else {
-            let (first, rest) = self.columns.split_at(self.active_column_idx);
-            let (active, rest) = rest.split_at(1);
-            (first, active, rest)
-        };
-
-        let columns = active.iter().chain(first).chain(rest);
-        zip(columns, offsets)
+        let col_xs = self.column_render_xs(self.view_pos());
+        self.column_render_order()
+            .into_iter()
+            .map(move |idx| (&self.columns[idx], col_xs[idx]))
     }
 
     fn columns_in_render_order_mut(&mut self) -> impl Iterator<Item = (&mut Column<W>, f64)> + '_ {
-        let offsets = self.column_xs_in_render_order(self.data.iter().copied());
-
-        let (first, active, rest) = if self.columns.is_empty() {
-            (&mut [][..], &mut [][..], &mut [][..])
-        } else {
-            let (first, rest) = self.columns.split_at_mut(self.active_column_idx);
-            let (active, rest) = rest.split_at_mut(1);
-            (first, active, rest)
-        };
-
-        let columns = active.iter_mut().chain(first).chain(rest);
-        zip(columns, offsets)
+        let col_xs = self.column_render_xs(self.view_pos());
+        let order = self.column_render_order();
+        let mut columns: Vec<_> = self.columns.iter_mut().map(Some).collect();
+        order
+            .into_iter()
+            .map(move |idx| (columns[idx].take().unwrap(), col_xs[idx]))
     }
 
     pub fn columns_with_render_positions(
@@ -2469,8 +3049,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             .flat_map(move |(col_idx, col)| {
                 col.tiles().enumerate().map(move |(tile_idx, (tile, _))| {
                     let layout = WindowLayout {
-                        // Our indices are 1-based, consistent with the actions.
+                        // Our indices are 1-based, consistent with the actions. Pinned columns
+                        // keep their index: a column pinned to the left is the first one and a
+                        // column pinned to the right the last one.
                         pos_in_scrolling_layout: Some((col_idx + 1, tile_idx + 1)),
+                        pinned: col.pinned,
                         ..tile.ipc_layout_template()
                     };
                     (tile, layout)
@@ -2482,9 +3065,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         &self,
         position: InsertPosition,
     ) -> Option<Rectangle<f64, Logical>> {
+        // New columns go between the pinned columns.
+        let (start, end) = self.scrolling_range();
+
         let mut hint_area = match position {
             InsertPosition::NewColumn(column_index) => {
-                if column_index == 0 || column_index == self.columns.len() {
+                if column_index > self.columns.len() {
+                    error!("insert hint column index is out of range");
+                    return None;
+                }
+
+                let column_index = column_index.clamp(start, end);
+                if column_index == start || column_index == end {
                     let size = Size::from((
                         300.,
                         self.working_area.size.h - self.options.layout.gaps * 2.,
@@ -2493,13 +3085,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                         self.column_x(column_index),
                         self.working_area.loc.y + self.options.layout.gaps,
                     ));
-                    if column_index == 0 && !self.columns.is_empty() {
+                    if column_index == start && self.has_scrolling_columns() {
                         loc.x -= size.w + self.options.layout.gaps;
                     }
                     Rectangle::new(loc, size)
-                } else if column_index > self.columns.len() {
-                    error!("insert hint column index is out of range");
-                    return None;
                 } else {
                     let size = Size::from((
                         300.,
@@ -2558,6 +3147,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 };
 
                 let size = Size::from((self.data[column_index].width - extra_w, height));
+
+                // Columns pinned in place are already in view coordinates.
+                if let Some(side) = self.data[column_index].pinned {
+                    let col_x = self.pinned_view_x(side, self.data[column_index].width);
+                    let loc = Point::from((col_x + origin_x, y));
+                    return Some(Rectangle::new(loc, size));
+                }
+
                 let loc = Point::from((self.column_x(column_index) + origin_x, y));
                 Rectangle::new(loc, size)
             }
@@ -2565,8 +3162,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         };
 
         // First window on an empty workspace will cancel out any view offset. Replicate this
-        // effect here.
-        if self.columns.is_empty() {
+        // effect here. The same goes for the first scrolling column next to pinned ones.
+        if !self.has_scrolling_columns() {
             let view_offset = if self.is_centering_focused_column() {
                 self.compute_new_view_offset_centered(
                     Some(0.),
@@ -2591,8 +3188,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     pub fn active_window_visual_rectangle(&self) -> Option<Rectangle<f64, Logical>> {
         let col = self.columns.get(self.active_column_idx)?;
 
-        let final_view_offset = self.view_offset.target();
-        let view_off = Point::from((-final_view_offset, 0.));
+        let data = &self.data[self.active_column_idx];
+        let col_x = match data.pinned {
+            Some(side) => self.pinned_view_x(side, data.width),
+            None => -self.view_offset.target(),
+        };
+        let view_off = Point::from((col_x, 0.));
 
         let (tile, tile_off) = col.tiles().nth(col.active_tile_idx).unwrap();
 
@@ -2606,7 +3207,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
     pub fn popup_target_rect(&self, id: &W::Id, overflow: bool) -> Option<Rectangle<f64, Logical>> {
         let view_pos = self.target_view_pos();
-        let col_xs = self.column_xs(self.data.iter().copied());
+        let col_xs = self.column_render_xs(view_pos);
         for (col, col_x) in zip(&self.columns, col_xs) {
             for (tile, pos) in col.tiles() {
                 if tile.window().id() == id {
@@ -2794,6 +3395,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
+        // Pinned columns don't take part in the scrolling columns' space.
+        if col.pinned.is_some() {
+            return;
+        }
+
         if self.is_centering_focused_column() {
             // Always-centered mode is different since the active window position cannot be
             // controlled (it's always at the center). I guess you could come up with different
@@ -2823,6 +3429,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let gap = self.options.layout.gaps;
         let col_xs = self.column_xs(self.data.iter().copied());
         for (idx, col_x) in col_xs.take(self.columns.len()).enumerate() {
+            if self.data[idx].pinned.is_some() {
+                // Pinned columns don't share the scrolling area.
+                continue;
+            }
+
             if col_x < view_x + working_x + gap {
                 // Column goes off-screen to the left.
                 continue;
@@ -2900,7 +3511,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         if is_fullscreen && (col.tiles.len() > 1 && !is_tabbed) {
             // This wasn't the only window in its column; extract it into a separate column.
             self.consume_or_expel_window_right(Some(window));
-            col_idx += 1;
+            // Usually to the right, but left of a column pinned to the right.
+            col_idx = self
+                .columns
+                .iter()
+                .position(|col| col.contains(window))
+                .unwrap();
             col = &mut self.columns[col_idx];
         }
 
@@ -2908,6 +3524,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // With place_within_column, the tab indicator changes the column size immediately.
         self.data[col_idx].update(col);
+
+        let config = self.options.animations.window_movement.0;
+        self.sync_scrolling_area(StripShift::Animate(config));
 
         true
     }
@@ -2931,7 +3550,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         if maximize && (col.tiles.len() > 1 && !is_tabbed) {
             // This wasn't the only window in its column; extract it into a separate column.
             self.consume_or_expel_window_right(Some(window));
-            col_idx += 1;
+            // Usually to the right, but left of a column pinned to the right.
+            col_idx = self
+                .columns
+                .iter()
+                .position(|col| col.contains(window))
+                .unwrap();
             col = &mut self.columns[col_idx];
         }
 
@@ -2939,6 +3563,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // With place_within_column, the tab indicator changes the column size immediately.
         self.data[col_idx].update(col);
+
+        let config = self.options.animations.window_movement.0;
+        self.sync_scrolling_area(StripShift::Animate(config));
 
         true
     }
@@ -2984,15 +3611,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
-        let mut first = true;
+        let active_id = self.columns[self.active_column_idx].id();
 
         // This matches self.tiles_with_render_positions().
         for (col, col_pos) in self.columns_with_render_positions() {
             // Skip columns belonging to a different render layer.
             if layer.is_normal() == col.is_moving_between_workspaces() {
-                first = false;
                 continue;
             }
+
+            // The active tile comes first in the active column. Pinned columns can render above
+            // the active column, so check for it explicitly.
+            let mut first = col.id() == active_id;
 
             // Draw the tab indicator on top.
             {
@@ -3145,6 +3775,25 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn dnd_scroll_gesture_scroll(&mut self, delta: f64) -> bool {
+        // Clamp bounds so that the view doesn't go too much out of bounds. Pinned columns don't
+        // scroll, so only the scrolling columns count.
+        let last_scrolling_idx = self.data.iter().rposition(|data| data.pinned.is_none());
+        let (leftmost, rightmost) = if let Some(last_col_idx) = last_scrolling_idx {
+            let mut leftmost = -self.working_area.size.w;
+
+            let last_col_x = self.column_x(last_col_idx);
+            let last_col_width = self.data[last_col_idx].width;
+            let mut rightmost = last_col_x + last_col_width - self.working_area.loc.x;
+
+            let active_col_x = self.view_anchor_x(self.active_column_idx);
+            leftmost -= active_col_x;
+            rightmost -= active_col_x;
+
+            (leftmost, rightmost)
+        } else {
+            (0., 0.)
+        };
+
         let ViewOffset::Gesture(gesture) = &mut self.view_offset else {
             return false;
         };
@@ -3182,33 +3831,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         let view_offset = gesture.tracker.pos() + gesture.delta_from_tracker;
 
-        // Clamp it so that it doesn't go too much out of bounds.
-        let (leftmost, rightmost) = if self.columns.is_empty() {
-            (0., 0.)
-        } else {
-            let gaps = self.options.layout.gaps;
-
-            let mut leftmost = -self.working_area.size.w;
-
-            let last_col_idx = self.columns.len() - 1;
-            let last_col_x = self
-                .columns
-                .iter()
-                .take(last_col_idx)
-                .fold(0., |col_x, col| col_x + col.width() + gaps);
-            let last_col_width = self.data[last_col_idx].width;
-            let mut rightmost = last_col_x + last_col_width - self.working_area.loc.x;
-
-            let active_col_x = self
-                .columns
-                .iter()
-                .take(self.active_column_idx)
-                .fold(0., |col_x, col| col_x + col.width() + gaps);
-            leftmost -= active_col_x;
-            rightmost -= active_col_x;
-
-            (leftmost, rightmost)
-        };
         let min_offset = f64::min(leftmost, rightmost);
         let max_offset = f64::max(leftmost, rightmost);
         let clamped_offset = view_offset.clamp(min_offset, max_offset);
@@ -3245,7 +3867,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let pos = gesture.tracker.pos() * norm_factor;
         let current_view_offset = pos + gesture.delta_from_tracker;
 
-        if self.columns.is_empty() {
+        // Pinned columns don't scroll: only the other columns can be snapped to.
+        let scroll_idxs: Vec<usize> = (0..self.columns.len())
+            .filter(|&idx| self.data[idx].pinned.is_none())
+            .collect();
+
+        if scroll_idxs.is_empty() {
             self.view_offset = ViewOffset::Static(current_view_offset);
             return true;
         }
@@ -3253,6 +3880,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Figure out where the gesture would stop after deceleration.
         let end_pos = gesture.tracker.projected_end_pos() * norm_factor;
         let target_view_offset = end_pos + gesture.delta_from_tracker;
+
+        let col_xs: Vec<f64> = self.column_xs(self.data.iter().copied()).collect();
+        let width_at = |pos: Option<usize>| {
+            pos.and_then(|pos| scroll_idxs.get(pos))
+                .map(|&idx| self.columns[idx].width())
+        };
 
         // Compute the snapping points. These are where the view aligns with column boundaries on
         // either side.
@@ -3266,8 +3899,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let mut snapping_points = Vec::new();
 
         if self.is_centering_focused_column() {
-            let mut col_x = 0.;
-            for (col_idx, col) in self.columns.iter().enumerate() {
+            for &col_idx in &scroll_idxs {
+                let col = &self.columns[col_idx];
+                let col_x = col_xs[col_idx];
                 let col_w = col.width();
                 let mode = col.sizing_mode();
 
@@ -3287,8 +3921,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     col_x - (area.size.w - col_w) / 2. - left_strut
                 };
                 snapping_points.push(Snap { view_pos, col_idx });
-
-                col_x += col_w + self.options.layout.gaps;
             }
         } else {
             let center_on_overflow = matches!(
@@ -3372,32 +4004,27 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             //
             // This isn't actually a big problem because it's very much an obscure edge case. Just
             // need to make sure the code doesn't panic when that happens.
+            let first_col_idx = scroll_idxs[0];
             let leftmost_snap = snap_points(
-                0.,
-                &self.columns[0],
+                col_xs[first_col_idx],
+                &self.columns[first_col_idx],
                 None,
-                self.columns.get(1).map(|c| c.width()),
+                width_at(Some(1)),
             )
             .0;
-            let last_col_idx = self.columns.len() - 1;
-            let last_col_x = self
-                .columns
-                .iter()
-                .take(last_col_idx)
-                .fold(0., |col_x, col| col_x + col.width() + gaps);
+            let last_pos = scroll_idxs.len() - 1;
+            let last_col_idx = scroll_idxs[last_pos];
             let rightmost_snap = snap_points(
-                last_col_x,
+                col_xs[last_col_idx],
                 &self.columns[last_col_idx],
-                last_col_idx
-                    .checked_sub(1)
-                    .and_then(|idx| self.columns.get(idx).map(|c| c.width())),
+                width_at(last_pos.checked_sub(1)),
                 None,
             )
             .1 - view_width;
 
             snapping_points.push(Snap {
                 view_pos: leftmost_snap,
-                col_idx: 0,
+                col_idx: first_col_idx,
             });
             snapping_points.push(Snap {
                 view_pos: rightmost_snap,
@@ -3421,26 +4048,21 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 }
             };
 
-            let mut col_x = 0.;
-            for (col_idx, col) in self.columns.iter().enumerate() {
+            for (pos, &col_idx) in scroll_idxs.iter().enumerate() {
                 let (left, right) = snap_points(
-                    col_x,
-                    col,
-                    col_idx
-                        .checked_sub(1)
-                        .and_then(|idx| self.columns.get(idx).map(|c| c.width())),
-                    self.columns.get(col_idx + 1).map(|c| c.width()),
+                    col_xs[col_idx],
+                    &self.columns[col_idx],
+                    width_at(pos.checked_sub(1)),
+                    width_at(Some(pos + 1)),
                 );
                 push(col_idx, left, right);
-
-                col_x += col.width() + gaps;
             }
         }
 
         // Find the closest snapping point.
         snapping_points.sort_by_key(|snap| NotNan::new(snap.view_pos).unwrap());
 
-        let active_col_x = self.column_x(self.active_column_idx);
+        let active_col_x = self.view_anchor_x(self.active_column_idx);
         let target_view_pos = active_col_x + target_view_offset;
         let target_snap = snapping_points
             .iter()
@@ -3449,12 +4071,20 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         let mut new_col_idx = target_snap.col_idx;
 
-        if !self.is_centering_focused_column() {
+        if self.data[self.active_column_idx].pinned.is_some() {
+            // A pinned column stays focused: the gesture only scrolls the other columns.
+            new_col_idx = self.active_column_idx;
+        } else if !self.is_centering_focused_column() {
+            let snap_pos = scroll_idxs
+                .iter()
+                .position(|&idx| idx == new_col_idx)
+                .unwrap();
+
             // Focus the furthest window towards the direction of the gesture.
             if target_view_offset >= current_view_offset {
-                for col_idx in (new_col_idx + 1)..self.columns.len() {
+                for &col_idx in &scroll_idxs[snap_pos + 1..] {
                     let col = &self.columns[col_idx];
-                    let col_x = self.column_x(col_idx);
+                    let col_x = col_xs[col_idx];
                     let col_w = col.width();
                     let mode = col.sizing_mode();
 
@@ -3486,9 +4116,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     new_col_idx = col_idx;
                 }
             } else {
-                for col_idx in (0..new_col_idx).rev() {
+                for &col_idx in scroll_idxs[..snap_pos].iter().rev() {
                     let col = &self.columns[col_idx];
-                    let col_x = self.column_x(col_idx);
+                    let col_x = col_xs[col_idx];
                     let col_w = col.width();
                     let mode = col.sizing_mode();
 
@@ -3521,7 +4151,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             }
         }
 
-        let new_col_x = self.column_x(new_col_idx);
+        let new_col_x = self.view_anchor_x(new_col_idx);
         let delta = active_col_x - new_col_x;
 
         if self.active_column_idx != new_col_idx {
@@ -3747,9 +4377,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 win.set_interactive_resize(col_resize_data);
 
                 let border_config = self.options.layout.border.merged_with(&win.rules().border);
+                // Pinned columns size themselves within the whole working area.
                 let bounds = compute_toplevel_bounds(
                     border_config,
-                    self.working_area.size,
+                    col.working_area.size,
                     extra_size,
                     self.options.layout.gaps,
                 );
@@ -3784,6 +4415,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     #[cfg(test)]
+    pub fn working_area(&self) -> Rectangle<f64, Logical> {
+        self.working_area
+    }
+
+    #[cfg(test)]
+    pub fn full_working_area(&self) -> Rectangle<f64, Logical> {
+        self.full_working_area
+    }
+
+    #[cfg(test)]
     pub fn clock(&self) -> &Clock {
         &self.clock
     }
@@ -3811,14 +4452,19 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         assert!(self.scale.is_finite());
         assert_eq!(self.columns.len(), self.data.len());
         assert_eq!(
-            self.working_area,
+            self.full_working_area,
             compute_working_area(self.parent_area, self.scale, self.options.layout.struts)
+        );
+        assert_eq!(
+            self.working_area,
+            self.compute_scrolling_area(),
+            "scrolling area must leave out the pinned columns"
         );
 
         if !self.columns.is_empty() {
             assert!(self.active_column_idx < self.columns.len());
 
-            for (column, data) in zip(&self.columns, &self.data) {
+            for (idx, (column, data)) in zip(&self.columns, &self.data).enumerate() {
                 assert!(Rc::ptr_eq(&self.options, &column.options));
                 assert_eq!(self.clock, column.clock);
                 assert_eq!(self.scale, column.scale);
@@ -3827,6 +4473,28 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 let mut data2 = *data;
                 data2.update(column);
                 assert_eq!(data, &data2, "column data must be up to date");
+
+                match column.pinned {
+                    Some(PinSide::Left) => {
+                        assert_eq!(idx, 0, "a column pinned to the left must be the first one");
+                    }
+                    Some(PinSide::Right) => assert_eq!(
+                        idx,
+                        self.columns.len() - 1,
+                        "a column pinned to the right must be the last one"
+                    ),
+                    None => (),
+                }
+
+                let expected_area = if column.pinned.is_some() {
+                    self.full_working_area
+                } else {
+                    self.working_area
+                };
+                assert_eq!(
+                    column.working_area, expected_area,
+                    "column working area must match its pinned state"
+                );
             }
 
             let col = &self.columns[self.active_column_idx];
@@ -3939,13 +4607,17 @@ impl ViewGesture {
 
 impl ColumnData {
     pub fn new<W: LayoutElement>(column: &Column<W>) -> Self {
-        let mut rv = Self { width: 0. };
+        let mut rv = Self {
+            width: 0.,
+            pinned: None,
+        };
         rv.update(column);
         rv
     }
 
     pub fn update<W: LayoutElement>(&mut self, column: &Column<W>) {
         self.width = column.width();
+        self.pinned = column.pinned_in_place();
     }
 }
 
@@ -4039,6 +4711,7 @@ impl<W: LayoutElement> Column<W> {
             clock: tile.clock.clone(),
             options,
             id: ColumnId::next(),
+            pinned: None,
         };
 
         let pending_sizing_mode = tile.window().pending_sizing_mode();
@@ -4067,6 +4740,18 @@ impl<W: LayoutElement> Column<W> {
 
     pub fn id(&self) -> ColumnId {
         self.id
+    }
+
+    /// Returns the edge this column is pinned to.
+    pub fn pinned(&self) -> Option<PinSide> {
+        self.pinned
+    }
+
+    /// Returns the edge this column is drawn at: its pin, while it is in the normal sizing mode.
+    ///
+    /// Fullscreen and maximized pinned columns scroll at their end of the strip instead.
+    fn pinned_in_place(&self) -> Option<PinSide> {
+        self.pinned.filter(|_| self.sizing_mode().is_normal())
     }
 
     fn update_config(
@@ -4292,6 +4977,16 @@ impl<W: LayoutElement> Column<W> {
         from_x_offset: f64,
         config: niri_config::Animation,
     ) {
+        // A column pinned in place does not move with the scrolling columns around it.
+        if self.pinned_in_place().is_some() {
+            return;
+        }
+
+        self.start_move_x_animation(from_x_offset, config);
+    }
+
+    /// Animates a horizontal movement, even for a column pinned in place.
+    fn start_move_x_animation(&mut self, from_x_offset: f64, config: niri_config::Animation) {
         let (current_offset, current_between) =
             self.move_x_animation.as_ref().map_or((0., false), |move_| {
                 (move_.from * move_.anim.value(), move_.is_between_workspaces)
@@ -4331,6 +5026,10 @@ impl<W: LayoutElement> Column<W> {
     }
 
     pub fn offset_move_anim_current(&mut self, offset: f64) {
+        if self.pinned_in_place().is_some() {
+            return;
+        }
+
         if let Some(move_) = self.move_x_animation.as_mut() {
             // If the anim is almost done, there's little point trying to offset it; we can let
             // things jump. If it turns out like a bad idea, we could restart the anim instead.
@@ -5387,6 +6086,27 @@ impl<W: LayoutElement> Column<W> {
         })
     }
 
+    /// Returns the tile index and Y of the gap between tiles closest to `y`.
+    fn closest_tile_gap(&self, y: f64) -> (usize, f64) {
+        if self.display_mode == ColumnDisplay::Tabbed {
+            // In tabbed mode, there's only one tile visible, and we want to check its top and
+            // bottom.
+            let top = self.tile_offsets().nth(self.active_tile_idx).unwrap().y;
+            let bottom = top + self.data[self.active_tile_idx].size.h;
+            if (top - y).abs() <= (bottom - y).abs() {
+                (self.active_tile_idx, top)
+            } else {
+                (self.active_tile_idx + 1, bottom)
+            }
+        } else {
+            self.tile_offsets()
+                .map(|tile_off| tile_off.y)
+                .enumerate()
+                .min_by_key(|(_, tile_y)| NotNan::new((tile_y - y).abs()).unwrap())
+                .unwrap()
+        }
+    }
+
     fn tile_offsets(&self) -> impl Iterator<Item = Point<f64, Logical>> + '_ {
         self.tile_offsets_iter(self.data.iter().copied())
     }
@@ -5634,6 +6354,14 @@ fn compute_new_view_offset(
         -padding
     } else {
         -(view_width - padding - new_col_width)
+    }
+}
+
+/// Returns the X of a column pinned in place, in view coordinates.
+fn pinned_view_x(area: Rectangle<f64, Logical>, gaps: f64, side: PinSide, width: f64) -> f64 {
+    match side {
+        PinSide::Left => area.loc.x + gaps,
+        PinSide::Right => area.loc.x + area.size.w - gaps - width,
     }
 }
 

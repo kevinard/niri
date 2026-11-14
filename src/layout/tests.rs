@@ -15,6 +15,7 @@ use super::*;
 
 mod animations;
 mod fullscreen;
+mod pinned;
 
 impl<W: LayoutElement> Default for Layout<W> {
     fn default() -> Self {
@@ -348,13 +349,19 @@ prop_compose! {
     fn arbitrary_rules()(
         focus_ring in arbitrary_focus_ring(),
         border in arbitrary_border(),
+        open_pinned in prop::option::of(arbitrary_pin_side()),
     ) -> ResolvedWindowRules {
         ResolvedWindowRules {
             focus_ring,
             border,
+            open_pinned,
             ..ResolvedWindowRules::default()
         }
     }
+}
+
+fn arbitrary_pin_side() -> impl Strategy<Value = PinSide> {
+    prop_oneof![Just(PinSide::Left), Just(PinSide::Right)]
 }
 
 fn arbitrary_view_offset_gesture_delta() -> impl Strategy<Value = f64> {
@@ -511,6 +518,20 @@ enum Op {
     SwapWindowInDirection(#[proptest(strategy = "arbitrary_scroll_direction()")] ScrollDirection),
     ToggleColumnTabbedDisplay,
     SetColumnDisplay(#[proptest(strategy = "arbitrary_column_display()")] ColumnDisplay),
+    PinColumn {
+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
+        id: Option<usize>,
+        #[proptest(strategy = "arbitrary_pin_side()")]
+        side: PinSide,
+    },
+    UnpinColumn {
+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
+        id: Option<usize>,
+    },
+    TogglePinnedColumn {
+        #[proptest(strategy = "arbitrary_pin_side()")]
+        side: PinSide,
+    },
     CenterColumn,
     CenterWindow {
         #[proptest(strategy = "proptest::option::of(1..=5usize)")]
@@ -1176,6 +1197,15 @@ impl Op {
             Op::SwapWindowInDirection(direction) => layout.swap_window_in_direction(direction),
             Op::ToggleColumnTabbedDisplay => layout.toggle_column_tabbed_display(),
             Op::SetColumnDisplay(display) => layout.set_column_display(display),
+            Op::PinColumn { id, side } => {
+                let id = id.filter(|id| layout.has_window(id));
+                layout.pin_column(id.as_ref(), side);
+            }
+            Op::UnpinColumn { id } => {
+                let id = id.filter(|id| layout.has_window(id));
+                layout.unpin_column(id.as_ref());
+            }
+            Op::TogglePinnedColumn { side } => layout.toggle_pinned_column(None, side),
             Op::CenterColumn => layout.center_column(),
             Op::CenterWindow { id } => {
                 let id = id.filter(|id| layout.has_window(id));
@@ -1868,6 +1898,15 @@ fn operations_dont_panic() {
         Op::ConsumeOrExpelWindowRight { id: None },
         Op::MoveWorkspaceToOutput(1),
         Op::ToggleColumnTabbedDisplay,
+        Op::PinColumn {
+            id: None,
+            side: PinSide::Left,
+        },
+        Op::PinColumn {
+            id: None,
+            side: PinSide::Right,
+        },
+        Op::UnpinColumn { id: None },
     ];
 
     for third in &every_op {
@@ -2047,6 +2086,15 @@ fn operations_from_starting_state_dont_panic() {
         Op::ConsumeOrExpelWindowLeft { id: None },
         Op::ConsumeOrExpelWindowRight { id: None },
         Op::ToggleColumnTabbedDisplay,
+        Op::PinColumn {
+            id: None,
+            side: PinSide::Left,
+        },
+        Op::PinColumn {
+            id: None,
+            side: PinSide::Right,
+        },
+        Op::UnpinColumn { id: None },
     ];
 
     for third in &every_op {
@@ -4047,4 +4095,37 @@ proptest! {
 
         check_ops_with_options(options, ops);
     }
+
+    #[test]
+    fn random_operations_with_pinned_columns_dont_panic(
+        ops in proptest::collection::vec(arbitrary_op_with_pinning(), 0..100),
+        layout_config in arbitrary_layout_part(),
+    ) {
+        let options = Options {
+            layout: niri_config::Layout::from_part(&layout_config),
+            ..Default::default()
+        };
+
+        check_ops_with_options(options, ops);
+    }
+}
+
+/// Random operations where pinning and unpinning columns are frequent.
+///
+/// With all operations equally likely, pinning shows up too rarely to cover its interactions.
+fn arbitrary_op_with_pinning() -> impl Strategy<Value = Op> {
+    let pin = prop_oneof![
+        (proptest::option::of(1..=5usize), arbitrary_pin_side())
+            .prop_map(|(id, side)| Op::PinColumn { id, side }),
+        proptest::option::of(1..=5usize).prop_map(|id| Op::UnpinColumn { id }),
+        arbitrary_pin_side().prop_map(|side| Op::TogglePinnedColumn { side }),
+    ];
+    let window = any::<TestWindowParams>().prop_map(|params| Op::AddWindow { params });
+
+    prop_oneof![
+        6 => any::<Op>(),
+        2 => pin,
+        1 => window,
+        1 => (1..=5usize).prop_map(Op::Communicate),
+    ]
 }

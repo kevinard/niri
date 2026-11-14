@@ -6,7 +6,7 @@ use niri_config::{
     BackgroundEffect, BlockOutFrom, BorderRule, CornerRadius, FloatingPosition, PresetSize,
     ResolvedPopupsRules, ShadowRule, TabIndicatorRule,
 };
-use niri_ipc::ColumnDisplay;
+use niri_ipc::{ColumnDisplay, PinSide};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Logical, Size};
 use smithay::wayland::compositor::with_states;
@@ -72,6 +72,9 @@ pub struct ResolvedWindowRules {
 
     /// Whether the window should open focused.
     pub open_focused: Option<bool>,
+
+    /// Edge of the workspace view to pin the window's column to when it opens.
+    pub open_pinned: Option<PinSide>,
 
     /// What to do on xdg-activation requests.
     pub on_xdg_activate: Option<OnXdgActivate>,
@@ -261,6 +264,10 @@ impl ResolvedWindowRules {
 
                 if let Some(x) = rule.open_focused {
                     resolved.open_focused = Some(x);
+                }
+
+                if let Some(x) = rule.open_pinned {
+                    resolved.open_pinned = Some(x);
                 }
 
                 if let Some(x) = rule.on_xdg_activate {
