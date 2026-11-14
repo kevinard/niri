@@ -34,6 +34,7 @@ use crate::backend::IpcOutputMap;
 use crate::handlers::image_copy_capture;
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::workspace::WorkspaceId;
+use crate::layout::Layout;
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
 use crate::window::Mapped;
@@ -513,9 +514,17 @@ async fn handle_event_stream_client(client: EventStreamClient) -> anyhow::Result
     Ok(())
 }
 
+/// Returns the id of the mapped window that `mapped` set as its parent, if any.
+pub(crate) fn ipc_parent_id(layout: &Layout<Mapped>, mapped: &Mapped) -> Option<u64> {
+    let parent = mapped.toplevel().parent()?;
+    let (parent, _) = layout.find_window_and_output(&parent)?;
+    Some(parent.id().get())
+}
+
 fn make_ipc_window(
     mapped: &Mapped,
     workspace_id: Option<WorkspaceId>,
+    parent_id: Option<u64>,
     layout: WindowLayout,
 ) -> niri_ipc::Window {
     with_toplevel_role(mapped.toplevel(), |role| niri_ipc::Window {
@@ -524,6 +533,7 @@ fn make_ipc_window(
         app_id: role.app_id.clone(),
         pid: mapped.credentials().map(|c| c.pid),
         workspace_id: workspace_id.map(|id| id.get()),
+        parent_id,
         is_focused: mapped.is_focused(),
         is_floating: mapped.is_floating(),
         is_urgent: mapped.is_urgent(),
@@ -712,22 +722,25 @@ impl State {
                 focused_id = Some(id);
             }
 
+            let parent_id = ipc_parent_id(layout, mapped);
+
             let Some(ipc_win) = state.windows.get(&id) else {
-                let window = make_ipc_window(mapped, ws_id, window_layout);
+                let window = make_ipc_window(mapped, ws_id, parent_id, window_layout);
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;
             };
 
             let workspace_id = ws_id.map(|id| id.get());
-            let mut changed =
-                ipc_win.workspace_id != workspace_id || ipc_win.is_floating != mapped.is_floating();
+            let mut changed = ipc_win.workspace_id != workspace_id
+                || ipc_win.parent_id != parent_id
+                || ipc_win.is_floating != mapped.is_floating();
 
             changed |= with_toplevel_role(mapped.toplevel(), |role| {
                 ipc_win.title != role.title || ipc_win.app_id != role.app_id
             });
 
             if changed {
-                let window = make_ipc_window(mapped, ws_id, window_layout);
+                let window = make_ipc_window(mapped, ws_id, parent_id, window_layout);
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;
             }
