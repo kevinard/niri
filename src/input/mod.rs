@@ -838,6 +838,23 @@ impl State {
                         }
                     }
 
+                    // Report text typed into the overview, so that a desktop shell can implement
+                    // type to search.
+                    if this.niri.keyboard_focus.is_overview()
+                        && pressed
+                        && this.niri.config.borrow().overview.emit_typed_text
+                    {
+                        let utf8 = {
+                            let xkb = keysym.xkb().lock().unwrap();
+                            // SAFETY: state does not escape its guard.
+                            let state = unsafe { xkb.state() };
+                            state.key_get_utf8(key_code)
+                        };
+                        if let Some(text) = overview_typed_text(&utf8, modifiers) {
+                            this.ipc_overview_typed(text);
+                        }
+                    }
+
                     // Interaction with the active window, immediately update the active window's
                     // focus timestamp without waiting for a possible pending MRU lock-in delay.
                     this.niri.mru_apply_keyboard_commit();
@@ -5732,6 +5749,30 @@ fn bind_allowed_during_screenshot(bind: &Bind, pressed: bool) -> bool {
     }
 }
 
+/// Maximum length in bytes of the text reported for one key press in the overview.
+const OVERVIEW_TYPED_TEXT_MAX_LEN: usize = 16;
+
+/// Returns the text to report for an unbound key press in the overview, if any.
+///
+/// `utf8` is the text that the key press produces according to XKB.
+fn overview_typed_text(utf8: &str, mods: Modifiers) -> Option<String> {
+    // Keys pressed with these modifiers are shortcuts rather than typing.
+    if mods.intersects(Modifiers::CTRL | Modifiers::ALT | Modifiers::SUPER) {
+        return None;
+    }
+
+    if utf8.is_empty() || utf8.len() > OVERVIEW_TYPED_TEXT_MAX_LEN {
+        return None;
+    }
+
+    // Keys like Tab, BackSpace or Delete produce control characters, which are not text.
+    if utf8.chars().any(char::is_control) {
+        return None;
+    }
+
+    Some(utf8.to_owned())
+}
+
 fn hardcoded_overview_bind(key: Keysym, mods: Modifiers) -> Option<Bind> {
     if !mods.is_empty() {
         return None;
@@ -6708,5 +6749,48 @@ mod tests {
             &close_bind(BoundAction::Release(Action::CloseWindow)),
             false
         ));
+    }
+
+    #[test]
+    fn overview_typed_text_reports_printable_text() {
+        let mods = Modifiers::empty();
+        assert_eq!(overview_typed_text("a", mods).as_deref(), Some("a"));
+        assert_eq!(overview_typed_text("é", mods).as_deref(), Some("é"));
+        assert_eq!(overview_typed_text(" ", mods).as_deref(), Some(" "));
+        assert_eq!(
+            overview_typed_text("A", Modifiers::SHIFT).as_deref(),
+            Some("A")
+        );
+        // AltGr is a level shift that produces text, not a shortcut modifier.
+        assert_eq!(
+            overview_typed_text("@", Modifiers::ISO_LEVEL3_SHIFT).as_deref(),
+            Some("@")
+        );
+    }
+
+    #[test]
+    fn overview_typed_text_ignores_shortcuts_and_control_characters() {
+        assert_eq!(overview_typed_text("a", Modifiers::CTRL), None);
+        assert_eq!(overview_typed_text("a", Modifiers::ALT), None);
+        assert_eq!(overview_typed_text("a", Modifiers::SUPER), None);
+        assert_eq!(
+            overview_typed_text("A", Modifiers::SHIFT | Modifiers::CTRL),
+            None
+        );
+
+        let mods = Modifiers::empty();
+        assert_eq!(overview_typed_text("", mods), None);
+        assert_eq!(overview_typed_text("\t", mods), None);
+        assert_eq!(overview_typed_text("\u{8}", mods), None);
+        assert_eq!(overview_typed_text("\u{7f}", mods), None);
+        assert_eq!(overview_typed_text("\u{1b}", mods), None);
+    }
+
+    #[test]
+    fn overview_typed_text_is_bounded() {
+        let mods = Modifiers::empty();
+        let max = "x".repeat(OVERVIEW_TYPED_TEXT_MAX_LEN);
+        assert_eq!(overview_typed_text(&max, mods), Some(max.clone()));
+        assert_eq!(overview_typed_text(&format!("{max}x"), mods), None);
     }
 }

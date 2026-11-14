@@ -11,6 +11,7 @@ mod floating;
 mod fullscreen;
 mod ipc_windows;
 mod layer_shell;
+mod overview;
 mod remove_output;
 mod spawn_placement;
 mod transactions;
