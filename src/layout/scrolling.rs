@@ -5413,6 +5413,10 @@ impl<W: LayoutElement> Column<W> {
         zip(&self.tiles, offsets)
     }
 
+    pub fn display_mode(&self) -> ColumnDisplay {
+        self.display_mode
+    }
+
     fn tiles_mut(&mut self) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> + '_ {
         let offsets = self.tile_offsets_iter(self.data.iter().copied());
         zip(&mut self.tiles, offsets)

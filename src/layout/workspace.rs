@@ -669,6 +669,7 @@ impl<W: LayoutElement> Workspace<W> {
                 }
             }
             WorkspaceAddWindowTarget::NewColumnAt(col_idx) => {
+                let col_idx = col_idx.min(self.scrolling.columns().count());
                 let activate = activate.map_smart(|| false);
                 self.scrolling
                     .add_tile(Some(col_idx), tile, activate, width, is_full_width, anim);

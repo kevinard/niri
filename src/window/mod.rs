@@ -19,6 +19,9 @@ use crate::utils::with_toplevel_role;
 pub mod mapped;
 pub use mapped::Mapped;
 
+pub mod spawn_placement;
+pub use spawn_placement::{SpawnPlacement, SpawnPlacements};
+
 pub mod unmapped;
 pub use unmapped::{InitialConfigureState, Unmapped};
 
