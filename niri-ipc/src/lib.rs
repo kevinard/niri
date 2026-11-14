@@ -215,6 +215,26 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(last = true, required = true))]
         command: String,
     },
+    /// Spawn a command and place its first window.
+    ///
+    /// Niri hands the command a fresh activation token (`XDG_ACTIVATION_TOKEN` and
+    /// `DESKTOP_STARTUP_ID`) and applies the placement to the first toplevel that presents this
+    /// token through xdg-activation before it maps. The given fields override the matching window
+    /// rules; omitted fields keep the usual behavior.
+    ///
+    /// The placement is discarded once a window has presented the token, after 60 seconds, or when
+    /// too many placements are pending. Windows that never present the token (for example,
+    /// programs that ignore `XDG_ACTIVATION_TOKEN`) open normally.
+    SpawnPlaced {
+        /// Command to spawn.
+        #[cfg_attr(feature = "clap", arg(last = true, required = true))]
+        command: Vec<String>,
+
+        /// Where the first window of the command should open.
+        #[serde(default)]
+        #[cfg_attr(feature = "clap", command(flatten))]
+        placement: Placement,
+    },
     /// Do a screen transition.
     DoScreenTransition {
         /// Delay in milliseconds for the screen to freeze before starting the transition.
@@ -973,6 +993,81 @@ pub enum SizeChange {
     AdjustFixed(i32),
     /// Add or subtract to the current size as a proportion of the working area.
     AdjustProportion(f64),
+}
+
+/// Where a newly opened window should go.
+///
+/// Every field is optional. A field that is not set leaves the decision to window rules and the
+/// usual placement logic.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct Placement {
+    /// Reference (id, index or name) of the workspace to open the window on.
+    ///
+    /// The reference is resolved when niri handles the request; an index refers to the workspace
+    /// on the focused monitor at that moment. If no workspace matches, or if the workspace no
+    /// longer exists when the window opens, the window opens where it otherwise would.
+    #[serde(default)]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub workspace: Option<WorkspaceReferenceArg>,
+
+    /// Index of the new column that the window should open as.
+    ///
+    /// The index starts from 1 for the first column. An index past the last column opens the
+    /// window as the last column. Ignored for floating windows and for dialogs that follow their
+    /// parent without an explicit workspace.
+    #[serde(default)]
+    #[cfg_attr(feature = "clap", arg(long = "column"))]
+    pub column_index: Option<usize>,
+
+    /// Initial width of the window's column (or of the floating window).
+    ///
+    /// Only `SetFixed` (logical pixels) and `SetProportion` (percent of the working area, so
+    /// `50.0` is half) are accepted. On the command line, this is `800` or `50%`.
+    #[serde(default)]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub width: Option<SizeChange>,
+
+    /// Display mode of the window's new column.
+    #[serde(default)]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub display: Option<ColumnDisplay>,
+
+    /// Whether the window should open floating (`true`) or tiled (`false`).
+    #[serde(default)]
+    #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
+    pub floating: Option<bool>,
+}
+
+impl Placement {
+    /// Checks that the placement can be applied to a newly opened window.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.column_index == Some(0) {
+            return Err(String::from("column index starts from 1"));
+        }
+
+        match self.width {
+            None => (),
+            Some(SizeChange::SetFixed(width)) => {
+                if width <= 0 {
+                    return Err(format!("width {width} must be > 0"));
+                }
+            }
+            Some(SizeChange::SetProportion(proportion)) => {
+                if !proportion.is_finite() || proportion <= 0. {
+                    return Err(format!("width proportion {proportion} must be > 0"));
+                }
+            }
+            Some(SizeChange::AdjustFixed(_) | SizeChange::AdjustProportion(_)) => {
+                return Err(String::from(
+                    "placement width must be a fixed size or a proportion, not an adjustment",
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Change in floating window position.
@@ -2223,5 +2318,107 @@ mod tests {
         );
         assert!("-".parse::<PositionChange>().is_err());
         assert!("10% ".parse::<PositionChange>().is_err());
+    }
+
+    #[test]
+    fn spawn_placed_json() {
+        let action = Action::SpawnPlaced {
+            command: vec![
+                String::from("foot"),
+                String::from("-e"),
+                String::from("htop"),
+            ],
+            placement: Placement {
+                workspace: Some(WorkspaceReferenceArg::Name(String::from("dev"))),
+                column_index: Some(2),
+                width: Some(SizeChange::SetProportion(50.)),
+                display: Some(ColumnDisplay::Tabbed),
+                floating: Some(false),
+            },
+        };
+        let json = serde_json::to_string(&Request::Action(action.clone())).unwrap();
+        assert_eq!(
+            json,
+            r#"{"Action":{"SpawnPlaced":{"command":["foot","-e","htop"],"placement":{"workspace":{"Name":"dev"},"column_index":2,"width":{"SetProportion":50.0},"display":"Tabbed","floating":false}}}}"#
+        );
+
+        let Request::Action(Action::SpawnPlaced { command, placement }) =
+            serde_json::from_str(&json).unwrap()
+        else {
+            panic!("wrong request");
+        };
+        let Action::SpawnPlaced {
+            command: expected_command,
+            placement: expected_placement,
+        } = action
+        else {
+            unreachable!();
+        };
+        assert_eq!(command, expected_command);
+        assert_eq!(placement, expected_placement);
+    }
+
+    #[test]
+    fn spawn_placed_json_defaults() {
+        let action: Action =
+            serde_json::from_str(r#"{"SpawnPlaced":{"command":["foot"]}}"#).unwrap();
+        let Action::SpawnPlaced { command, placement } = action else {
+            panic!("wrong action");
+        };
+        assert_eq!(command, vec![String::from("foot")]);
+        assert_eq!(placement, Placement::default());
+
+        let placement: Placement = serde_json::from_str(r#"{"column_index":1}"#).unwrap();
+        assert_eq!(
+            placement,
+            Placement {
+                column_index: Some(1),
+                ..Placement::default()
+            }
+        );
+    }
+
+    #[test]
+    fn validate_placement() {
+        assert!(Placement::default().validate().is_ok());
+
+        let valid = Placement {
+            workspace: Some(WorkspaceReferenceArg::Index(2)),
+            column_index: Some(1),
+            width: Some(SizeChange::SetFixed(800)),
+            display: Some(ColumnDisplay::Normal),
+            floating: Some(true),
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = [
+            Placement {
+                column_index: Some(0),
+                ..Placement::default()
+            },
+            Placement {
+                width: Some(SizeChange::SetFixed(0)),
+                ..Placement::default()
+            },
+            Placement {
+                width: Some(SizeChange::SetProportion(f64::NAN)),
+                ..Placement::default()
+            },
+            Placement {
+                width: Some(SizeChange::SetProportion(-10.)),
+                ..Placement::default()
+            },
+            Placement {
+                width: Some(SizeChange::AdjustFixed(10)),
+                ..Placement::default()
+            },
+            Placement {
+                width: Some(SizeChange::AdjustProportion(10.)),
+                ..Placement::default()
+            },
+        ];
+        for placement in invalid {
+            assert!(placement.validate().is_err(), "{placement:?}");
+        }
     }
 }

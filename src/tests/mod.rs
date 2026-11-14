@@ -12,6 +12,7 @@ mod fullscreen;
 mod ipc_windows;
 mod layer_shell;
 mod remove_output;
+mod spawn_placement;
 mod transactions;
 mod virtual_pointer;
 mod window_opening;

@@ -528,6 +528,11 @@ pub enum AddWindowTarget<'a, W: LayoutElement> {
     Output(&'a Output),
     /// On this workspace.
     Workspace(WorkspaceId),
+    /// As a new column at this index on this workspace.
+    ///
+    /// An index past the last column opens the window as the last column. Floating windows open
+    /// on the workspace as with [`AddWindowTarget::Workspace`].
+    WorkspaceColumn(WorkspaceId, usize),
     /// Next to this existing window.
     NextTo(&'a W::Id),
 }
@@ -1010,6 +1015,17 @@ impl<W: LayoutElement> Layout<W> {
                             },
                         )
                     }
+                    AddWindowTarget::WorkspaceColumn(ws_id, column_idx) => {
+                        let mon_idx = monitors.iter().position(|mon| mon.has_ws(ws_id)).unwrap();
+
+                        (
+                            mon_idx,
+                            MonitorAddWindowTarget::Workspace {
+                                id: ws_id,
+                                column_idx: (!is_floating).then_some(column_idx),
+                            },
+                        )
+                    }
                     AddWindowTarget::NextTo(next_to) => {
                         if let Some(output) = self
                             .interactive_move
@@ -1091,6 +1107,15 @@ impl<W: LayoutElement> Layout<W> {
                     AddWindowTarget::Workspace(ws_id) => {
                         let ws_idx = workspaces.iter().position(|ws| ws.id() == ws_id).unwrap();
                         (ws_idx, WorkspaceAddWindowTarget::Auto)
+                    }
+                    AddWindowTarget::WorkspaceColumn(ws_id, column_idx) => {
+                        let ws_idx = workspaces.iter().position(|ws| ws.id() == ws_id).unwrap();
+                        let target = if is_floating {
+                            WorkspaceAddWindowTarget::Auto
+                        } else {
+                            WorkspaceAddWindowTarget::NewColumnAt(column_idx)
+                        };
+                        (ws_idx, target)
                     }
                     AddWindowTarget::NextTo(next_to) => {
                         if self
@@ -1341,6 +1366,25 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         None
+    }
+
+    /// Resolves a workspace reference to the id of an existing workspace.
+    ///
+    /// Indices refer to workspaces on the active monitor, like in [`Self::find_workspace_by_ref`].
+    pub fn find_workspace_id_by_ref(&self, reference: &WorkspaceReference) -> Option<WorkspaceId> {
+        match reference {
+            WorkspaceReference::Index(index) => {
+                let index = index.saturating_sub(1) as usize;
+                let mon = self.active_monitor_ref()?;
+                mon.workspaces.get(index).map(|ws| ws.id())
+            }
+            WorkspaceReference::Name(name) => {
+                self.find_workspace_by_name(name).map(|(_, ws)| ws.id())
+            }
+            WorkspaceReference::Id(id) => self
+                .find_workspace_by_id(WorkspaceId::specific(*id))
+                .map(|(_, ws)| ws.id()),
+        }
     }
 
     pub fn find_workspace_by_ref(

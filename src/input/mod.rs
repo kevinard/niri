@@ -1107,6 +1107,10 @@ impl State {
                 let (token, _) = self.niri.activation_state.create_external_token(None);
                 spawn_sh(command, Some(token.clone()));
             }
+            Action::SpawnPlaced(command, placement) => {
+                let token = self.niri.register_spawn_placement(placement);
+                spawn(command, Some(token));
+            }
             Action::DoScreenTransition(delay_ms) => {
                 self.backend.with_primary_renderer(|renderer| {
                     self.niri.do_screen_transition(renderer, delay_ms);

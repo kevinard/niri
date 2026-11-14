@@ -116,7 +116,7 @@ use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::virtual_pointer::VirtualPointerManagerState;
-use smithay::wayland::xdg_activation::XdgActivationState;
+use smithay::wayland::xdg_activation::{XdgActivationState, XdgActivationToken};
 use smithay::wayland::xdg_foreign::XdgForeignState;
 use wayland_server::protocol::wl_output::WlOutput;
 
@@ -194,7 +194,10 @@ use crate::utils::{
     send_scale_transform, winit_scale, write_png_rgba8, xwayland,
 };
 use crate::window::mapped::MappedId;
-use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped, WindowRef};
+use crate::window::{
+    InitialConfigureState, Mapped, ResolvedWindowRules, SpawnPlacement, SpawnPlacements, Unmapped,
+    WindowRef,
+};
 
 const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 
@@ -343,6 +346,8 @@ pub struct Niri {
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
     pub activation_state: XdgActivationState,
+    /// Placements for the first windows of spawned commands, keyed by activation token.
+    pub spawn_placements: SpawnPlacements,
     pub mutter_x11_interop_state: MutterX11InteropManagerState,
 
     // This will not work as is outside of tests, so it is gated with #[cfg(test)] for now. In
@@ -2653,9 +2658,18 @@ impl Niri {
             .insert_source(
                 Timer::from_duration(XDG_ACTIVATION_TOKEN_TIMEOUT),
                 |_, _, state| {
-                    state.niri.activation_state.retain_tokens(|_, token_data| {
-                        token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT
-                    });
+                    let now = Instant::now();
+                    let placements = &mut state.niri.spawn_placements;
+                    placements.remove_expired(now);
+                    // Tokens with a pending spawn placement stay valid until the placement
+                    // expires, so that slow programs still open where they were asked to.
+                    state
+                        .niri
+                        .activation_state
+                        .retain_tokens(|token, token_data| {
+                            token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT
+                                || placements.contains(token, now)
+                        });
                     TimeoutAction::ToDuration(XDG_ACTIVATION_TOKEN_TIMEOUT)
                 },
             )
@@ -2871,6 +2885,7 @@ impl Niri {
             security_context_state,
             gamma_control_manager_state,
             activation_state,
+            spawn_placements: SpawnPlacements::default(),
             mutter_x11_interop_state,
             #[cfg(test)]
             single_pixel_buffer_state,
@@ -3925,6 +3940,31 @@ impl Niri {
 
         let target_output = target_workspace.current_output();
         Some((target_output.cloned(), target_workspace_index))
+    }
+
+    /// Creates an activation token for spawning a command and binds a placement to it.
+    ///
+    /// The workspace reference is resolved now; if it matches no workspace, the window opens on
+    /// its usual workspace.
+    pub fn register_spawn_placement(
+        &mut self,
+        placement: niri_ipc::Placement,
+    ) -> XdgActivationToken {
+        let workspace = placement.workspace.clone().and_then(|reference| {
+            let reference = WorkspaceReference::from(reference);
+            let id = self.layout.find_workspace_id_by_ref(&reference);
+            if id.is_none() {
+                debug!("spawn placement workspace {reference:?} not found, ignoring it");
+            }
+            id
+        });
+        let placement = SpawnPlacement::new(placement, workspace);
+
+        let (token, _) = self.activation_state.create_external_token(None);
+        let token = token.clone();
+        self.spawn_placements
+            .insert(token.clone(), placement, Instant::now());
+        token
     }
 
     pub fn find_window_by_id(&self, id: MappedId) -> Option<Window> {
@@ -7143,11 +7183,14 @@ impl Niri {
             let window_rules = &self.config.borrow().window_rules;
 
             for unmapped in self.unmapped_windows.values_mut() {
-                let new_rules = ResolvedWindowRules::compute(
+                let mut new_rules = ResolvedWindowRules::compute(
                     window_rules,
                     WindowRef::Unmapped(unmapped),
                     self.is_at_startup,
                 );
+                if let Some(placement) = &unmapped.placement {
+                    placement.apply_to_rules(&mut new_rules);
+                }
                 if let InitialConfigureState::Configured { rules, .. } = &mut unmapped.state {
                     *rules = new_rules;
                 }

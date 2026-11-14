@@ -454,6 +454,9 @@ enum Op {
         params: TestWindowParams,
         #[proptest(strategy = "1..=5usize")]
         ws_name: usize,
+        /// Open as a new column at this index, possibly past the last column.
+        #[proptest(strategy = "prop::option::of(0..=6usize)")]
+        column_idx: Option<usize>,
     },
     CloseWindow(#[proptest(strategy = "1..=5usize")] usize),
     FullscreenWindow(#[proptest(strategy = "1..=5usize")] usize),
@@ -991,6 +994,7 @@ impl Op {
             Op::AddWindowToNamedWorkspace {
                 mut params,
                 ws_name,
+                column_idx,
             } => {
                 let ws_name = format!("ws{ws_name}");
                 let mut ws_id = None;
@@ -1052,9 +1056,13 @@ impl Op {
 
                 let is_floating = params.is_floating;
                 let win = TestWindow::new(params);
+                let target = match column_idx {
+                    Some(column_idx) => AddWindowTarget::WorkspaceColumn(ws_id, column_idx),
+                    None => AddWindowTarget::Workspace(ws_id),
+                };
                 layout.add_window(
                     win,
-                    AddWindowTarget::Workspace(ws_id),
+                    target,
                     None,
                     None,
                     false,
@@ -1810,6 +1818,7 @@ fn operations_dont_panic() {
         Op::AddWindowToNamedWorkspace {
             params: TestWindowParams::new(3),
             ws_name: 1,
+            column_idx: None,
         },
         Op::CloseWindow(0),
         Op::CloseWindow(1),
@@ -1968,6 +1977,7 @@ fn operations_from_starting_state_dont_panic() {
         Op::AddWindowToNamedWorkspace {
             params: TestWindowParams::new(5),
             ws_name: 1,
+            column_idx: None,
         },
         Op::CloseWindow(0),
         Op::CloseWindow(1),
@@ -3850,6 +3860,55 @@ fn workspace_render_geo_at_fractional_scale() {
         "active workspace must be at y = 0 exactly, \
          otherwise a pointer against the screen edge at y = 0 won't hit it"
     );
+}
+
+#[test]
+fn add_window_to_workspace_column() {
+    let add = |id: usize, column_idx: Option<usize>, is_floating: bool| {
+        let mut params = TestWindowParams::new(id);
+        params.is_floating = is_floating;
+        Op::AddWindowToNamedWorkspace {
+            params,
+            ws_name: 1,
+            column_idx,
+        }
+    };
+
+    for output in [true, false] {
+        let mut ops = vec![];
+        if output {
+            ops.push(Op::AddOutput(1));
+        }
+        ops.extend([
+            Op::AddNamedWorkspace {
+                ws_name: 1,
+                output_names: vec![1],
+                layout_config: None,
+            },
+            add(0, None, false),
+            // Before the only column.
+            add(1, Some(0), false),
+            // Past the end: appended.
+            add(2, Some(9), false),
+            // In the middle.
+            add(3, Some(1), false),
+            // Floating windows ignore the column.
+            add(4, Some(0), true),
+        ]);
+
+        let layout = check_ops(ops);
+        let (_, _, ws) = layout
+            .workspaces()
+            .find(|(_, _, ws)| ws.name().is_some_and(|name| name == "ws1"))
+            .unwrap();
+        let columns: Vec<Vec<usize>> = ws
+            .scrolling()
+            .columns()
+            .map(|col| col.tiles().map(|(tile, _)| tile.window().0.id).collect())
+            .collect();
+        assert_eq!(columns, [[1], [3], [0], [2]], "output: {output}");
+        assert!(ws.is_floating(&4), "output: {output}");
+    }
 }
 
 fn parent_id_causes_loop(layout: &Layout<TestWindow>, id: usize, mut parent_id: usize) -> bool {

@@ -10,7 +10,7 @@ use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
@@ -808,6 +808,16 @@ impl XdgActivationHandler for State {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
+        // A spawn placement applies to the first toplevel that presents its token.
+        if let Some(placement) = self.niri.spawn_placements.take(&token, Instant::now()) {
+            if !self.set_unmapped_spawn_placement(&surface, placement) {
+                debug!(
+                    "spawn placement token was presented by a mapped window or a non-toplevel \
+                     surface, ignoring the placement"
+                );
+            }
+        }
+
         if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT {
             if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&surface) {
                 let window = mapped.window.clone();
