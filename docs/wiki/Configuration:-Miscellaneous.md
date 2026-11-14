@@ -35,6 +35,8 @@ overview {
         offset x=0 y=10
         color "#00000050"
     }
+
+    // emit-typed-text
 }
 
 xwayland-satellite {
@@ -245,6 +247,24 @@ overview {
     workspace-shadow {
         off
     }
+}
+```
+
+#### `emit-typed-text`
+
+<sup>Since: next release</sup>
+
+Report text typed while the overview has keyboard focus to [IPC event stream](./IPC.md#event-stream) clients, as `OverviewTyped` events.
+
+Normally, the overview handles only a few keys (<kbd>Escape</kbd>, <kbd>Enter</kbd> and the arrow keys) and ignores the rest.
+With this flag, every other key press that isn't bound and produces text sends an event with that text, which lets a desktop shell implement type to search: for example, open an application launcher with the text as its query, then close the overview.
+niri itself does nothing else with the text, and the overview stays open.
+
+Key presses with <kbd>Ctrl</kbd>, <kbd>Alt</kbd> or <kbd>Super</kbd> held, and keys that produce control characters (like <kbd>Tab</kbd> or <kbd>Backspace</kbd>), are not reported.
+
+```kdl
+overview {
+    emit-typed-text
 }
 ```
 

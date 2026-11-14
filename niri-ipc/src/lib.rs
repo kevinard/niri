@@ -1771,6 +1771,21 @@ pub enum Event {
         /// disabled in hardware, or via `input { touchpad { off; } }`—this is not reflected here.
         on: bool,
     },
+    /// Text was typed while the overview had keyboard focus.
+    ///
+    /// Only sent when enabled with `overview { emit-typed-text; }` in the config. Niri sends one
+    /// event per key press that has no bind and produces text, and does not otherwise act on it:
+    /// the overview stays open. Key presses with Ctrl, Alt or Super held, and keys that produce
+    /// only control characters, are not reported.
+    ///
+    /// This lets a desktop shell implement "type to search" from the overview, for example by
+    /// opening a launcher with the text as its initial query and closing the overview.
+    ///
+    /// This event is not part of the event stream state: it is not replayed to new clients.
+    OverviewTyped {
+        /// Text produced by the key press, at most 16 bytes long.
+        text: String,
+    },
 }
 
 impl From<Duration> for Timestamp {

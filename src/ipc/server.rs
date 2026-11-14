@@ -113,6 +113,18 @@ impl IpcServer {
         })
     }
 
+    /// Subscribes to the event stream without a socket, for tests.
+    #[cfg(test)]
+    pub fn test_event_stream(&self) -> Receiver<Event> {
+        let (events_tx, events_rx) = async_channel::bounded(EVENT_STREAM_BUFFER_SIZE);
+        let (disconnect_tx, _disconnect_rx) = async_channel::bounded(1);
+        self.event_streams.borrow_mut().push(EventStreamSender {
+            events: events_tx,
+            disconnect: disconnect_tx,
+        });
+        events_rx
+    }
+
     fn send_event(&self, event: Event) {
         let mut streams = self.event_streams.borrow_mut();
         let mut to_remove = Vec::new();
@@ -989,6 +1001,15 @@ impl State {
         let event = Event::ConfigLoaded { failed };
         state.apply(event.clone());
         server.send_event(event);
+    }
+
+    pub fn ipc_overview_typed(&mut self, text: String) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+
+        // This event is momentary and does not change the event stream state.
+        server.send_event(Event::OverviewTyped { text });
     }
 
     pub fn ipc_screenshot_taken(&mut self, path: Option<String>) {
