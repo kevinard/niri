@@ -481,6 +481,12 @@ impl Window {
         self.surface.attach(Some(&buffer), 0, 0);
     }
 
+    /// Attaches a single-pixel buffer of the given premultiplied color.
+    pub fn attach_new_color_buffer(&self, [r, g, b, a]: [u32; 4]) {
+        let buffer = self.spbm.create_u32_rgba_buffer(r, g, b, a, &self.qh, ());
+        self.surface.attach(Some(&buffer), 0, 0);
+    }
+
     pub fn attach_null(&self) {
         self.surface.attach(None, 0, 0);
     }

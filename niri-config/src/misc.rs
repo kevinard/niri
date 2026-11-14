@@ -202,3 +202,29 @@ impl MergeWith<XwaylandSatellitePart> for XwaylandSatellite {
         merge_clone!((self, part), path);
     }
 }
+
+/// Window preview service settings.
+///
+/// Controls the `org.canopa.Niri.WindowPreview1` session-bus service that renders window
+/// thumbnails.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WindowPreviews {
+    pub off: bool,
+}
+
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WindowPreviewsPart {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child)]
+    pub on: bool,
+}
+
+impl MergeWith<WindowPreviewsPart> for WindowPreviews {
+    fn merge_with(&mut self, part: &WindowPreviewsPart) {
+        self.off |= part.off;
+        if part.on {
+            self.off = false;
+        }
+    }
+}

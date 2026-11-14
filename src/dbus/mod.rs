@@ -8,6 +8,7 @@ use zbus::zvariant::NoneValue as _;
 
 use crate::niri::State;
 
+pub mod canopa_window_preview;
 pub mod freedesktop_a11y;
 pub mod freedesktop_locale1;
 pub mod freedesktop_login1;
@@ -25,6 +26,7 @@ pub mod mutter_screen_cast;
 #[cfg(feature = "xdp-gnome-screencast")]
 use mutter_screen_cast::ScreenCast;
 
+use self::canopa_window_preview::WindowPreview;
 use self::freedesktop_screensaver::ScreenSaver;
 use self::gnome_shell_introspect::Introspect;
 use self::mutter_display_config::DisplayConfig;
@@ -47,6 +49,7 @@ pub struct DBusServers {
     pub conn_screen_saver: Option<Connection>,
     pub conn_screen_shot: Option<Connection>,
     pub conn_introspect: Option<Connection>,
+    pub conn_window_preview: Option<Connection>,
     #[cfg(feature = "xdp-gnome-screencast")]
     pub conn_screen_cast: Option<Connection>,
     pub conn_login1: Option<Connection>,
@@ -168,6 +171,18 @@ impl DBusServers {
                 .unwrap();
             let introspect = Introspect::new(to_niri, from_niri);
             dbus.conn_introspect = try_start(introspect, is_session_instance);
+
+            if !config.window_previews.off {
+                let (to_niri, from_window_preview) = calloop::channel::channel();
+                niri.event_loop
+                    .insert_source(from_window_preview, move |event, _, state| match event {
+                        calloop::channel::Event::Msg(msg) => state.on_window_preview_msg(msg),
+                        calloop::channel::Event::Closed => (),
+                    })
+                    .unwrap();
+                let window_preview = WindowPreview::new(to_niri);
+                dbus.conn_window_preview = try_start(window_preview, is_session_instance);
+            }
 
             #[cfg(feature = "xdp-gnome-screencast")]
             {

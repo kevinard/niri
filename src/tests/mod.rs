@@ -18,3 +18,4 @@ mod touch;
 mod transactions;
 mod virtual_pointer;
 mod window_opening;
+mod window_preview;
