@@ -1,3 +1,36 @@
+### Titlebars (Canopa fork)
+
+The Canopa fork can draw titlebars for windows that negotiate server-side
+decorations. They are off by default. Enable the decoration protocols with
+`prefer-no-csd`, then enable titlebars:
+
+```kdl
+prefer-no-csd
+layout {
+    titlebar {
+        on
+        height 32
+        font "sans 10"
+        active-color "#303030"
+        inactive-color "#242424"
+        text-color "#eeeeee"
+    }
+}
+```
+
+Restart applications after changing `prefer-no-csd`. Titlebar styling itself
+reloads with the configuration. `off` disables titlebars; `height` is between
+24 and 64 logical pixels, and `font` is a Pango font description.
+
+Drag the titlebar to move the window. Close and maximize/restore buttons work
+with pointer or touch input; a button acts on release over the same control.
+Fullscreen windows have no titlebar. Maximized windows keep theirs.
+The titlebar reserves layout space instead of covering application content.
+Applications that negotiate client-side decorations keep their own headerbars.
+
+Basic controls belong to the compositor and remain available without a shell.
+This version does not provide a titlebar menu or shell-defined titlebar actions.
+
 ### Overview
 
 In the `layout {}` section you can change various settings that influence how windows are positioned and sized.

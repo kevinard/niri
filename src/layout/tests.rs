@@ -17,6 +17,7 @@ mod animations;
 mod fullscreen;
 mod ipc_layout;
 mod pinned;
+mod titlebar;
 
 impl<W: LayoutElement> Default for Layout<W> {
     fn default() -> Self {
@@ -26,6 +27,7 @@ impl<W: LayoutElement> Default for Layout<W> {
 
 #[derive(Debug)]
 struct TestWindowInner {
+    has_ssd: Cell<bool>,
     id: usize,
     parent_id: Cell<Option<usize>>,
     bbox: Cell<Rectangle<i32, Logical>>,
@@ -79,6 +81,7 @@ impl TestWindowParams {
 impl TestWindow {
     fn new(params: TestWindowParams) -> Self {
         Self(Rc::new(TestWindowInner {
+            has_ssd: Cell::new(false),
             id: params.id,
             parent_id: Cell::new(params.parent_id),
             bbox: Cell::new(params.bbox),
@@ -204,7 +207,7 @@ impl LayoutElement for TestWindow {
     fn set_preferred_scale_transform(&self, _scale: output::Scale, _transform: Transform) {}
 
     fn has_ssd(&self) -> bool {
-        false
+        self.0.has_ssd.get()
     }
 
     fn output_enter(&self, _output: &Output) {}

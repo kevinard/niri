@@ -85,6 +85,7 @@ pub mod scrolling;
 pub mod shadow;
 pub mod tab_indicator;
 pub mod tile;
+pub mod titlebar;
 pub mod workspace;
 
 #[cfg(test)]
@@ -234,6 +235,10 @@ pub trait LayoutElement {
     fn max_size(&self) -> Size<i32, Logical>;
     fn is_wl_surface(&self, wl_surface: &WlSurface) -> bool;
     fn has_ssd(&self) -> bool;
+    /// Plain, bounded display text for compositor decorations.
+    fn decoration_title(&self) -> String {
+        String::new()
+    }
     fn set_preferred_scale_transform(&self, scale: output::Scale, transform: Transform);
     fn output_enter(&self, output: &Output);
     fn output_leave(&self, output: &Output);
@@ -540,6 +545,8 @@ pub enum AddWindowTarget<'a, W: LayoutElement> {
 /// Type of the window hit from `window_under()`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HitType {
+    /// Input belongs to the compositor frame, never to the application underneath it.
+    Titlebar { part: titlebar::TitlebarPart },
     /// The hit is within a window's input region and can be used for sending events to it.
     Input {
         /// Position of the window's buffer.
@@ -641,7 +648,7 @@ impl HitType {
     pub fn offset_win_pos(mut self, offset: Point<f64, Logical>) -> Self {
         match &mut self {
             HitType::Input { win_pos } => *win_pos += offset,
-            HitType::Activate { .. } => (),
+            HitType::Activate { .. } | HitType::Titlebar { .. } => (),
         }
         self
     }
@@ -658,7 +665,7 @@ impl HitType {
 
     pub fn to_activate(self) -> Self {
         match self {
-            HitType::Input { .. } => HitType::Activate {
+            HitType::Input { .. } | HitType::Titlebar { .. } => HitType::Activate {
                 is_tab_indicator: false,
             },
             HitType::Activate { .. } => self,

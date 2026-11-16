@@ -929,6 +929,19 @@ impl LayoutElement for Mapped {
         });
     }
 
+    fn decoration_title(&self) -> String {
+        with_toplevel_role(self.toplevel(), |role| {
+            role.title
+                .as_deref()
+                .or(role.app_id.as_deref())
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect()
+        })
+    }
+
     fn has_ssd(&self) -> bool {
         let toplevel = self.toplevel();
         let mode = self

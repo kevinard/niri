@@ -932,6 +932,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         width: Option<PresetSize>,
         height: Option<PresetSize>,
         rules: &ResolvedWindowRules,
+        titlebar_height: f64,
     ) -> Size<i32, Logical> {
         let border = self.options.layout.border.merged_with(&rules.border);
 
@@ -964,6 +965,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         };
 
         let mut full_height = self.working_area.size.h - self.options.layout.gaps * 2.;
+        full_height -= titlebar_height;
         if !border.off {
             full_height -= border.width * 2.;
         }
@@ -971,6 +973,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let height = if let Some(height) = height {
             let height = match resolve_preset_size(height, &self.options, working_size.h, extra.h) {
                 ResolvedSize::Tile(mut size) => {
+                    size -= titlebar_height;
                     if !border.off {
                         size -= border.width * 2.;
                     }

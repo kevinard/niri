@@ -40,6 +40,10 @@ use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::protocol::wl_touch::{self, WlTouch};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::{
+    zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+    zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1},
+};
 
 use crate::utils::id::IdCounter;
 
@@ -53,6 +57,8 @@ pub struct Client {
 }
 
 pub struct State {
+    pub pointer_buttons_received: Vec<(u32, wayland_client::protocol::wl_pointer::ButtonState)>,
+    pub decoration_manager: Option<ZxdgDecorationManagerV1>,
     pub qh: QueueHandle<State>,
 
     pub globals: Vec<Global>,
@@ -143,6 +149,7 @@ pub enum KeyboardEvent {
 
 #[derive(Debug, Clone, Default)]
 pub struct Configure {
+    pub decoration_mode: Option<zxdg_toplevel_decoration_v1::Mode>,
     pub size: (i32, i32),
     pub bounds: Option<(i32, i32)>,
     pub states: Vec<xdg_toplevel::State>,
@@ -261,6 +268,8 @@ impl Client {
         connection.flush().unwrap();
 
         let state = State {
+            pointer_buttons_received: Vec::new(),
+            decoration_manager: None,
             qh: qh.clone(),
             globals: Vec::new(),
             outputs: HashMap::new(),
@@ -660,6 +669,8 @@ impl Dispatch<WlRegistry, ()> for State {
                 if interface == WlCompositor::interface().name {
                     let version = min(version, WlCompositor::interface().version);
                     state.compositor = Some(registry.bind(name, version, qh, ()));
+                } else if interface == ZxdgDecorationManagerV1::interface().name {
+                    state.decoration_manager = Some(registry.bind(name, 1, qh, ()));
                 } else if interface == XdgWmBase::interface().name {
                     let version = min(version, XdgWmBase::interface().version);
                     state.xdg_wm_base = Some(registry.bind(name, version, qh, ()));
@@ -911,6 +922,45 @@ impl Dispatch<ZwlrLayerShellV1, ()> for State {
 
 wayland_client::delegate_noop!(State: ZwlrVirtualPointerManagerV1);
 wayland_client::delegate_noop!(State: ZwlrVirtualPointerV1);
+wayland_client::delegate_noop!(State: ZxdgDecorationManagerV1);
+
+impl Dispatch<wayland_client::protocol::wl_pointer::WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wayland_client::protocol::wl_pointer::WlPointer,
+        event: wayland_client::protocol::wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wayland_client::protocol::wl_pointer::Event::Button {
+            button,
+            state: button_state,
+            ..
+        } = event
+        {
+            state
+                .pointer_buttons_received
+                .push((button, button_state.into_result().unwrap()));
+        }
+    }
+}
+
+impl Dispatch<ZxdgToplevelDecorationV1, WlSurface> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        surface: &WlSurface,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
+            state.window(surface).pending_configure.decoration_mode =
+                Some(mode.into_result().unwrap());
+        }
+    }
+}
 
 impl Dispatch<WlSurface, ()> for State {
     fn event(

@@ -14,6 +14,7 @@ mod layer_shell;
 mod overview;
 mod remove_output;
 mod spawn_placement;
+mod titlebar;
 mod touch;
 mod transactions;
 mod virtual_pointer;
