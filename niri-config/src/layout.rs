@@ -9,6 +9,7 @@ use crate::{BorderRule, Color, FloatOrInt, InsertHintPart, ShadowRule, TabIndica
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layout {
+    pub titlebar: crate::titlebar::Titlebar,
     pub focus_ring: FocusRing,
     pub border: Border,
     pub shadow: Shadow,
@@ -30,6 +31,7 @@ pub struct Layout {
 impl Default for Layout {
     fn default() -> Self {
         Self {
+            titlebar: crate::titlebar::Titlebar::default(),
             focus_ring: FocusRing::default(),
             border: Border::default(),
             shadow: Shadow::default(),
@@ -62,6 +64,7 @@ impl MergeWith<LayoutPart> for Layout {
     fn merge_with(&mut self, part: &LayoutPart) {
         merge!(
             (self, part),
+            titlebar,
             focus_ring,
             border,
             shadow,
@@ -99,6 +102,8 @@ impl MergeWith<LayoutPart> for Layout {
 
 #[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
 pub struct LayoutPart {
+    #[knuffel(child)]
+    pub titlebar: Option<crate::titlebar::TitlebarPart>,
     #[knuffel(child)]
     pub focus_ring: Option<BorderRule>,
     #[knuffel(child)]

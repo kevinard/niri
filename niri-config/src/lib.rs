@@ -40,6 +40,7 @@ pub mod layout;
 pub mod misc;
 pub mod output;
 pub mod recent_windows;
+pub mod titlebar;
 pub mod utils;
 pub mod window_rule;
 pub mod workspace;
@@ -1753,6 +1754,29 @@ mod tests {
                 },
             ],
             layout: Layout {
+                titlebar: Titlebar {
+                    off: true,
+                    height: 32.0,
+                    font: "sans 10",
+                    active_color: Color {
+                        r: 0.1882353,
+                        g: 0.1882353,
+                        b: 0.1882353,
+                        a: 1.0,
+                    },
+                    inactive_color: Color {
+                        r: 0.14117648,
+                        g: 0.14117648,
+                        b: 0.14117648,
+                        a: 1.0,
+                    },
+                    text_color: Color {
+                        r: 0.93333334,
+                        g: 0.93333334,
+                        b: 0.93333334,
+                        a: 1.0,
+                    },
+                },
                 focus_ring: FocusRing {
                     off: false,
                     width: 5.0,

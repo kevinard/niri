@@ -12,6 +12,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::{layer_map_for_output, Window};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
@@ -851,11 +852,14 @@ impl<W: LayoutElement> Workspace<W> {
         is_floating: bool,
         rules: &ResolvedWindowRules,
         (min_size, max_size): (Size<i32, Logical>, Size<i32, Logical>),
+        titlebar_height: f64,
     ) -> Size<i32, Logical> {
         let mut size = if is_floating {
-            self.floating.new_window_size(width, height, rules)
+            self.floating
+                .new_window_size(width, height, rules, titlebar_height)
         } else {
-            self.scrolling.new_window_size(width, height, rules)
+            self.scrolling
+                .new_window_size(width, height, rules, titlebar_height)
         };
 
         // If the window has a fixed size, or we're picking some fixed size, apply min and max
@@ -888,19 +892,45 @@ impl<W: LayoutElement> Workspace<W> {
         });
 
         let toplevel = window.toplevel().expect("no x11 support");
+        let kde_ssd = with_states(toplevel.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<crate::handlers::KdeDecorationsModeState>()
+                .is_some_and(|mode| mode.is_server())
+        });
         let (min_size, max_size) = with_states(toplevel.wl_surface(), |state| {
             let mut guard = state.cached_state.get::<SurfaceCachedState>();
             let current = guard.current();
             (current.min_size, current.max_size)
         });
         toplevel.with_pending_state(|state| {
+            let titlebar = &self.options.layout.titlebar;
+            let ssd = state
+                .decoration_mode
+                .map_or(kde_ssd, |mode| mode == Mode::ServerSide);
+            let titlebar_height = if !titlebar.off && ssd {
+                crate::utils::round_logical_in_physical_max1(
+                    self.scale.fractional_scale(),
+                    titlebar.height,
+                )
+            } else {
+                0.
+            };
             if state.states.contains(xdg_toplevel::State::Fullscreen) {
                 state.size = Some(self.view_size.to_i32_round());
             } else if state.states.contains(xdg_toplevel::State::Maximized) {
-                state.size = Some(self.working_area.size.to_i32_round());
+                let mut size = self.working_area.size;
+                size.h = (size.h - titlebar_height).max(1.);
+                state.size = Some(size.to_i32_round());
             } else {
-                let size =
-                    self.new_window_size(width, height, is_floating, rules, (min_size, max_size));
+                let size = self.new_window_size(
+                    width,
+                    height,
+                    is_floating,
+                    rules,
+                    (min_size, max_size),
+                    titlebar_height,
+                );
                 state.size = Some(size);
             }
 
