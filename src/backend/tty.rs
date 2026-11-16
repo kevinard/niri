@@ -432,6 +432,15 @@ struct ConnectorProperties<'a> {
 }
 
 impl Tty {
+    /// Leave each output's last frame on screen when the devices are dropped at exit, so
+    /// that the next compositor (a desktop session after a login screen) takes over
+    /// without a blank screen and, if it keeps the same modes, without a modeset.
+    pub fn keep_last_frame_on_exit(&self) {
+        for device in self.devices.values() {
+            device.drm.device_fd().set_keep_last_frame(true);
+        }
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,

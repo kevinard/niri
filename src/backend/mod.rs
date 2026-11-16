@@ -213,6 +213,13 @@ impl Backend {
         }
     }
 
+    /// See [`Tty::keep_last_frame_on_exit`]; other backends own no display.
+    pub fn keep_last_frame_on_exit(&self) {
+        if let Self::Tty(tty) = self {
+            tty.keep_last_frame_on_exit();
+        }
+    }
+
     pub fn tty_checked(&mut self) -> Option<&mut Tty> {
         if let Self::Tty(v) = self {
             Some(v)
