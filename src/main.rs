@@ -279,6 +279,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(None, &mut state, |state| state.refresh_and_flush_clients())
         .unwrap();
 
+    // A login screen asks to leave its last frame for the session it starts.
+    if env::var_os("NIRI_KEEP_LAST_FRAME_ON_EXIT").is_some_and(|x| x == "1") {
+        info!("keeping the last frame on screen");
+        state.backend.keep_last_frame_on_exit();
+    }
+
     Ok(())
 }
 
