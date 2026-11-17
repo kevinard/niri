@@ -97,6 +97,29 @@ fn client_side_windows_keep_their_full_content_area() {
 }
 
 #[test]
+fn title_and_app_id_changes_redraw_without_a_surface_commit() {
+    for mode in [Mode::ServerSide, Mode::ClientSide] {
+        let (mut f, id, surface, _) = setup(mode);
+        f.double_roundtrip(id);
+        let output = f.niri_output(1);
+        let sequence = |f: &mut Fixture| f.niri().output_state[&output].frame_callback_sequence;
+
+        let before = sequence(&mut f);
+        f.client(id)
+            .window(&surface)
+            .xdg_toplevel
+            .set_app_id("org.canopa.Changed".into());
+        f.double_roundtrip(id);
+        let after_app_id = sequence(&mut f);
+        assert_eq!(after_app_id != before, mode == Mode::ServerSide);
+
+        f.client(id).window(&surface).set_title("A changed title");
+        f.double_roundtrip(id);
+        assert_eq!(sequence(&mut f) != after_app_id, mode == Mode::ServerSide);
+    }
+}
+
+#[test]
 fn close_only_fires_on_release_over_the_same_control() {
     let (mut f, id, surface, _) = setup(Mode::ServerSide);
     let close = control(&mut f, TitlebarPart::Close);

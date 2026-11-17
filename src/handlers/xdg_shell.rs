@@ -39,7 +39,7 @@ use tracing::field::Empty;
 use crate::input::move_grab::MoveGrab;
 use crate::input::resize_grab::ResizeGrab;
 use crate::input::{AnyStartData, DOUBLE_CLICK_TIME};
-use crate::layout::ActivateWindow;
+use crate::layout::{ActivateWindow, LayoutElement};
 use crate::niri::{CastTarget, PopupGrabState, State};
 use crate::utils::transaction::Transaction;
 use crate::utils::{
@@ -952,10 +952,12 @@ impl XdgShellHandler for State {
 
     fn app_id_changed(&mut self, toplevel: ToplevelSurface) {
         self.update_window_rules(&toplevel);
+        self.redraw_window_titlebar(&toplevel);
     }
 
     fn title_changed(&mut self, toplevel: ToplevelSurface) {
         self.update_window_rules(&toplevel);
+        self.redraw_window_titlebar(&toplevel);
     }
 
     fn parent_changed(&mut self, toplevel: ToplevelSurface) {
@@ -1426,6 +1428,25 @@ impl State {
                     }
                 }
                 PopupKind::InputMethod(_) => (),
+            }
+        }
+    }
+
+    fn redraw_window_titlebar(&mut self, toplevel: &ToplevelSurface) {
+        if self.niri.config.borrow().layout.titlebar.off {
+            return;
+        }
+        let Some((mapped, output)) = self
+            .niri
+            .layout
+            .find_window_and_output_mut(toplevel.wl_surface())
+        else {
+            return;
+        };
+        // Metadata requests do not require a surface commit or a window-rule change.
+        if mapped.has_ssd() {
+            if let Some(output) = output.cloned() {
+                self.niri.queue_redraw(&output);
             }
         }
     }
