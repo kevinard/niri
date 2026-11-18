@@ -40,6 +40,7 @@ pub mod layout;
 pub mod misc;
 pub mod output;
 pub mod recent_windows;
+pub mod titlebar;
 pub mod utils;
 pub mod window_rule;
 pub mod workspace;
@@ -1753,6 +1754,49 @@ mod tests {
                 },
             ],
             layout: Layout {
+                titlebar: Titlebar {
+                    off: true,
+                    height: 32.0,
+                    font: "sans 10",
+                    title_align: Left,
+                    buttons: [
+                        Maximize,
+                        Close,
+                    ],
+                    buttons_side: Right,
+                    double_click: Maximize,
+                    active_color: Color {
+                        r: 0.1882353,
+                        g: 0.1882353,
+                        b: 0.1882353,
+                        a: 1.0,
+                    },
+                    inactive_color: Color {
+                        r: 0.14117648,
+                        g: 0.14117648,
+                        b: 0.14117648,
+                        a: 1.0,
+                    },
+                    text_color: Color {
+                        r: 0.93333334,
+                        g: 0.93333334,
+                        b: 0.93333334,
+                        a: 1.0,
+                    },
+                    inactive_text_color: None,
+                    button_hover_color: Color {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.14901961,
+                    },
+                    close_hover_color: Color {
+                        r: 0.7529412,
+                        g: 0.10980392,
+                        b: 0.15686275,
+                        a: 1.0,
+                    },
+                },
                 focus_ring: FocusRing {
                     off: false,
                     width: 5.0,
@@ -2343,6 +2387,7 @@ mod tests {
                         urgent_gradient: None,
                     },
                     draw_border_with_background: None,
+                    draw_titlebar: None,
                     opacity: None,
                     geometry_corner_radius: None,
                     clip_to_geometry: None,

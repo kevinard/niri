@@ -51,6 +51,7 @@ window-rule {
 
     // Properties that apply continuously.
     draw-border-with-background false
+    draw-titlebar false
     opacity 0.5
     block-out-from "screencast"
     // block-out-from "screen-capture"
@@ -804,6 +805,22 @@ This property can be useful for rectangular windows that do not support the xdg-
 ```kdl
 window-rule {
     draw-border-with-background false
+}
+```
+
+#### `draw-titlebar` (Canopa fork)
+
+Override whether the window gets a compositor titlebar (see the `titlebar` section of the layout configuration).
+
+`false` hides the titlebar of matched windows.
+`true` shows it even when `layout { titlebar { off; } }`.
+Either way, only windows that negotiated server-side decorations have a titlebar.
+
+```kdl
+window-rule {
+    match app-id="^foot$"
+
+    draw-titlebar false
 }
 ```
 

@@ -135,6 +135,14 @@ pub struct Mapped {
     /// Used for double-resize-click tracking.
     last_interactive_resize_start: Cell<Option<(Duration, ResizeEdge)>>,
 
+    /// Titlebar button under the pointer or a finger, and its visual state.
+    titlebar_interaction: Cell<
+        Option<(
+            crate::layout::titlebar::TitlebarPart,
+            crate::layout::titlebar::ButtonState,
+        )>,
+    >,
+
     /// Whether this window is in windowed (fake) fullscreen.
     ///
     /// In this mode, the underlying window is told that it's fullscreen, while keeping it as
@@ -301,6 +309,7 @@ impl Mapped {
             pending_transactions: Vec::new(),
             interactive_resize: None,
             last_interactive_resize_start: Cell::new(None),
+            titlebar_interaction: Cell::new(None),
             is_windowed_fullscreen: false,
             is_pending_windowed_fullscreen: false,
             uncommitted_windowed_fullscreen: Vec::new(),
@@ -489,6 +498,32 @@ impl Mapped {
         }
 
         rv
+    }
+
+    pub fn set_titlebar_interaction(
+        &self,
+        interaction: Option<(
+            crate::layout::titlebar::TitlebarPart,
+            crate::layout::titlebar::ButtonState,
+        )>,
+    ) -> bool {
+        self.titlebar_interaction.replace(interaction) != interaction
+    }
+
+    /// Whether `mode` (or the KDE decoration protocol without one) means server-side decorations.
+    fn ssd_for_mode(&self, mode: Option<zxdg_toplevel_decoration_v1::Mode>) -> bool {
+        match mode {
+            Some(zxdg_toplevel_decoration_v1::Mode::ServerSide) => true,
+            // Check KDE decorations when XDG are not in use.
+            None => with_states(self.toplevel().wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<KdeDecorationsModeState>()
+                    .map(KdeDecorationsModeState::is_server)
+                    == Some(true)
+            }),
+            _ => false,
+        }
     }
 
     pub fn last_interactive_resize_start(&self) -> &Cell<Option<(Duration, ResizeEdge)>> {
@@ -929,24 +964,37 @@ impl LayoutElement for Mapped {
         });
     }
 
+    fn with_decoration_title<T>(&self, f: impl FnOnce(&str) -> T) -> T {
+        with_toplevel_role(self.toplevel(), |role| {
+            f(role
+                .title
+                .as_deref()
+                .or(role.app_id.as_deref())
+                .unwrap_or_default())
+        })
+    }
+
+    fn titlebar_interaction(
+        &self,
+    ) -> Option<(
+        crate::layout::titlebar::TitlebarPart,
+        crate::layout::titlebar::ButtonState,
+    )> {
+        self.titlebar_interaction.get()
+    }
+
+    fn pending_has_ssd(&self) -> bool {
+        let mode = self
+            .toplevel()
+            .with_pending_state(|state| state.decoration_mode);
+        self.ssd_for_mode(mode)
+    }
+
     fn has_ssd(&self) -> bool {
-        let toplevel = self.toplevel();
         let mode = self
             .toplevel()
             .with_committed_state(|current| current.and_then(|s| s.decoration_mode));
-
-        match mode {
-            Some(zxdg_toplevel_decoration_v1::Mode::ServerSide) => true,
-            // Check KDE decorations when XDG are not in use.
-            None => with_states(toplevel.wl_surface(), |states| {
-                states
-                    .data_map
-                    .get::<KdeDecorationsModeState>()
-                    .map(KdeDecorationsModeState::is_server)
-                    == Some(true)
-            }),
-            _ => false,
-        }
+        self.ssd_for_mode(mode)
     }
 
     fn output_enter(&self, output: &Output) {

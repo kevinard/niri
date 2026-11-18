@@ -68,6 +68,7 @@ pub mod scroll_swipe_gesture;
 pub mod scroll_tracker;
 pub mod spatial_movement_grab;
 pub mod swipe_tracker;
+mod titlebar_grab;
 pub mod touch_overview_grab;
 
 use backend_ext::{NiriInputBackend as InputBackend, NiriInputDevice as _};
@@ -3182,6 +3183,52 @@ impl State {
                 }
             }
 
+            if !mod_down
+                && !is_overview_open
+                && !pointer.is_grabbed()
+                && !self.niri.is_locked()
+                && !self.niri.screenshot_ui.is_open()
+            {
+                let location = pointer.current_location();
+                let contents = self.niri.contents_under(location);
+                if let Some((window, crate::layout::HitType::Titlebar { part })) = contents.window {
+                    use crate::layout::titlebar::TitlebarPart;
+                    self.niri.layout.activate_window(&window);
+                    if button == Some(MouseButton::Left) {
+                        let start = PointerGrabStartData {
+                            focus: None,
+                            button: button_code,
+                            location,
+                        };
+                        if part == TitlebarPart::Drag {
+                            if self.titlebar_drag_press(&window, location) {
+                                self.niri.suppressed_buttons.insert(button_code);
+                                self.niri.queue_redraw_all();
+                                return;
+                            }
+                            if let Some(grab) = MoveGrab::new(
+                                self,
+                                AnyStartData::Pointer(start),
+                                window.clone(),
+                                false,
+                                None,
+                            ) {
+                                pointer.set_grab(self, grab, serial, Focus::Clear);
+                            }
+                        } else {
+                            let grab =
+                                titlebar_grab::TitlebarButtonGrab::new(start, window.clone(), part);
+                            pointer.set_grab(self, grab, serial, Focus::Clear);
+                            self.begin_titlebar_press(&window, part);
+                        }
+                    } else {
+                        self.niri.suppressed_buttons.insert(button_code);
+                        self.niri.queue_redraw_all();
+                        return;
+                    }
+                }
+            }
+
             if let Some(mapped) = self.niri.window_under_cursor() {
                 let window = mapped.window.clone();
 
@@ -4605,11 +4652,40 @@ impl State {
                     window,
                 );
                 handle.set_grab(self, grab, serial);
-            } else if let Some((window, _)) = under.window {
+            } else if let Some((window, hit)) = under.window {
                 self.niri.layout.activate_window(&window);
 
+                if let crate::layout::HitType::Titlebar { part } = hit {
+                    use crate::layout::titlebar::TitlebarPart;
+                    let start = TouchGrabStartData {
+                        focus: None,
+                        slot,
+                        location: pos,
+                    };
+                    if !mod_down && part != TitlebarPart::Drag {
+                        handle.set_grab(
+                            self,
+                            titlebar_grab::TitlebarTouchGrab::new(start, window.clone(), part),
+                            serial,
+                        );
+                        self.begin_titlebar_press(&window, part);
+                    } else if mod_down || !self.titlebar_drag_press(&window, pos) {
+                        // With the modifier held, the titlebar behaves like the rest of the
+                        // window and can also move the view.
+                        if let Some(grab) = MoveGrab::new(
+                            self,
+                            AnyStartData::Touch(start),
+                            window.clone(),
+                            mod_down,
+                            None,
+                        ) {
+                            handle.set_grab(self, grab, serial);
+                        }
+                    }
+                }
+
                 // Check if we need to start a touch move grab.
-                if mod_down {
+                if mod_down && !handle.is_grabbed() {
                     let start_data = TouchGrabStartData {
                         focus: None,
                         slot,

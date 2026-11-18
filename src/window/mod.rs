@@ -99,6 +99,11 @@ pub struct ResolvedWindowRules {
     /// `None` means using the SSD heuristic.
     pub draw_border_with_background: Option<bool>,
 
+    /// Whether to draw a compositor titlebar when the window negotiated server-side decorations.
+    ///
+    /// `None` follows `layout { titlebar }`.
+    pub draw_titlebar: Option<bool>,
+
     /// Extra opacity to draw this window with.
     pub opacity: Option<f32>,
 
@@ -287,6 +292,9 @@ impl ResolvedWindowRules {
 
                 if let Some(x) = rule.draw_border_with_background {
                     resolved.draw_border_with_background = Some(x);
+                }
+                if let Some(x) = rule.draw_titlebar {
+                    resolved.draw_titlebar = Some(x);
                 }
                 if let Some(x) = rule.opacity {
                     resolved.opacity = Some(x);

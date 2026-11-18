@@ -109,7 +109,7 @@ The general rule is to include things that users are reasonably expected to want
 We do also advertise our more unique features though like screencast block-out-from.
 
 We default to CSD (`prefer-no-csd` is commented out).
-This gives new users easy and familiar way to move and close windows via their titlebars, especially considering that niri doesn't have serverside titlebars (so far at least).
+This gives new users an easy and familiar way to move and close windows via their titlebars. The Canopa fork also provides optional server-side titlebars, disabled by default; see the layout configuration.
 
 Focus rings are drawn fully behind windows by default.
 While this unfortunately messes with window transparency, [which is a common source of confusion](./FAQ.md#why-are-transparent-windows-tinted-why-is-the-borderfocus-ring-showing-up-through-semitransparent-windows), defaulting to drawing focus rings only around windows would be even worse because it has holes inside clientside rounded corners.

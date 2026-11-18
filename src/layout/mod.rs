@@ -85,6 +85,7 @@ pub mod scrolling;
 pub mod shadow;
 pub mod tab_indicator;
 pub mod tile;
+pub mod titlebar;
 pub mod workspace;
 
 #[cfg(test)]
@@ -234,6 +235,23 @@ pub trait LayoutElement {
     fn max_size(&self) -> Size<i32, Logical>;
     fn is_wl_surface(&self, wl_surface: &WlSurface) -> bool;
     fn has_ssd(&self) -> bool;
+    /// Whether the pending configure carries server-side decorations.
+    fn pending_has_ssd(&self) -> bool {
+        self.has_ssd()
+    }
+    /// Calls `f` with the text compositor decorations display: the title, else the app ID.
+    fn with_decoration_title<T>(&self, f: impl FnOnce(&str) -> T) -> T {
+        f("")
+    }
+    /// The titlebar button under the pointer or a finger, and its state.
+    fn titlebar_interaction(&self) -> Option<(titlebar::TitlebarPart, titlebar::ButtonState)> {
+        None
+    }
+    /// Whether the window cannot change size, so maximizing it is meaningless.
+    fn is_fixed_size(&self) -> bool {
+        let (min, max) = (self.min_size(), self.max_size());
+        max.w > 0 && max.h > 0 && min == max
+    }
     fn set_preferred_scale_transform(&self, scale: output::Scale, transform: Transform);
     fn output_enter(&self, output: &Output);
     fn output_leave(&self, output: &Output);
@@ -535,6 +553,8 @@ pub enum AddWindowTarget<'a, W: LayoutElement> {
 /// Type of the window hit from `window_under()`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HitType {
+    /// Input belongs to the compositor frame, never to the application underneath it.
+    Titlebar { part: titlebar::TitlebarPart },
     /// The hit is within a window's input region and can be used for sending events to it.
     Input {
         /// Position of the window's buffer.
@@ -636,7 +656,7 @@ impl HitType {
     pub fn offset_win_pos(mut self, offset: Point<f64, Logical>) -> Self {
         match &mut self {
             HitType::Input { win_pos } => *win_pos += offset,
-            HitType::Activate { .. } => (),
+            HitType::Activate { .. } | HitType::Titlebar { .. } => (),
         }
         self
     }
@@ -653,7 +673,7 @@ impl HitType {
 
     pub fn to_activate(self) -> Self {
         match self {
-            HitType::Input { .. } => HitType::Activate {
+            HitType::Input { .. } | HitType::Titlebar { .. } => HitType::Activate {
                 is_tab_indicator: false,
             },
             HitType::Activate { .. } => self,

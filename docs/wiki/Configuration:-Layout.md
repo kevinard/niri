@@ -1,3 +1,60 @@
+### Titlebars (Canopa fork)
+
+The Canopa fork can draw titlebars for windows that negotiate server-side
+decorations. They are off by default. Enable the decoration protocols with
+`prefer-no-csd`, then enable titlebars:
+
+```kdl
+prefer-no-csd
+layout {
+    titlebar {
+        on
+        height 32
+        font "sans 10"
+        title-align "left"
+        buttons "maximize" "close"
+        buttons-side "right"
+        double-click "maximize"
+        active-color "#303030"
+        inactive-color "#242424"
+        text-color "#eeeeee"
+        // inactive-text-color "#a0a0a0"
+        button-hover-color "#ffffff26"
+        close-hover-color "#c01c28"
+    }
+}
+```
+
+Restart applications after changing `prefer-no-csd`. Titlebar options reload with
+the configuration.
+
+- `on` and `off` enable or disable titlebars. The `draw-titlebar` window rule
+  overrides this per window.
+- `height` is between 24 and 64 logical pixels, and `font` is a Pango font
+  description.
+- `title-align` is `"left"` or `"center"`. A centered title moves aside rather
+  than overlap the buttons.
+- `buttons` lists the buttons in their visual order: `"maximize"`, `"close"`, or
+  both. Repeated names are ignored, and `buttons` without arguments hides both.
+  `buttons-side` puts them on the `"right"` (default) or `"left"` edge.
+- `double-click` is `"maximize"` (default) or `"none"`.
+- `text-color` colors the title and button icons; `inactive-text-color` replaces
+  it for unfocused windows. `button-hover-color` is the circle behind a hovered
+  button, `close-hover-color` the one behind the close button. A pressed button
+  shows a darker circle, and the close icon switches to black or white for
+  contrast on a strong close color.
+
+Drag the titlebar to move the window and double-click or double-tap it to
+maximize or restore. Buttons act on release over the same button, with pointer
+or touch input. Windows whose minimum and maximum sizes are equal have no
+maximize button. Fullscreen windows have no titlebar; maximized windows keep
+theirs. The titlebar reserves layout space instead of covering application
+content, including in the size bounds sent to new windows. Applications that
+negotiate client-side decorations keep their own headerbars.
+
+Basic controls belong to the compositor and remain available without a shell.
+This version does not provide a titlebar menu or shell-defined titlebar actions.
+
 ### Overview
 
 In the `layout {}` section you can change various settings that influence how windows are positioned and sized.
