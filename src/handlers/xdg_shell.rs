@@ -1007,6 +1007,10 @@ impl XdgDecorationHandler for State {
             let surface = toplevel.wl_surface();
             if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
                 mapped.set_needs_configure();
+                // Size requests follow the pending decoration mode; request a size that
+                // accounts for the titlebar together with the new mode.
+                let window = mapped.window.clone();
+                self.niri.layout.update_window(&window, None);
             } else {
                 toplevel.send_configure();
             }
@@ -1026,6 +1030,10 @@ impl XdgDecorationHandler for State {
             let surface = toplevel.wl_surface();
             if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
                 mapped.set_needs_configure();
+                // Size requests follow the pending decoration mode; request a size that
+                // accounts for the titlebar together with the new mode.
+                let window = mapped.window.clone();
+                self.niri.layout.update_window(&window, None);
             } else {
                 toplevel.send_configure();
             }
@@ -1551,9 +1559,6 @@ impl State {
     }
 
     fn redraw_window_titlebar(&mut self, toplevel: &ToplevelSurface) {
-        if self.niri.config.borrow().layout.titlebar.off {
-            return;
-        }
         let Some((mapped, output)) = self
             .niri
             .layout

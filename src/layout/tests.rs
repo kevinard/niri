@@ -28,6 +28,7 @@ impl<W: LayoutElement> Default for Layout<W> {
 #[derive(Debug)]
 struct TestWindowInner {
     has_ssd: Cell<bool>,
+    pending_ssd: Cell<Option<bool>>,
     id: usize,
     parent_id: Cell<Option<usize>>,
     bbox: Cell<Rectangle<i32, Logical>>,
@@ -82,6 +83,7 @@ impl TestWindow {
     fn new(params: TestWindowParams) -> Self {
         Self(Rc::new(TestWindowInner {
             has_ssd: Cell::new(false),
+            pending_ssd: Cell::new(None),
             id: params.id,
             parent_id: Cell::new(params.parent_id),
             bbox: Cell::new(params.bbox),
@@ -208,6 +210,13 @@ impl LayoutElement for TestWindow {
 
     fn has_ssd(&self) -> bool {
         self.0.has_ssd.get()
+    }
+
+    fn pending_has_ssd(&self) -> bool {
+        self.0
+            .pending_ssd
+            .get()
+            .unwrap_or_else(|| self.0.has_ssd.get())
     }
 
     fn output_enter(&self, _output: &Output) {}

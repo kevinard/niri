@@ -368,6 +368,14 @@ pub struct Niri {
     /// Tablet suppression is separate from the pointer button namespace.
     pub suppressed_tablet_buttons: HashSet<u32>,
     pub(crate) pointer_buttons: crate::input::pointer_buttons::Buttons,
+    /// Titlebar control held by a compositor grab, and whether the input is still over it.
+    pub titlebar_press: Option<(Window, crate::layout::titlebar::TitlebarPart, bool)>,
+    /// Window whose titlebar shows a hovered or pressed control.
+    pub titlebar_interaction_window: Option<Window>,
+    /// Whether the pointer was over a titlebar at the last refresh.
+    pub pointer_over_titlebar: bool,
+    /// Last press on a titlebar drag area, to recognize double clicks and taps.
+    pub titlebar_last_press: Option<(Window, Duration, Point<f64, Logical>)>,
     /// Binds whose release action is pending, keyed by the key code.
     pub pending_release_binds: HashMap<Keycode, Bind>,
     /// Same as `pending_release_binds`, but for mouse buttons, keyed by the button code.
@@ -898,6 +906,7 @@ impl State {
         self.niri.refresh_layout();
 
         self.niri.cursor_manager.check_cursor_image_surface_alive();
+        self.refresh_titlebar_interaction();
         self.niri.refresh_pointer_outputs();
         self.niri.global_space.refresh();
         self.niri.refresh_idle_inhibit();
@@ -2878,6 +2887,10 @@ impl Niri {
             suppressed_buttons: HashSet::new(),
             suppressed_tablet_buttons: HashSet::new(),
             pointer_buttons: Default::default(),
+            titlebar_press: None,
+            titlebar_interaction_window: None,
+            pointer_over_titlebar: false,
+            titlebar_last_press: None,
             pending_release_binds: HashMap::new(),
             pending_mouse_release_binds: HashMap::new(),
             pending_tablet_release_binds: HashMap::new(),

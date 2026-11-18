@@ -1,6 +1,6 @@
 use super::*;
 use super::client::ClientId;
-use crate::layout::{LayoutElement, HitType, titlebar::TitlebarPart};
+use crate::layout::{LayoutElement, HitType, titlebar::{ButtonState, TitlebarPart}};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{Mode, ZxdgToplevelDecorationV1};
 use wayland_client::protocol::{wl_pointer, wl_surface::WlSurface};
 
@@ -25,8 +25,11 @@ fn setup(mode: Mode) -> (Fixture, ClientId, WlSurface, ZxdgToplevelDecorationV1)
         window.configures_received.last().unwrap().1.decoration_mode,
         Some(mode)
     );
-    let size = window.configures_received.last().unwrap().1.size;
+    let configure = &window.configures_received.last().unwrap().1;
+    let size = configure.size;
     assert_eq!(size.1, if mode == Mode::ServerSide { 536 } else { 568 });
+    // Clients sizing themselves to the bounds must leave room for the titlebar too.
+    assert_eq!(configure.bounds.unwrap().1, size.1);
     window.set_size(size.0 as u16, size.1 as u16);
     window.attach_new_buffer();
     window.ack_last_and_commit();
@@ -66,10 +69,42 @@ fn motion(f: &mut Fixture, id: ClientId, point: (u32, u32)) {
 }
 
 fn button(f: &mut Fixture, id: ClientId, state: wl_pointer::ButtonState) {
+    button_code(f, id, 0x110, state);
+}
+
+fn button_code(f: &mut Fixture, id: ClientId, code: u32, state: wl_pointer::ButtonState) {
     let pointer = f.client(id).state.virtual_pointer();
-    pointer.button(0, 0x110, state);
+    pointer.button(0, code, state);
     pointer.frame();
     f.double_roundtrip(id);
+}
+
+fn click(f: &mut Fixture, id: ClientId) {
+    button(f, id, wl_pointer::ButtonState::Pressed);
+    button(f, id, wl_pointer::ButtonState::Released);
+}
+
+fn interaction(f: &mut Fixture) -> Option<(TitlebarPart, ButtonState)> {
+    f.niri()
+        .layout
+        .windows()
+        .next()
+        .unwrap()
+        .1
+        .titlebar_interaction()
+}
+
+fn is_maximized(f: &mut Fixture, id: ClientId, surface: &WlSurface) -> bool {
+    let window = f.client(id).window(surface);
+    window
+        .configures_received
+        .last()
+        .unwrap()
+        .1
+        .states
+        .contains(
+        &smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::State::Maximized,
+    )
 }
 
 #[test]
@@ -79,6 +114,11 @@ fn negotiated_mode_is_applied_with_the_client_commit() {
     decoration.set_mode(Mode::ClientSide);
     f.double_roundtrip(id);
     assert!(f.niri().layout.windows().next().unwrap().1.has_ssd());
+    // The configure carrying the new mode already requests the height without a titlebar.
+    let window = f.client(id).window(&surface);
+    let configure = &window.configures_received.last().unwrap().1;
+    assert_eq!(configure.decoration_mode, Some(Mode::ClientSide));
+    assert_eq!(configure.size.1, 568);
     f.client(id).window(&surface).ack_last_and_commit();
     f.double_roundtrip(id);
     assert!(!f.niri().layout.windows().next().unwrap().1.has_ssd());
@@ -225,4 +265,138 @@ fn egl_titlebar_is_rendered_with_the_window() {
         let file = std::fs::File::create(path).unwrap();
         crate::utils::write_png_rgba8(file, 800, 600, &pixels).unwrap();
     }
+}
+
+#[test]
+fn other_buttons_during_a_titlebar_click_do_not_stick() {
+    let (mut f, id, surface, _) = setup(Mode::ServerSide);
+    let close = control(&mut f, TitlebarPart::Close);
+    motion(&mut f, id, close);
+    button(&mut f, id, wl_pointer::ButtonState::Pressed);
+    button_code(&mut f, id, 0x111, wl_pointer::ButtonState::Pressed);
+    button_code(&mut f, id, 0x111, wl_pointer::ButtonState::Released);
+    button(&mut f, id, wl_pointer::ButtonState::Released);
+    assert!(f.client(id).window(&surface).close_requested);
+    assert!(f.client(id).state.pointer_buttons_received.is_empty());
+
+    // A later click elsewhere starts the seat's implicit click grab, which ends only once
+    // the seat sees no button held. A release that never reached the seat would keep it.
+    motion(&mut f, id, (400, 300));
+    click(&mut f, id);
+    assert!(!f.niri().seat.get_pointer().unwrap().is_grabbed());
+}
+
+#[test]
+fn hovering_and_pressing_controls_is_shown_and_the_cursor_is_reset() {
+    let (mut f, id, _, _) = setup(Mode::ServerSide);
+    let close = control(&mut f, TitlebarPart::Close);
+    let drag = control(&mut f, TitlebarPart::Drag);
+    f.niri()
+        .cursor_manager
+        .set_cursor_image(smithay::input::pointer::CursorImageStatus::Hidden);
+    motion(&mut f, id, close);
+    assert_eq!(
+        interaction(&mut f),
+        Some((TitlebarPart::Close, ButtonState::Hovered))
+    );
+    assert!(matches!(
+        f.niri().cursor_manager.cursor_image(),
+        smithay::input::pointer::CursorImageStatus::Named(_)
+    ));
+    button(&mut f, id, wl_pointer::ButtonState::Pressed);
+    assert_eq!(
+        interaction(&mut f),
+        Some((TitlebarPart::Close, ButtonState::Pressed))
+    );
+    // Moving away while pressed shows the control released; nothing happens on release.
+    motion(&mut f, id, drag);
+    assert_eq!(interaction(&mut f), None);
+    button(&mut f, id, wl_pointer::ButtonState::Released);
+    motion(&mut f, id, (400, 300));
+    assert_eq!(interaction(&mut f), None);
+}
+
+#[test]
+fn double_clicking_the_titlebar_toggles_maximize() {
+    let (mut f, id, surface, _) = setup(Mode::ServerSide);
+    let drag = control(&mut f, TitlebarPart::Drag);
+    motion(&mut f, id, drag);
+    click(&mut f, id);
+    assert!(!is_maximized(&mut f, id, &surface));
+    click(&mut f, id);
+    assert!(is_maximized(&mut f, id, &surface));
+    assert!(f.client(id).state.pointer_buttons_received.is_empty());
+}
+
+#[test]
+fn double_click_can_be_disabled() {
+    let config = niri_config::Config::parse_mem(
+        "prefer-no-csd\nanimations { off; }\nlayout { titlebar { on; double-click \"none\"; }; }",
+    )
+    .unwrap();
+    let (mut f, id, surface, _) = setup(Mode::ServerSide);
+    f.niri_state().reload_config(Ok(config));
+    f.double_roundtrip(id);
+    let drag = control(&mut f, TitlebarPart::Drag);
+    motion(&mut f, id, drag);
+    click(&mut f, id);
+    click(&mut f, id);
+    assert!(!is_maximized(&mut f, id, &surface));
+}
+
+#[test]
+fn fixed_size_windows_have_no_maximize_control() {
+    let (mut f, id, surface, _) = setup(Mode::ServerSide);
+    {
+        let window = f.client(id).window(&surface);
+        window.xdg_toplevel.set_min_size(400, 300);
+        window.xdg_toplevel.set_max_size(400, 300);
+        window.commit();
+    }
+    f.double_roundtrip(id);
+    let niri = f.niri();
+    let found = (0..100)
+        .flat_map(|y| (0..800).map(move |x| (x, y)))
+        .any(|(x, y)| {
+            matches!(
+                niri.contents_under((x as f64 + 0.5, y as f64 + 0.5).into())
+                    .window,
+                Some((
+                    _,
+                    HitType::Titlebar {
+                        part: TitlebarPart::Maximize
+                    }
+                ))
+            )
+        });
+    assert!(!found);
+    let drag = control(&mut f, TitlebarPart::Drag);
+    motion(&mut f, id, drag);
+    click(&mut f, id);
+    click(&mut f, id);
+    assert!(!is_maximized(&mut f, id, &surface));
+}
+
+#[test]
+fn window_rule_disables_the_titlebar() {
+    let config = niri_config::Config::parse_mem(
+        "prefer-no-csd\nanimations { off; }\nhotkey-overlay { skip-at-startup; }\nlayout { titlebar { on; }; border { off; }; }\nwindow-rule { draw-titlebar false; }",
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (800, 600));
+    let id = f.add_client();
+    let client = f.client(id);
+    let manager = client.state.decoration_manager.clone().unwrap();
+    let window = client.create_window();
+    let surface = window.surface.clone();
+    let decoration =
+        manager.get_toplevel_decoration(&window.xdg_toplevel, &window.qh, surface.clone());
+    decoration.set_mode(Mode::ServerSide);
+    window.commit();
+    f.double_roundtrip(id);
+    let window = f.client(id).window(&surface);
+    let configure = &window.configures_received.last().unwrap().1;
+    assert_eq!(configure.decoration_mode, Some(Mode::ServerSide));
+    assert_eq!(configure.size.1, 568);
 }

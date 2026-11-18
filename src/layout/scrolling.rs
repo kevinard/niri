@@ -906,7 +906,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         col.pending_sizing_mode().is_fullscreen()
     }
 
-    pub fn new_window_toplevel_bounds(&self, rules: &ResolvedWindowRules) -> Size<i32, Logical> {
+    pub fn new_window_toplevel_bounds(
+        &self,
+        rules: &ResolvedWindowRules,
+        titlebar_height: f64,
+    ) -> Size<i32, Logical> {
         let border_config = self.options.layout.border.merged_with(&rules.border);
 
         let display_mode = rules
@@ -924,6 +928,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.working_area.size,
             extra_size,
             self.options.layout.gaps,
+            titlebar_height,
         )
     }
 
@@ -4384,6 +4389,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             };
 
             for (tile_idx, tile) in col.tiles.iter_mut().enumerate() {
+                let titlebar_height = tile.requested_titlebar_height();
                 let win = tile.window_mut();
 
                 let active_in_column = col.active_tile_idx == tile_idx;
@@ -4409,6 +4415,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     col.working_area.size,
                     extra_size,
                     self.options.layout.gaps,
+                    titlebar_height,
                 );
                 win.set_bounds(bounds);
 
@@ -6430,6 +6437,7 @@ fn compute_toplevel_bounds(
     working_area_size: Size<f64, Logical>,
     extra_size: Size<f64, Logical>,
     gaps: f64,
+    titlebar_height: f64,
 ) -> Size<i32, Logical> {
     let mut border = 0.;
     if !border_config.off {
@@ -6438,7 +6446,10 @@ fn compute_toplevel_bounds(
 
     Size::from((
         f64::max(working_area_size.w - gaps * 2. - extra_size.w - border, 1.),
-        f64::max(working_area_size.h - gaps * 2. - extra_size.h - border, 1.),
+        f64::max(
+            working_area_size.h - gaps * 2. - extra_size.h - border - titlebar_height,
+            1.,
+        ),
     ))
     .to_i32_floor()
 }

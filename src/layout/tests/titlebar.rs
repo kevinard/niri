@@ -1,8 +1,25 @@
 use super::*;
-use crate::layout::titlebar::{hit, TitlebarPart};
+use niri_config::titlebar::{ButtonsSide, Titlebar as TitlebarConfig, TitlebarButton};
+
+use crate::layout::titlebar::{TitlebarLayout, TitlebarPart};
+
+fn hit(size: Size<f64, Logical>, point: Point<f64, Logical>) -> Option<TitlebarPart> {
+    TitlebarLayout::new(&TitlebarConfig::default(), size, true).hit(point)
+}
 
 fn tile(ssd: bool, scale: f64, border: bool) -> Tile<TestWindow> {
-    let window = TestWindow::new(TestWindowParams::new(1));
+    tile_with_rules(ssd, scale, border, None)
+}
+
+fn tile_with_rules(
+    ssd: bool,
+    scale: f64,
+    border: bool,
+    rules: Option<ResolvedWindowRules>,
+) -> Tile<TestWindow> {
+    let mut params = TestWindowParams::new(1);
+    params.rules = rules;
+    let window = TestWindow::new(params);
     window.0.has_ssd.set(ssd);
     let mut options = Options::default();
     options.animations.off = true;
@@ -129,4 +146,60 @@ fn negotiating_ssd_during_a_resize_keeps_the_frame_inside_the_tile() {
     tile.advance_animations();
     assert_eq!(tile.window_loc(), Point::from((0., 32.)));
     assert_eq!(tile.tile_size(), Size::from((100., 200.)));
+}
+
+#[test]
+fn button_order_side_and_fixed_size_windows() {
+    let size = Size::from((300., 32.));
+    let config = TitlebarConfig {
+        buttons: vec![TitlebarButton::Close, TitlebarButton::Maximize],
+        buttons_side: ButtonsSide::Left,
+        ..Default::default()
+    };
+    let layout = TitlebarLayout::new(&config, size, true);
+    assert_eq!(layout.hit((1., 16.).into()), Some(TitlebarPart::Close));
+    assert_eq!(layout.hit((40., 16.).into()), Some(TitlebarPart::Maximize));
+    assert_eq!(layout.hit((299., 16.).into()), Some(TitlebarPart::Drag));
+    assert_eq!(layout.text.loc.x, 64. + 8.);
+    assert_eq!(layout.text.size.w, 300. - 72. - 12.);
+
+    // A window that cannot change size offers no maximize control.
+    let fixed = TitlebarLayout::new(&TitlebarConfig::default(), size, false);
+    assert_eq!(fixed.buttons.len(), 1);
+    assert_eq!(fixed.hit((299., 16.).into()), Some(TitlebarPart::Close));
+    assert_eq!(fixed.hit((250., 16.).into()), Some(TitlebarPart::Drag));
+
+    let none = TitlebarConfig {
+        buttons: Vec::new(),
+        ..Default::default()
+    };
+    let none = TitlebarLayout::new(&none, size, true);
+    assert_eq!(none.hit((299., 16.).into()), Some(TitlebarPart::Drag));
+    assert_eq!(none.text.size.w, 300. - 24.);
+}
+
+#[test]
+fn window_rule_overrides_the_layout_setting() {
+    let rules = |draw| ResolvedWindowRules {
+        draw_titlebar: Some(draw),
+        ..Default::default()
+    };
+    let tile = tile_with_rules(true, 1., false, Some(rules(false)));
+    assert_eq!(tile.titlebar_height(), 0.);
+
+    let mut tile = tile_with_rules(true, 1., false, Some(rules(true)));
+    let mut options = (*tile.options).clone();
+    options.layout.titlebar.off = true;
+    tile.update_config((1280., 720.).into(), 1., Rc::new(options));
+    assert_eq!(tile.titlebar_height(), 32.);
+}
+
+#[test]
+fn size_requests_follow_the_pending_decoration_mode() {
+    let mut tile = tile(true, 1., false);
+    tile.window().0.pending_ssd.set(Some(false));
+    tile.request_tile_size((100., 400.).into(), false, None);
+    assert_eq!(tile.window().0.requested_size.get().unwrap().h, 400);
+    // The committed frame still has its titlebar until the client commits the new mode.
+    assert_eq!(tile.titlebar_height(), 32.);
 }

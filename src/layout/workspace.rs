@@ -905,14 +905,14 @@ impl<W: LayoutElement> Workspace<W> {
             (current.min_size, current.max_size)
         });
         toplevel.with_pending_state(|state| {
-            let titlebar = &self.options.layout.titlebar;
             let ssd = state
                 .decoration_mode
                 .map_or(kde_ssd, |mode| mode == Mode::ServerSide);
-            let titlebar_height = if !titlebar.off && ssd {
-                crate::utils::round_logical_in_physical_max1(
+            let titlebar_height = if ssd {
+                super::titlebar::reserved_height(
+                    &self.options.layout.titlebar,
+                    rules.draw_titlebar,
                     self.scale.fractional_scale(),
-                    titlebar.height,
                 )
             } else {
                 0.
@@ -936,9 +936,15 @@ impl<W: LayoutElement> Workspace<W> {
             }
 
             if is_floating {
-                state.bounds = Some(self.floating.new_window_toplevel_bounds(rules));
+                state.bounds = Some(
+                    self.floating
+                        .new_window_toplevel_bounds(rules, titlebar_height),
+                );
             } else {
-                state.bounds = Some(self.scrolling.new_window_toplevel_bounds(rules));
+                state.bounds = Some(
+                    self.scrolling
+                        .new_window_toplevel_bounds(rules, titlebar_height),
+                );
             }
         });
     }
