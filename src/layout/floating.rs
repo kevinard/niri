@@ -351,9 +351,13 @@ impl<W: LayoutElement> FloatingSpace<W> {
         })
     }
 
-    pub fn new_window_toplevel_bounds(&self, rules: &ResolvedWindowRules) -> Size<i32, Logical> {
+    pub fn new_window_toplevel_bounds(
+        &self,
+        rules: &ResolvedWindowRules,
+        titlebar_height: f64,
+    ) -> Size<i32, Logical> {
         let border_config = self.options.layout.border.merged_with(&rules.border);
-        compute_toplevel_bounds(border_config, self.working_area.size)
+        compute_toplevel_bounds(border_config, self.working_area.size, titlebar_height)
     }
 
     /// Returns the geometry of the active window relative to and clamped to the working area.
@@ -1182,6 +1186,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
         let active = self.active_window_id.clone();
         for tile in &mut self.tiles {
+            let titlebar_height = tile.requested_titlebar_height();
             let win = tile.window_mut();
 
             win.set_active_in_column(true);
@@ -1201,7 +1206,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
             win.set_interactive_resize(resize_data);
 
             let border_config = self.options.layout.border.merged_with(&win.rules().border);
-            let bounds = compute_toplevel_bounds(border_config, self.working_area.size);
+            let bounds =
+                compute_toplevel_bounds(border_config, self.working_area.size, titlebar_height);
             win.set_bounds(bounds);
 
             // If transactions are disabled, also disable combined throttling, for more
@@ -1411,6 +1417,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
 fn compute_toplevel_bounds(
     border_config: niri_config::Border,
     working_area_size: Size<f64, Logical>,
+    titlebar_height: f64,
 ) -> Size<i32, Logical> {
     let mut border = 0.;
     if !border_config.off {
@@ -1419,7 +1426,7 @@ fn compute_toplevel_bounds(
 
     Size::from((
         f64::max(working_area_size.w - border, 1.),
-        f64::max(working_area_size.h - border, 1.),
+        f64::max(working_area_size.h - border - titlebar_height, 1.),
     ))
     .to_i32_floor()
 }

@@ -149,32 +149,6 @@ enum ShouldInterceptResult {
 }
 
 impl State {
-    fn perform_titlebar_action(
-        &mut self,
-        window: &smithay::desktop::Window,
-        part: crate::layout::titlebar::TitlebarPart,
-    ) {
-        use crate::layout::titlebar::TitlebarPart;
-        if !self
-            .niri
-            .layout
-            .windows()
-            .any(|(_, mapped)| &mapped.window == window)
-        {
-            return;
-        }
-        match part {
-            TitlebarPart::Close => {
-                if let Some(toplevel) = window.toplevel() {
-                    toplevel.send_close();
-                }
-            }
-            TitlebarPart::Maximize => self.niri.layout.toggle_maximized(window),
-            TitlebarPart::Drag => (),
-        }
-        self.niri.queue_redraw_all();
-    }
-
     pub fn process_input_event<I: InputBackend + 'static>(&mut self, event: InputEvent<I>)
     where
         I::Device: 'static, // Needed for downcasting.
@@ -3227,6 +3201,11 @@ impl State {
                             location,
                         };
                         if part == TitlebarPart::Drag {
+                            if self.titlebar_drag_press(&window, location) {
+                                self.niri.suppressed_buttons.insert(button_code);
+                                self.niri.queue_redraw_all();
+                                return;
+                            }
                             if let Some(grab) = MoveGrab::new(
                                 self,
                                 AnyStartData::Pointer(start),
@@ -3237,8 +3216,10 @@ impl State {
                                 pointer.set_grab(self, grab, serial, Focus::Clear);
                             }
                         } else {
-                            let grab = titlebar_grab::TitlebarButtonGrab::new(start, window, part);
+                            let grab =
+                                titlebar_grab::TitlebarButtonGrab::new(start, window.clone(), part);
                             pointer.set_grab(self, grab, serial, Focus::Clear);
+                            self.begin_titlebar_press(&window, part);
                         }
                     } else {
                         self.niri.suppressed_buttons.insert(button_code);
@@ -4675,25 +4656,31 @@ impl State {
                 self.niri.layout.activate_window(&window);
 
                 if let crate::layout::HitType::Titlebar { part } = hit {
+                    use crate::layout::titlebar::TitlebarPart;
                     let start = TouchGrabStartData {
                         focus: None,
                         slot,
                         location: pos,
                     };
-                    if !mod_down && part != crate::layout::titlebar::TitlebarPart::Drag {
+                    if !mod_down && part != TitlebarPart::Drag {
                         handle.set_grab(
                             self,
                             titlebar_grab::TitlebarTouchGrab::new(start, window.clone(), part),
                             serial,
                         );
-                    } else if let Some(grab) = MoveGrab::new(
-                        self,
-                        AnyStartData::Touch(start),
-                        window.clone(),
-                        false,
-                        None,
-                    ) {
-                        handle.set_grab(self, grab, serial);
+                        self.begin_titlebar_press(&window, part);
+                    } else if mod_down || !self.titlebar_drag_press(&window, pos) {
+                        // With the modifier held, the titlebar behaves like the rest of the
+                        // window and can also move the view.
+                        if let Some(grab) = MoveGrab::new(
+                            self,
+                            AnyStartData::Touch(start),
+                            window.clone(),
+                            mod_down,
+                            None,
+                        ) {
+                            handle.set_grab(self, grab, serial);
+                        }
                     }
                 }
 

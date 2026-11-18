@@ -235,9 +235,22 @@ pub trait LayoutElement {
     fn max_size(&self) -> Size<i32, Logical>;
     fn is_wl_surface(&self, wl_surface: &WlSurface) -> bool;
     fn has_ssd(&self) -> bool;
-    /// Plain, bounded display text for compositor decorations.
-    fn decoration_title(&self) -> String {
-        String::new()
+    /// Whether the pending configure carries server-side decorations.
+    fn pending_has_ssd(&self) -> bool {
+        self.has_ssd()
+    }
+    /// Calls `f` with the text compositor decorations display: the title, else the app ID.
+    fn with_decoration_title<T>(&self, f: impl FnOnce(&str) -> T) -> T {
+        f("")
+    }
+    /// The titlebar button under the pointer or a finger, and its state.
+    fn titlebar_interaction(&self) -> Option<(titlebar::TitlebarPart, titlebar::ButtonState)> {
+        None
+    }
+    /// Whether the window cannot change size, so maximizing it is meaningless.
+    fn is_fixed_size(&self) -> bool {
+        let (min, max) = (self.min_size(), self.max_size());
+        max.w > 0 && max.h > 0 && min == max
     }
     fn set_preferred_scale_transform(&self, scale: output::Scale, transform: Transform);
     fn output_enter(&self, output: &Output);

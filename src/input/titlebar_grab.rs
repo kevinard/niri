@@ -12,9 +12,176 @@ use smithay::input::touch::{
 use smithay::input::SeatHandler;
 use smithay::utils::{Logical, Point};
 
-use crate::layout::titlebar::TitlebarPart;
-use crate::layout::HitType;
+use super::DOUBLE_CLICK_TIME;
+use crate::layout::titlebar::{self, TitlebarPart};
+use crate::layout::{HitType, LayoutElement as _};
 use crate::niri::State;
+use crate::utils::get_monotonic_time;
+
+impl State {
+    /// Closes or maximizes `window` if it is still mapped.
+    pub(super) fn perform_titlebar_action(&mut self, window: &Window, part: TitlebarPart) {
+        let Some(fixed_size) = self
+            .niri
+            .layout
+            .windows()
+            .find(|(_, mapped)| &mapped.window == window)
+            .map(|(_, mapped)| mapped.is_fixed_size())
+        else {
+            return;
+        };
+        match part {
+            TitlebarPart::Close => {
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_close();
+                }
+            }
+            // The button is hidden for fixed-size windows; a double click must not maximize
+            // them either.
+            TitlebarPart::Maximize if fixed_size => return,
+            TitlebarPart::Maximize => self.niri.layout.toggle_maximized(window),
+            TitlebarPart::Drag => return,
+        }
+        self.niri.queue_redraw_all();
+    }
+
+    /// Records a press on the drag area of `window`'s titlebar. Returns `true` and maximizes the
+    /// window when the press completes a double click or tap.
+    pub(super) fn titlebar_drag_press(
+        &mut self,
+        window: &Window,
+        location: Point<f64, Logical>,
+    ) -> bool {
+        // Farther apart, the presses are separate drags rather than a double click.
+        const MAX_DISTANCE: f64 = 16.;
+        let now = get_monotonic_time();
+        let double =
+            self.niri
+                .titlebar_last_press
+                .take()
+                .is_some_and(|(last, time, last_location)| {
+                    let delta = location - last_location;
+                    &last == window
+                        && now.saturating_sub(time) <= DOUBLE_CLICK_TIME
+                        && delta.x.hypot(delta.y) <= MAX_DISTANCE
+                });
+        let action = self.niri.config.borrow().layout.titlebar.double_click;
+        if double && action == niri_config::titlebar::DoubleClickAction::Maximize {
+            self.perform_titlebar_action(window, TitlebarPart::Maximize);
+            return true;
+        }
+        self.niri.titlebar_last_press = Some((window.clone(), now, location));
+        false
+    }
+
+    // The press state is applied by refresh_titlebar_interaction() before the next redraw. It
+    // cannot run here: grab callbacks hold the seat's pointer lock.
+    pub(super) fn begin_titlebar_press(&mut self, window: &Window, part: TitlebarPart) {
+        self.niri.titlebar_press = Some((window.clone(), part, true));
+        self.niri.queue_redraw_all();
+    }
+
+    fn update_titlebar_press(&mut self, location: Point<f64, Logical>) {
+        let Some((window, part, was_over)) = self.niri.titlebar_press.clone() else {
+            return;
+        };
+        let over = self.is_over_titlebar_part(location, &window, part);
+        if over != was_over {
+            self.niri.titlebar_press = Some((window, part, over));
+            self.niri.queue_redraw_all();
+        }
+    }
+
+    fn end_titlebar_press(&mut self) {
+        if self.niri.titlebar_press.take().is_some() {
+            self.niri.queue_redraw_all();
+        }
+    }
+
+    fn is_over_titlebar_part(
+        &self,
+        location: Point<f64, Logical>,
+        window: &Window,
+        part: TitlebarPart,
+    ) -> bool {
+        !self.niri.is_locked()
+            && self
+                .niri
+                .contents_under(location)
+                .window
+                .is_some_and(|(under, hit)| {
+                    &under == window && matches!(hit, HitType::Titlebar { part: p } if p == part)
+                })
+    }
+
+    /// Updates the hovered and pressed titlebar controls and the cursor over titlebars.
+    pub(crate) fn refresh_titlebar_interaction(&mut self) {
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        let free_pointer = !pointer.is_grabbed()
+            && self.niri.pointer_visibility.is_visible()
+            && !self.niri.is_locked()
+            && !self.niri.screenshot_ui.is_open()
+            && self.niri.dnd_icon.is_none();
+        let under_pointer = match &self.niri.pointer_contents.window {
+            Some((window, HitType::Titlebar { part })) => Some((window.clone(), *part)),
+            _ => None,
+        };
+
+        let target = match &self.niri.titlebar_press {
+            Some((window, part, true)) => {
+                Some((window.clone(), (*part, titlebar::ButtonState::Pressed)))
+            }
+            Some(_) => None,
+            None => under_pointer
+                .clone()
+                .filter(|(_, part)| free_pointer && *part != TitlebarPart::Drag)
+                .map(|(window, part)| (window, (part, titlebar::ButtonState::Hovered))),
+        };
+
+        // Clients set their cursor on pointer enter; a titlebar has no client to do that, so the
+        // last client cursor (a text beam, a resize arrow, or none) would otherwise remain.
+        let over_titlebar = under_pointer.is_some();
+        if over_titlebar && !self.niri.pointer_over_titlebar && free_pointer {
+            self.niri
+                .cursor_manager
+                .set_cursor_image(CursorImageStatus::default_named());
+            self.niri.queue_redraw_all();
+        }
+        self.niri.pointer_over_titlebar = over_titlebar;
+
+        let mut changed = false;
+        let previous = self.niri.titlebar_interaction_window.take();
+        if let Some(previous) = previous {
+            if target
+                .as_ref()
+                .is_none_or(|(window, _)| *window != previous)
+            {
+                if let Some((_, mapped)) = self
+                    .niri
+                    .layout
+                    .windows()
+                    .find(|(_, mapped)| mapped.window == previous)
+                {
+                    changed |= mapped.set_titlebar_interaction(None);
+                }
+            }
+        }
+        if let Some((window, interaction)) = target {
+            if let Some((_, mapped)) = self
+                .niri
+                .layout
+                .windows()
+                .find(|(_, mapped)| mapped.window == window)
+            {
+                changed |= mapped.set_titlebar_interaction(Some(interaction));
+                self.niri.titlebar_interaction_window = Some(window);
+            }
+        }
+        if changed {
+            self.niri.queue_redraw_all();
+        }
+    }
+}
 
 pub struct TitlebarButtonGrab {
     start_data: PointerGrabStartData<State>,
@@ -62,13 +229,7 @@ impl TouchGrab<State> for TitlebarTouchGrab {
         if event.slot != self.start_data.slot {
             return;
         }
-        let contents = data.niri.contents_under(self.location);
-        if !data.niri.is_locked()
-            && contents.window.as_ref().is_some_and(|(window, hit)| {
-                window == &self.window
-                    && matches!(hit, HitType::Titlebar { part } if *part == self.part)
-            })
-        {
+        if data.is_over_titlebar_part(self.location, &self.window, self.part) {
             data.perform_titlebar_action(&self.window, self.part);
         }
         handle.unset_grab(self, data);
@@ -84,6 +245,7 @@ impl TouchGrab<State> for TitlebarTouchGrab {
         handle.motion(data, None, event);
         if event.slot == self.start_data.slot {
             self.location = event.location;
+            data.update_titlebar_press(event.location);
         }
     }
 
@@ -113,7 +275,9 @@ impl TouchGrab<State> for TitlebarTouchGrab {
     fn start_data(&self) -> &TouchGrabStartData<State> {
         &self.start_data
     }
-    fn unset(&mut self, _: &mut State) {}
+    fn unset(&mut self, data: &mut State) {
+        data.end_titlebar_press();
+    }
 }
 
 impl TitlebarButtonGrab {
@@ -128,15 +292,6 @@ impl TitlebarButtonGrab {
             part,
         }
     }
-
-    fn on_ungrab(&mut self, state: &mut State) {
-        state
-            .niri
-            .cursor_manager
-            .set_cursor_image(CursorImageStatus::default_named());
-        // Redraw to update the cursor.
-        state.niri.queue_redraw_all();
-    }
 }
 
 impl PointerGrab<State> for TitlebarButtonGrab {
@@ -148,6 +303,7 @@ impl PointerGrab<State> for TitlebarButtonGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
+        data.update_titlebar_press(event.location);
     }
 
     fn relative_motion(
@@ -166,25 +322,16 @@ impl PointerGrab<State> for TitlebarButtonGrab {
         handle: &mut PointerInnerHandle<'_, State>,
         event: &ButtonEvent,
     ) {
+        // Other buttons pass through the grab without a focus, so no client receives them and
+        // the seat still sees their releases.
+        handle.button(data, event);
+        if event.button != self.start_data.button || event.state != ButtonState::Released {
+            return;
+        }
+
         // A button activates only on release over the same control of the same live window.
-        // Every other pointer button is swallowed for the duration of this compositor grab.
-        if event.button != self.start_data.button {
-            if event.state == ButtonState::Pressed {
-                data.niri.suppressed_buttons.insert(event.button);
-            }
-            return;
-        }
-        if event.state != ButtonState::Released {
-            return;
-        }
         let location = handle.current_location();
-        let contents = data.niri.contents_under(location);
-        if !data.niri.is_locked()
-            && contents.window.as_ref().is_some_and(|(window, hit)| {
-                window == &self.window
-                    && matches!(hit, HitType::Titlebar { part, .. } if *part == self.part)
-            })
-        {
+        if data.is_over_titlebar_part(location, &self.window, self.part) {
             data.perform_titlebar_action(&self.window, self.part);
         }
 
@@ -281,6 +428,6 @@ impl PointerGrab<State> for TitlebarButtonGrab {
     }
 
     fn unset(&mut self, data: &mut State) {
-        self.on_ungrab(data);
+        data.end_titlebar_press();
     }
 }

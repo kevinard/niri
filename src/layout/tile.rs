@@ -11,7 +11,7 @@ use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
 use super::opening_window::{OpenAnimation, OpeningWindowRenderElement};
 use super::shadow::Shadow;
-use super::titlebar::Titlebar;
+use super::titlebar::{FrameParams, Titlebar, TitlebarLayout, TitlebarPart, TitlebarRenderElement};
 use super::{
     HitType, LayoutElement, LayoutElementRenderElement, LayoutElementRenderSnapshot, Options,
     SizeFrac, RESIZE_ANIMATION_THRESHOLD,
@@ -496,10 +496,24 @@ impl<W: LayoutElement> Tile<W> {
     }
 
     pub fn update_render_elements(&mut self, is_active: bool, view_rect: Rectangle<f64, Logical>) {
-        self.titlebar.set_active(is_active);
         let rules = self.window.rules();
         let animated_tile_size = self.animated_tile_size();
         let expanded_progress = self.expanded_progress();
+
+        let frame = self.titlebar_geometry();
+        let titlebar = (frame.size.h > 0.).then(|| FrameParams {
+            layout: self.titlebar_layout(frame.size),
+            scale: self.scale,
+            radius: self
+                .window
+                .geometry_corner_radius()
+                .scaled_by(1. - expanded_progress as f32),
+            active: is_active,
+            maximized: self.sizing_mode.is_maximized(),
+            interaction: self.window.titlebar_interaction(),
+        });
+        self.titlebar
+            .update(&self.options.layout.titlebar, titlebar);
 
         let draw_border_with_background = rules
             .draw_border_with_background
@@ -865,7 +879,11 @@ impl<W: LayoutElement> Tile<W> {
             size.h += width * 2.;
         }
 
-        size.h += self.titlebar_height();
+        size.h += if self.window.expected_size().is_some() {
+            self.requested_titlebar_height()
+        } else {
+            self.titlebar_height()
+        };
 
         size
     }
@@ -958,10 +976,7 @@ impl<W: LayoutElement> Tile<W> {
         if self.is_in_input_region(point) {
             let win_pos = self.buf_loc() + offset;
             Some(HitType::Input { win_pos })
-        } else if let Some(part) = super::titlebar::hit(
-            self.titlebar_geometry().size,
-            point - self.titlebar_geometry().loc,
-        ) {
+        } else if let Some(part) = self.titlebar_hit(point) {
             Some(HitType::Titlebar { part })
         } else if self.is_in_activation_region(point) {
             Some(HitType::Activate {
@@ -985,7 +1000,7 @@ impl<W: LayoutElement> Tile<W> {
             size.h = f64::max(1., size.h - width * 2.);
         }
 
-        size.h = f64::max(1., size.h - self.titlebar_height());
+        size.h = f64::max(1., size.h - self.requested_titlebar_height());
 
         // The size request has to be i32 unfortunately, due to Wayland. We floor here instead of
         // round to avoid situations where proportionally-sized columns don't fit on the screen
@@ -1007,7 +1022,7 @@ impl<W: LayoutElement> Tile<W> {
     }
 
     pub fn tile_height_for_window_height(&self, size: f64) -> f64 {
-        let size = size + self.titlebar_height();
+        let size = size + self.requested_titlebar_height();
         if self.border.is_off() {
             size
         } else {
@@ -1024,7 +1039,7 @@ impl<W: LayoutElement> Tile<W> {
     }
 
     pub fn window_height_for_tile_height(&self, size: f64) -> f64 {
-        let size = size - self.titlebar_height();
+        let size = size - self.requested_titlebar_height();
         if self.border.is_off() {
             size
         } else {
@@ -1038,7 +1053,7 @@ impl<W: LayoutElement> Tile<W> {
         animate: bool,
         transaction: Option<Transaction>,
     ) {
-        size.h = f64::max(1., size.h - self.titlebar_height());
+        size.h = f64::max(1., size.h - self.requested_titlebar_height());
         self.window.request_size(
             size.to_i32_round(),
             SizingMode::Maximized,
@@ -1070,7 +1085,7 @@ impl<W: LayoutElement> Tile<W> {
             size.h += width * 2.;
         }
 
-        size.h += self.titlebar_height();
+        size.h += self.requested_titlebar_height();
         size
     }
 
@@ -1090,7 +1105,7 @@ impl<W: LayoutElement> Tile<W> {
         }
 
         if size.h > 0. {
-            size.h += self.titlebar_height();
+            size.h += self.requested_titlebar_height();
         }
         size
     }
@@ -1105,13 +1120,43 @@ impl<W: LayoutElement> Tile<W> {
         Point::from((0., y))
     }
 
-    /// Reserved height when windowed, even while requesting a transition out of fullscreen.
+    /// Height reserved by the committed frame when windowed, even while requesting a transition
+    /// out of fullscreen.
     pub fn titlebar_height(&self) -> f64 {
-        let config = &self.options.layout.titlebar;
-        if config.off || !self.window.has_ssd() || self.window.is_windowed_fullscreen() {
+        self.titlebar_height_for(self.window.has_ssd())
+    }
+
+    /// Height to reserve in size requests. It follows the decoration mode of the pending
+    /// configure, so a mode change is sent together with a size that accounts for it.
+    pub fn requested_titlebar_height(&self) -> f64 {
+        self.titlebar_height_for(self.window.pending_has_ssd())
+    }
+
+    fn titlebar_height_for(&self, ssd: bool) -> f64 {
+        if !ssd || self.window.is_windowed_fullscreen() {
             return 0.;
         }
-        round_logical_in_physical_max1(self.scale, config.height)
+        super::titlebar::reserved_height(
+            &self.options.layout.titlebar,
+            self.window.rules().draw_titlebar,
+            self.scale,
+        )
+    }
+
+    fn titlebar_layout(&self, size: Size<f64, Logical>) -> TitlebarLayout {
+        TitlebarLayout::new(
+            &self.options.layout.titlebar,
+            size,
+            !self.window.is_fixed_size(),
+        )
+    }
+
+    fn titlebar_hit(&self, point: Point<f64, Logical>) -> Option<TitlebarPart> {
+        let frame = self.titlebar_geometry();
+        if frame.size.h <= 0. {
+            return None;
+        }
+        self.titlebar_layout(frame.size).hit(point - frame.loc)
     }
 
     fn visual_titlebar_height(&self) -> f64 {
@@ -1206,28 +1251,26 @@ impl<W: LayoutElement> Tile<W> {
             &mut |elem| push(elem.into()),
         );
 
-        let frame = self.titlebar_geometry();
-        if frame.size.h > 0. {
-            let title = if ctx.target.should_block_out(rules.block_out_from) {
-                String::new()
-            } else {
-                self.window.decoration_title()
+        if self.titlebar.params().is_some() {
+            let frame = self.titlebar_geometry();
+            let blocked = ctx.target.should_block_out(rules.block_out_from);
+            let renderer = ctx.renderer.as_gles_renderer();
+            let mut push_titlebar = |elem: TitlebarRenderElement| {
+                push(match elem {
+                    TitlebarRenderElement::Solid(elem) => elem.into(),
+                    TitlebarRenderElement::Texture(elem) => elem.into(),
+                })
             };
-            if let Some(elem) = self.titlebar.render(
-                ctx.renderer.as_gles_renderer(),
-                &self.options.layout.titlebar,
-                title,
-                frame.size,
-                location + frame.loc,
-                self.scale,
-                self.window
-                    .geometry_corner_radius()
-                    .scaled_by(1. - expanded_progress as f32),
-                self.sizing_mode.is_maximized(),
-                win_alpha,
-            ) {
-                push(elem.into());
-            }
+            self.window.with_decoration_title(|title| {
+                self.titlebar.render(
+                    renderer,
+                    &self.options.layout.titlebar,
+                    location + frame.loc,
+                    win_alpha,
+                    (!blocked).then_some(title),
+                    &mut push_titlebar,
+                )
+            });
         }
 
         // If we're resizing, try to render a shader, or a fallback.
