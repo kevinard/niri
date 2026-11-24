@@ -12,12 +12,14 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
-use super::overview_caption::{caption_background, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT};
+use super::overview_caption::{
+    caption_background, frame_radius, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
+};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
 use super::workspace::{
-    compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
-    WorkspaceRenderElement,
+    compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
+    WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
 };
 use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
 use crate::animation::{Animation, Clock};
@@ -1563,8 +1565,9 @@ impl<W: LayoutElement> Monitor<W> {
             .clamp(0., 1.);
         let overview_origins: Vec<_> = if self.options.overview.framed_workspaces && progress > 0. {
             let final_zoom = self.options.overview.zoom.clamp(0.0001, 0.75);
-            let (left, right) = self.overview_horizontal_bounds();
-            let viewport = left + OVERVIEW_INSET..right - OVERVIEW_INSET;
+            let usable = self.overview_usable_area(1.);
+            let viewport =
+                usable.loc.x + OVERVIEW_INSET..usable.loc.x + usable.size.w - OVERVIEW_INSET;
             self.workspaces
                 .iter()
                 .enumerate()
@@ -1660,9 +1663,16 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<&Workspace<W>> {
+        if self.has_framed_overview() && !self.overview_content().contains(pos_within_output) {
+            return None;
+        }
         self.workspaces_with_render_geo_idx()
             .find_map(|((index, ws), geo)| {
-                let geo = self.overview_frame_geometry(ws, index, geo).unwrap_or(geo);
+                let geo = if self.has_framed_overview() {
+                    self.overview_frame_geometry(ws, index, geo)?
+                } else {
+                    geo
+                };
                 geo.contains(pos_within_output).then_some(ws)
             })
     }
@@ -1672,7 +1682,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         if self.overview_progress.is_some() {
             if self.options.overview.framed_workspaces
-                && !self.overview_content_contains(pos_within_output.x)
+                && !self.overview_content().contains(pos_within_output)
             {
                 return None;
             }
@@ -1738,18 +1748,21 @@ impl<W: LayoutElement> Monitor<W> {
         };
         let width = ((bounds.end - bounds.start) / 4.).floor().min(230.);
         let height = SCROLL_BUTTON_HEIGHT;
-        if width < 30. || self.working_area.size.h < height {
+        if width < 32. || self.working_area.size.h < height {
             return [None, None];
         }
         let scrolling = ws.scrolling();
-        let Some(active) = scrolling.active_column().map(Column::id) else {
+        let Some(active) = scrolling.active_column() else {
             return [None, None];
         };
+        let active_x = scrolling
+            .columns_with_render_positions()
+            .find_map(|(column, pos)| (column.id() == active.id()).then_some(pos.x));
         let tolerance = 1. / self.scale.fractional_scale();
         let columns = || {
             scrolling
                 .columns_with_render_positions()
-                .filter(|(column, _)| column.id() != active)
+                .filter(|(column, _)| column.id() != active.id())
         };
         let left = columns()
             .filter(|(_, pos)| pos.x < bounds.start - tolerance)
@@ -1759,14 +1772,22 @@ impl<W: LayoutElement> Monitor<W> {
             .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
         let inset = 12.;
         let y = self.working_area.loc.y + (self.working_area.size.h - height - inset).max(0.);
-        let rect = |x| Rectangle::new(Point::from((x, y)), Size::from((width, height)));
+        let left_edge = bounds.start + inset;
+        let right_edge = bounds.end - inset;
+        let left_width = active_x.map_or(width, |x| (x - left_edge - 4.).floor().clamp(32., width));
+        let right_width = active_x.map_or(width, |x| {
+            (right_edge - x - active.width() - 4.)
+                .floor()
+                .clamp(32., width)
+        });
+        let rect = |x, width| Rectangle::new(Point::from((x, y)), Size::from((width, height)));
         [
             left.map(|(column, _)| ScrollCue {
-                rect: rect(bounds.start + inset),
+                rect: rect(left_edge, left_width),
                 destination: column.active_window(),
             }),
             right.map(|(column, _)| ScrollCue {
-                rect: rect(bounds.end - width - inset),
+                rect: rect(right_edge - right_width, right_width),
                 destination: column.active_window(),
             }),
         ]
@@ -1778,6 +1799,15 @@ impl<W: LayoutElement> Monitor<W> {
             .flatten()
             .find(|cue| cue.rect.contains(position))
             .map(|cue| cue.destination)
+    }
+
+    pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
+        self.has_framed_overview()
+            || self
+                .scroll_cues()
+                .into_iter()
+                .flatten()
+                .any(|cue| cue.destination.id() == id)
     }
 
     fn render_scroll_cues<R: NiriRenderer>(
@@ -1942,23 +1972,25 @@ impl<W: LayoutElement> Monitor<W> {
             });
     }
 
-    /// Keep the overview strip clear of exclusive layer-shell surfaces.
-    fn overview_horizontal_bounds(&self) -> (f64, f64) {
+    fn overview_content(&self) -> Rectangle<f64, Logical> {
         let progress = self
             .overview_progress_value()
             .unwrap_or_default()
             .clamp(0., 1.);
-        let margin = OVERVIEW_FRAME_MARGIN.min(self.working_area.size.w / 2.);
-        let left = (self.working_area.loc.x + margin) * progress;
-        let right = self.view_size.w
-            + (self.working_area.loc.x + self.working_area.size.w - margin - self.view_size.w)
-                * progress;
-        (left, right)
+        self.overview_usable_area(progress)
     }
 
-    fn overview_content_contains(&self, x: f64) -> bool {
-        let (left, right) = self.overview_horizontal_bounds();
-        (left..right).contains(&x)
+    /// Interpolate the crop from the entire output to the space clear of panels.
+    fn overview_usable_area(&self, progress: f64) -> Rectangle<f64, Logical> {
+        let area = self.working_area;
+        let margin = OVERVIEW_FRAME_MARGIN.min(area.size.w / 2.);
+        let loc = (area.loc + Point::from((margin, 0.))).upscale(progress);
+        let usable_width = area.size.w - 2. * margin;
+        let size = Size::from((
+            self.view_size.w + (usable_width - self.view_size.w) * progress,
+            self.view_size.h + (area.size.h - self.view_size.h) * progress,
+        ));
+        Rectangle::new(loc, size)
     }
 
     fn overview_crop(
@@ -1968,12 +2000,16 @@ impl<W: LayoutElement> Monitor<W> {
         zoom: f64,
         height: i32,
     ) -> Rectangle<i32, Physical> {
-        let (left, right) = self.overview_horizontal_bounds();
-        let left = ((left - geo.loc.x) / zoom * scale).ceil() as i32;
-        let right = ((right - geo.loc.x) / zoom * scale).floor() as i32;
+        let area = self.overview_content();
+        let near = (area.loc - geo.loc).downscale(zoom).upscale(scale);
+        let far = near + area.size.upscale(scale / zoom).to_point();
+        let left = near.x.ceil() as i32;
+        let right = far.x.floor() as i32;
+        let top = (near.y.ceil() as i32).clamp(0, height);
+        let bottom = (far.y.floor() as i32).clamp(top, height);
         Rectangle::new(
-            Point::from((left, 0)),
-            Size::from((right.saturating_sub(left).max(0), height)),
+            Point::from((left, top)),
+            Size::from((right.saturating_sub(left).max(0), bottom - top)),
         )
     }
 
@@ -1991,7 +2027,9 @@ impl<W: LayoutElement> Monitor<W> {
         {
             return None;
         }
-        let (left, right) = self.overview_horizontal_bounds();
+        let area = self.overview_content();
+        let left = area.loc.x;
+        let right = area.loc.x + area.size.w;
         let zoom = self.overview_zoom();
         let project = |range: Range<f64>| {
             let x = |x: f64| (geo.loc.x + zoom * x).clamp(left, right);
@@ -2016,7 +2054,10 @@ impl<W: LayoutElement> Monitor<W> {
         let label_alpha = ((progress - 0.82) / 0.18).clamp(0., 1.) as f32;
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
-        let (left, right) = self.overview_horizontal_bounds();
+        let area = self.overview_content();
+        let left = area.loc.x;
+        let right = area.loc.x + area.size.w;
+        let contains_y = |y, height| y >= area.loc.y && y + height <= area.loc.y + area.size.h;
         let mut draw = |element| {
             let element = RescaleRenderElement::from_element(element, Point::default(), 1.);
             push(RelocateRenderElement::from_element(
@@ -2038,7 +2079,7 @@ impl<W: LayoutElement> Monitor<W> {
             };
             let x = left + OVERVIEW_INSET;
             let width = (right - x - OVERVIEW_INSET).min(235.);
-            if top >= 0. && width >= 36. {
+            if contains_y(top, 28.) && width >= 36. {
                 if let Some(caption) = ws.overview_caption.render(
                     renderer.as_gles_renderer(),
                     index + 1,
@@ -2061,7 +2102,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let surface = caption_background(accent, backdrop, false);
                 let start = (visible.start - strip.start).round().clamp(0., track_width) as u32;
                 let end = (visible.end - strip.start).round().clamp(0., track_width) as u32;
-                if track_top >= 0. && track_width >= 6. && start < end {
+                if contains_y(track_top, 6.) && track_width >= 6. && start < end {
                     let track =
                         niri_config::Color::new_unpremul(surface.r, surface.g, surface.b, 0.78);
                     if let Some(track) = ws.overview_caption.desktop_track.render(
@@ -2079,7 +2120,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
                 let caption_end = x + if ws.name().is_some() { width } else { 116. };
                 let label_x = visible.start.max(caption_end).min(right - 143.);
-                if top >= 0. && label_x >= caption_end {
+                if contains_y(top, 28.) && label_x >= caption_end {
                     if let Some(caption) = ws.overview_caption.desktop_view.render(
                         renderer.as_gles_renderer(),
                         "Desktop viewport".into(),
@@ -2122,6 +2163,7 @@ impl<W: LayoutElement> Monitor<W> {
                 if covered
                     || size.h < 40.
                     || label.size.w < 65.
+                    || !contains_y(label.loc.y, label.size.h)
                     || location.x < left
                     || location.x + size.w > right
                     || target.should_block_out(window.rules().block_out_from)
@@ -2340,11 +2382,9 @@ impl<W: LayoutElement> Monitor<W> {
             geo.size.h + (height - geo.size.h) * progress,
         ));
         let scale = self.scale.fractional_scale();
-        Some(
-            Rectangle::new(position, size)
-                .to_physical_precise_round(scale)
-                .to_logical(scale),
-        )
+        Rectangle::new(position, size)
+            .intersection(self.overview_content())
+            .map(|rect| rect.to_physical_precise_round(scale).to_logical(scale))
     }
 
     pub fn render_overview_frames<R: NiriRenderer>(
@@ -2357,6 +2397,10 @@ impl<W: LayoutElement> Monitor<W> {
             .unwrap_or_default()
             .clamp(0., 1.);
         let scale = self.scale.fractional_scale();
+        let shadow_config = compute_workspace_shadow_config(
+            self.options.overview.workspace_shadow,
+            self.workspace_size(self.overview_zoom()),
+        );
         for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
             let Some(rect) = self.overview_frame_geometry(ws, index, geo) else {
                 continue;
@@ -2378,6 +2422,26 @@ impl<W: LayoutElement> Monitor<W> {
                     ));
                 },
             );
+            if shadow_config.on {
+                let mut shadow = ws.overview_caption.shadow.borrow_mut();
+                shadow.update_config(shadow_config);
+                shadow.update_render_elements(
+                    rect.size,
+                    index == self.active_workspace_idx,
+                    frame_radius(rect, progress as f32),
+                    scale,
+                    progress as f32,
+                );
+                shadow.render(renderer, rect.loc, &mut |elem| {
+                    let elem = MonitorInnerRenderElement::Shadow(elem);
+                    let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                    push(RelocateRenderElement::from_element(
+                        elem,
+                        Point::default(),
+                        Relocate::Relative,
+                    ));
+                });
+            }
         }
     }
 

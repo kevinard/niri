@@ -3261,15 +3261,21 @@ impl State {
             return false;
         }
 
-        let window = self.niri.output_under(location).and_then(|(output, point)| {
-            let monitor = self.niri.layout.monitor_for_output(output)?;
-            let destination = monitor.scroll_cue_under(point)?;
-            self.niri
-                .contents_under(location)
-                .layer
-                .is_none()
-                .then(|| destination.window.clone())
-        });
+        let window = self
+            .niri
+            .output_under(location)
+            .and_then(|(output, point)| {
+                let monitor = self.niri.layout.monitor_for_output(output)?;
+                let destination = monitor.scroll_cue_under(point)?;
+                self.niri
+                    .contents_under(location)
+                    .layer
+                    .is_none_or(|layer| {
+                        use smithay::wayland::shell::wlr_layer::Layer;
+                        matches!(layer.layer(), Layer::Background | Layer::Bottom)
+                    })
+                    .then(|| destination.window.clone())
+            });
         let Some(window) = window else {
             return false;
         };

@@ -2184,7 +2184,7 @@ pub(super) fn compute_working_area(output: &Output) -> Rectangle<f64, Logical> {
     layer_map_for_output(output).non_exclusive_zone().to_f64()
 }
 
-fn compute_workspace_shadow_config(
+pub(super) fn compute_workspace_shadow_config(
     config: niri_config::WorkspaceShadow,
     view_size: Size<f64, Logical>,
 ) -> niri_config::Shadow {

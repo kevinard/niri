@@ -954,12 +954,12 @@ impl XdgShellHandler for State {
 
     fn app_id_changed(&mut self, toplevel: ToplevelSurface) {
         self.update_window_rules(&toplevel);
-        self.redraw_window_titlebar(&toplevel);
+        self.redraw_window_labels(&toplevel);
     }
 
     fn title_changed(&mut self, toplevel: ToplevelSurface) {
         self.update_window_rules(&toplevel);
-        self.redraw_window_titlebar(&toplevel);
+        self.redraw_window_labels(&toplevel);
     }
 
     fn parent_changed(&mut self, toplevel: ToplevelSurface) {
@@ -1558,19 +1558,23 @@ impl State {
         }
     }
 
-    fn redraw_window_titlebar(&mut self, toplevel: &ToplevelSurface) {
-        let Some((mapped, output)) = self
+    fn redraw_window_labels(&mut self, toplevel: &ToplevelSurface) {
+        let Some((window, Some(output))) = self
             .niri
             .layout
-            .find_window_and_output_mut(toplevel.wl_surface())
+            .find_window_and_output(toplevel.wl_surface())
         else {
             return;
         };
         // Metadata requests do not require a surface commit or a window-rule change.
-        if mapped.has_ssd() {
-            if let Some(output) = output.cloned() {
-                self.niri.queue_redraw(&output);
-            }
+        if window.has_ssd()
+            || self
+                .niri
+                .layout
+                .monitor_for_output(output)
+                .is_some_and(|monitor| monitor.window_has_navigation_caption(&window.window))
+        {
+            self.niri.queue_redraw(&output.clone());
         }
     }
 
