@@ -3872,6 +3872,9 @@ impl<W: LayoutElement> Layout<W> {
             .unwrap();
         let window_offset = tile.window_loc();
 
+        let tile_offset = mon
+            .floating_overview_position(ws, &window_id)
+            .unwrap_or(tile_offset);
         let tile_pos = ws_geo.loc + tile_offset.upscale(zoom);
 
         let pointer_offset_within_window =
@@ -3993,6 +3996,9 @@ impl<W: LayoutElement> Layout<W> {
                             .find(|(tile, _, _)| tile.window().id() == window)
                             .unwrap();
 
+                        let tile_offset = mon
+                            .floating_overview_position(ws, window)
+                            .unwrap_or(tile_offset);
                         let zoom = mon.overview_zoom();
                         tile_pos = Some((ws_geo.loc + tile_offset.upscale(zoom), zoom));
                     }

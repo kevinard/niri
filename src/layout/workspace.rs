@@ -18,7 +18,7 @@ use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
-use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
+use super::floating::{FloatingSpace, FloatingSpaceRenderElement, OverviewPositions};
 use super::overview_caption::OverviewCaption;
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
@@ -426,6 +426,12 @@ impl<W: LayoutElement> Workspace<W> {
                 .with_merged_layout(self.layout_config.as_ref())
                 .adjusted_for_scale(scale),
         );
+
+        if !options.layout.clip_scroll_to_work_area
+            && self.floating_is_active == FloatingActive::NoWithFloatingHidden
+        {
+            self.floating_is_active = FloatingActive::No;
+        }
 
         self.scrolling.update_config(
             self.view_size,
@@ -1634,22 +1640,25 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn tiles_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
-        self.tile_render_positions(false)
+        self.tile_render_positions(None)
     }
 
-    pub(super) fn tiles_with_overview_positions(
-        &self,
-    ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
-        self.tile_render_positions(true)
+    pub(super) fn tiles_with_overview_positions<'a>(
+        &'a self,
+        positions: &'a OverviewPositions<W::Id>,
+    ) -> impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)> + 'a {
+        self.tile_render_positions(Some(positions))
     }
 
-    fn tile_render_positions(
-        &self,
-        overview: bool,
-    ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
+    fn tile_render_positions<'a>(
+        &'a self,
+        overview: Option<&'a OverviewPositions<W::Id>>,
+    ) -> impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)> + 'a {
         let scrolling = self.scrolling.tiles_with_render_positions();
-        let floating = self.floating.tiles_with_render_positions();
-        let visible = self.floating_visible_in(overview);
+        let floating = self
+            .floating
+            .tiles_with_preview_positions(overview.unwrap_or(&[]));
+        let visible = self.floating_visible_in(overview.is_some());
         let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
         floating.chain(scrolling)
     }
@@ -1715,10 +1724,10 @@ impl<W: LayoutElement> Workspace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
-        overview: bool,
+        overview: Option<&OverviewPositions<W::Id>>,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        if !self.floating_visible_in(overview) && layer.is_normal() {
+        if !self.floating_visible_in(overview.is_some()) && layer.is_normal() {
             return;
         }
 
@@ -1730,6 +1739,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_rect,
             floating_focus_ring,
             layer,
+            overview.unwrap_or(&[]),
             &mut |elem| push(elem.into()),
         );
     }
@@ -1845,22 +1855,27 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        self.window_under_at(pos, false)
+        self.window_under_at(pos, None)
     }
 
     pub(super) fn window_under_in_overview(
         &self,
         pos: Point<f64, Logical>,
+        positions: &OverviewPositions<W::Id>,
     ) -> Option<(&W, HitType)> {
-        self.window_under_at(pos, true)
+        self.window_under_at(pos, Some(positions))
     }
 
-    fn window_under_at(&self, pos: Point<f64, Logical>, overview: bool) -> Option<(&W, HitType)> {
+    fn window_under_at(
+        &self,
+        pos: Point<f64, Logical>,
+        overview: Option<&OverviewPositions<W::Id>>,
+    ) -> Option<(&W, HitType)> {
         // This ordering matches tile_render_positions().
-        if self.floating_visible_in(overview) {
+        if self.floating_visible_in(overview.is_some()) {
             if let Some(rv) = self
                 .floating
-                .tiles_with_render_positions()
+                .tiles_with_preview_positions(overview.unwrap_or(&[]))
                 .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
             {
                 return Some(rv);

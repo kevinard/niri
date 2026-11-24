@@ -177,6 +177,7 @@ struct NavigationTitle<'a, W> {
     window: &'a W,
     active: bool,
     direction: Option<bool>,
+    hidden: bool,
 }
 
 struct ScrollCue<'a, W> {
@@ -1581,6 +1582,60 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    fn floating_overview_positions(
+        &self,
+        ws: &Workspace<W>,
+        progress: f64,
+    ) -> Vec<(W::Id, Point<f64, Logical>)> {
+        if !self.has_framed_overview() || progress <= 0. || ws.floating().is_empty() {
+            return Vec::new();
+        }
+        let extent = visible_extent(ws.scrolling().tiles_with_render_positions());
+        let gap = ws.options.layout.gaps.max(22.);
+        let y = ws.working_area().loc.y + ws.options.layout.gaps;
+        let left = extent.as_ref().map_or(0., |range| range.start);
+        let mut x = extent.as_ref().map_or(left, |range| range.end + gap);
+        let mut floating = ws
+            .floating()
+            .tiles_with_render_positions()
+            .collect::<Vec<_>>();
+        floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        let total_width = x - left
+            + floating
+                .iter()
+                .map(|(tile, _)| tile.tile_size().w + gap)
+                .sum::<f64>()
+            - gap;
+        let final_zoom = self.options.overview.zoom.clamp(0.0001, 0.75);
+        if total_width * final_zoom > self.overview_usable_area(1.).size.w - 2. * OVERVIEW_INSET {
+            return Vec::new();
+        }
+
+        let scale = self.scale.fractional_scale();
+        let progress = progress.clamp(0., 1.);
+        floating
+            .into_iter()
+            .map(|(tile, current)| {
+                let destination = Point::from((x, y)) + tile.interactive_move_offset;
+                x += tile.tile_size().w + gap;
+                let position = current + (destination - current).upscale(progress);
+                let position = position.to_physical_precise_round(scale).to_logical(scale);
+                (tile.window().id().clone(), position)
+            })
+            .collect()
+    }
+
+    pub(super) fn floating_overview_position(
+        &self,
+        ws: &Workspace<W>,
+        window: &W::Id,
+    ) -> Option<Point<f64, Logical>> {
+        let progress = self.overview_progress_value()?;
+        self.floating_overview_positions(ws, progress)
+            .into_iter()
+            .find_map(|(id, position)| (id == *window).then_some(position))
+    }
+
     pub fn workspaces_render_geo(&self) -> impl Iterator<Item = Rectangle<f64, Logical>> {
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
@@ -1621,7 +1676,8 @@ impl<W: LayoutElement> Monitor<W> {
                         return None;
                     }
 
-                    let extent = visible_extent(ws.tiles_with_overview_positions())?;
+                    let positions = self.floating_overview_positions(ws, 1.);
+                    let extent = visible_extent(ws.tiles_with_overview_positions(&positions))?;
                     fit_overview_strip(extent, &viewport, zoom, final_zoom)
                 })
                 .collect()
@@ -1732,7 +1788,11 @@ impl<W: LayoutElement> Monitor<W> {
             }
             let zoom = self.overview_zoom();
             let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
-            let (win, hit) = ws.window_under_in_overview(pos_within_workspace)?;
+            let positions = self.floating_overview_positions(
+                ws,
+                self.overview_progress_value().unwrap_or_default(),
+            );
+            let (win, hit) = ws.window_under_in_overview(pos_within_workspace, &positions)?;
             // During the overview animation, we cannot do input hits because we cannot really
             // represent scaled windows properly.
             Some((win, hit.to_activate()))
@@ -1991,12 +2051,20 @@ impl<W: LayoutElement> Monitor<W> {
     /// remain available in each position without painting over a client surface.
     fn navigation_titles(&self) -> Option<Vec<NavigationTitle<'_, W>>> {
         let ws = self.active_workspace_ref();
-        if self.workspace_switch.is_some() {
+        if self.workspace_switch.is_some()
+            || self.overview_progress.is_some()
+            || !ws.options.layout.clip_scroll_to_work_area
+        {
             return None;
         }
         let top = self.navigation_strip_top()?;
-        let bounds = self.scroll_clip(ws)?;
         let scrolling = ws.scrolling();
+        let bounds = self.scroll_clip(ws).or_else(|| {
+            let area = self.working_area;
+            scrolling
+                .is_empty()
+                .then_some(area.loc.x..area.loc.x + area.size.w)
+        })?;
         let active = ws.active_window()?;
         let positions: HashMap<_, _> = scrolling
             .columns_with_render_positions()
@@ -2015,7 +2083,7 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     None
                 };
-                (column.active_window(), direction)
+                (column.active_window(), direction, false)
             })
             .collect::<Vec<_>>();
         let mut floating = ws
@@ -2023,11 +2091,16 @@ impl<W: LayoutElement> Monitor<W> {
             .tiles_with_render_positions()
             .collect::<Vec<_>>();
         floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-        windows.extend(floating.iter().map(|(tile, _)| (tile.window(), None)));
+        let floating_hidden = !ws.is_floating_visible();
+        windows.extend(
+            floating
+                .iter()
+                .map(|(tile, _)| (tile.window(), None, floating_hidden)),
+        );
 
         let active_index = windows
             .iter()
-            .position(|(window, _)| window.id() == active.id())?;
+            .position(|(window, _, _)| window.id() == active.id())?;
         let gap = 8.;
         let available = bounds.end - bounds.start - 24.;
         let capacity = ((available + gap) / 184.).floor() as usize;
@@ -2048,7 +2121,7 @@ impl<W: LayoutElement> Monitor<W> {
             windows[first..first + count]
                 .iter()
                 .enumerate()
-                .filter_map(|(index, &(window, direction))| {
+                .filter_map(|(index, &(window, direction, hidden))| {
                     let rect = Rectangle::new(
                         Point::from((x + index as f64 * (width + gap), y)),
                         Size::from((width, SCROLL_BUTTON_HEIGHT)),
@@ -2063,6 +2136,7 @@ impl<W: LayoutElement> Monitor<W> {
                         window,
                         active: window.id() == active.id(),
                         direction,
+                        hidden,
                     })
                 })
                 .collect(),
@@ -2172,6 +2246,7 @@ impl<W: LayoutElement> Monitor<W> {
                     background,
                     LabelKind::StripButton {
                         direction: title.direction,
+                        hidden: title.hidden,
                     },
                     title.rect.size.w,
                     scale,
@@ -2631,7 +2706,27 @@ impl<W: LayoutElement> Monitor<W> {
             }
             let mut in_front: Vec<Rectangle<f64, Logical>> = Vec::new();
             let focused = active.then(|| ws.active_window()).flatten();
-            for (tile, pos, visible) in ws.tiles_with_overview_positions() {
+            let preview_positions = self.floating_overview_positions(ws, progress);
+            if let Some((_, position)) = preview_positions.first() {
+                let x = geo.loc.x + position.x * zoom;
+                let y = geo.loc.y - 33.;
+                let width = (right - x).min(220.);
+                if contains_y(y, 28.) && width >= 134. {
+                    if let Some(label) = ws.overview_caption.desktop_labels[2].render(
+                        renderer.as_gles_renderer(),
+                        "Floating windows".into(),
+                        caption_background(accent, backdrop, false),
+                        LabelKind::Caption,
+                        width,
+                        scale,
+                        Point::from((x, y)),
+                        label_alpha,
+                    ) {
+                        draw(MonitorInnerRenderElement::Caption(label));
+                    }
+                }
+            }
+            for (tile, pos, visible) in ws.tiles_with_overview_positions(&preview_positions) {
                 if !visible {
                     continue;
                 }
@@ -2831,6 +2926,12 @@ impl<W: LayoutElement> Monitor<W> {
 
                 let xray_pos = XrayPos::new(geo.loc, zoom);
 
+                let floating_positions = if pass < 2 {
+                    self.overview_progress_value()
+                        .map(|progress| self.floating_overview_positions(ws, progress))
+                } else {
+                    None
+                };
                 match pass {
                     0 => {
                         ws.render_floating(
@@ -2838,7 +2939,7 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::MovingBetweenWorkspaces,
-                            self.overview_progress.is_some(),
+                            floating_positions.as_deref(),
                             push!(),
                         );
                     }
@@ -2848,7 +2949,7 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::Normal,
-                            self.overview_progress.is_some(),
+                            floating_positions.as_deref(),
                             push!(),
                         );
 
