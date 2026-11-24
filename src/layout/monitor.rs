@@ -48,6 +48,7 @@ use crate::utils::{
 const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
 
 const OVERVIEW_INSET: f64 = 20.;
+const OVERVIEW_HEADER_OFFSET: f64 = 67.;
 const OVERVIEW_FRAME_MARGIN: f64 = 12.;
 const MAX_NAVIGATION_TITLES: usize = 5;
 
@@ -93,6 +94,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     layer_action_label: PreviewLabel,
+    overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
     scroll_cue_labels: [PreviewLabel; 2],
     additional_scroll_cue_labels: [PreviewLabel; 2],
@@ -464,6 +466,7 @@ impl<W: LayoutElement> Monitor<W> {
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
             layer_action_label: PreviewLabel::default(),
+            overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
             scroll_cue_labels: Default::default(),
             additional_scroll_cue_labels: Default::default(),
@@ -2194,7 +2197,39 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
+    fn overview_command(&self) -> Option<Rectangle<f64, Logical>> {
+        if !self.overview_open || !self.has_framed_overview() {
+            return None;
+        }
+
+        let area = self.overview_content();
+        if area.size.w < 500. || self.overview_progress_value()? < 0.82 {
+            return None;
+        }
+
+        self.active_workspace_ref().active_window()?;
+        let geo = self
+            .workspaces_with_render_geo_idx()
+            .find_map(|((idx, _), geo)| (idx == self.active_workspace_idx).then_some(geo))?;
+        let width = 216.;
+        let rect = Rectangle::new(
+            Point::from((
+                area.loc.x + area.size.w - OVERVIEW_INSET - width,
+                geo.loc.y - OVERVIEW_HEADER_OFFSET,
+            )),
+            Size::from((width, 28.)),
+        );
+        (rect.intersection(area) == Some(rect)).then_some(rect)
+    }
+
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
+        if self.overview_open {
+            return self
+                .overview_command()
+                .filter(|rect| rect.contains(position))
+                .and_then(|_| self.active_workspace_ref().active_window());
+        }
+
         if let Some(strip) = self.navigation_strip() {
             return strip
                 .titles
@@ -2833,7 +2868,7 @@ impl<W: LayoutElement> Monitor<W> {
             let top = if empty && !active {
                 geo.loc.y + 11.
             } else {
-                geo.loc.y - 67.
+                geo.loc.y - OVERVIEW_HEADER_OFFSET
             };
             let x = left + OVERVIEW_INSET;
             let width = (right - x - OVERVIEW_INSET).min(235.);
@@ -2853,28 +2888,49 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            if active
-                && ws.active_window().is_some()
-                && contains_y(top, 28.)
-                && right - left >= 520.
-            {
+            if let Some(rect) = active.then(|| self.overview_command()).flatten() {
+                let surface = caption_background(accent, backdrop, false);
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let background = if hovered {
+                    accent
+                } else {
+                    tint_caption(surface, accent)
+                };
+                if let Some(command) = self.overview_command_label.render(
+                    renderer.as_gles_renderer(),
+                    "Show selected window".into(),
+                    background,
+                    LabelKind::OverviewCommand,
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    label_alpha,
+                ) {
+                    draw(MonitorInnerRenderElement::Caption(command));
+                }
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
-                    ("Tab  Switch layer     ← →  Select     Enter  Show", 356.)
+                    (
+                        "Click a preview     ← →  Select     Tab  Switch layer",
+                        362.,
+                    )
                 } else {
-                    ("← →  Select     Enter  Show", 206.)
+                    ("Click a preview     ← →  Select", 238.)
                 };
-                if let Some(label) = self.overview_shortcuts_label.render(
-                    renderer.as_gles_renderer(),
-                    shortcuts.into(),
-                    caption_background(accent, backdrop, false),
-                    LabelKind::GroupHeading,
-                    width,
-                    scale,
-                    Point::from((right - OVERVIEW_INSET - width, top)),
-                    alpha,
-                ) {
-                    draw(MonitorInnerRenderElement::Caption(label));
+                let hint_x = rect.loc.x - width - 12.;
+                if hint_x >= x + 235. {
+                    if let Some(label) = self.overview_shortcuts_label.render(
+                        renderer.as_gles_renderer(),
+                        shortcuts.into(),
+                        surface,
+                        LabelKind::GroupHeading,
+                        width,
+                        scale,
+                        Point::from((hint_x, top)),
+                        label_alpha,
+                    ) {
+                        draw(MonitorInnerRenderElement::Caption(label));
+                    }
                 }
             }
 
@@ -2947,6 +3003,7 @@ impl<W: LayoutElement> Monitor<W> {
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
                 let hovered = hovered.is_some_and(|id| id == window.id());
+                let hidden = !ws.is_floating_visible() && ws.is_floating(window.id());
                 let hover_ink = preview_hover_ink(backdrop);
                 if hovered && contains_y(rect.loc.y, rect.size.h) {
                     if let Some(outline) = ws.overview_caption.render_preview_hover(
@@ -2977,7 +3034,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         title,
                         background,
-                        LabelKind::Preview { hovered },
+                        LabelKind::Preview { hovered, hidden },
                         label.size.w,
                         scale,
                         label.loc,

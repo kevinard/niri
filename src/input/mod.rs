@@ -3291,6 +3291,7 @@ impl State {
         if let Some(workspace) = self.niri.layout.active_workspace_mut() {
             workspace.reveal_window_from_navigation();
         }
+        self.niri.layout.close_overview();
         self.niri.queue_redraw_all();
         true
     }
