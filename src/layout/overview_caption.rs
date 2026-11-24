@@ -26,7 +26,9 @@ pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) enum LabelKind {
     Caption,
     GroupHeading,
-    StripButton,
+    StripButton {
+        direction: Option<bool>,
+    },
     Preview {
         show_action: bool,
     },
@@ -348,7 +350,9 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     layout.set_ellipsize(
         if matches!(
             key.kind,
-            LabelKind::StripButton | LabelKind::Button { .. } | LabelKind::WindowNavigation { .. }
+            LabelKind::StripButton { .. }
+                | LabelKind::Button { .. }
+                | LabelKind::WindowNavigation { .. }
         ) {
             EllipsizeMode::Middle
         } else {
@@ -368,7 +372,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let (width, height) = match key.kind {
         LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
-        LabelKind::StripButton | LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
+        LabelKind::StripButton { .. } | LabelKind::Button { .. } => {
+            (max_width, SCROLL_BUTTON_HEIGHT)
+        }
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
         LabelKind::Caption => (
@@ -454,7 +460,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         );
         if matches!(
             key.kind,
-            LabelKind::StripButton | LabelKind::Button { .. } | LabelKind::WindowNavigation { .. }
+            LabelKind::StripButton { .. }
+                | LabelKind::Button { .. }
+                | LabelKind::WindowNavigation { .. }
         ) {
             cr.fill_preserve()?;
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.28);
@@ -505,6 +513,30 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         let label = layout(&cr, key);
         let mut title_width = width - 2. * PADDING;
+        let mut title_x = PADDING;
+        if let LabelKind::StripButton {
+            direction: Some(left),
+        } = key.kind
+        {
+            let arrow = layout(&cr, key);
+            arrow.set_font_description(Some(&FontDescription::from_string(
+                "sans-serif Medium 18px",
+            )));
+            arrow.set_text(if left { "←" } else { "→" });
+            let (w, h) = arrow.pixel_size();
+            let x = if left {
+                PADDING
+            } else {
+                width - PADDING - f64::from(w)
+            };
+            cr.move_to(x, (height - f64::from(h)) / 2.);
+            pangocairo::functions::show_layout(&cr, &arrow);
+            let slot = f64::from(w) + 5.;
+            title_width -= slot;
+            if left {
+                title_x += slot;
+            }
+        }
         if matches!(key.kind, LabelKind::Preview { show_action: true }) {
             let action = layout(&cr, key);
             action.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
@@ -517,7 +549,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::GroupHeading | LabelKind::StripButton => (width - f64::from(w)) / 2.,
+            LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
+            LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
