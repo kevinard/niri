@@ -2720,12 +2720,21 @@ impl State {
             Action::StopCast(session_id) => {
                 self.niri.stop_cast(CastSessionId::from(session_id));
             }
-            Action::ToggleOverview => {
-                self.niri.layout.toggle_overview();
-                self.niri.queue_redraw_all();
-            }
-            Action::OpenOverview => {
-                if self.niri.layout.open_overview() {
+            Action::ToggleOverview | Action::OpenOverview => {
+                let changed = if matches!(action, Action::ToggleOverview) {
+                    self.niri.layout.toggle_overview();
+                    true
+                } else {
+                    self.niri.layout.open_overview()
+                };
+                if changed {
+                    // An on-demand rail can open Overview by IPC after the click
+                    // focused the rail. Hand the picker its keyboard controls.
+                    if self.niri.layout.is_overview_open()
+                        && self.niri.config.borrow().overview.framed_workspaces
+                    {
+                        self.niri.layer_shell_on_demand_focus = None;
+                    }
                     self.niri.queue_redraw_all();
                 }
             }
