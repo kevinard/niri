@@ -83,10 +83,11 @@ impl MoveGrab {
         let layout = &mut data.niri.layout;
         match self.gesture {
             GestureState::Recognizing => {
+                let in_overview = layout.is_overview_open();
                 // Activate the window on release. This is most prominent in the overview where
                 // windows are not activated on click. In the overview, we also try to do a nice
                 // synchronized workspace animation.
-                if layout.is_overview_open() {
+                if in_overview {
                     let res = layout.workspaces().find_map(|(mon, ws_idx, ws)| {
                         ws.windows()
                             .any(|w| w.window == self.window)
@@ -99,6 +100,11 @@ impl MoveGrab {
                 }
 
                 layout.activate_window(&self.window);
+                if in_overview && data.niri.config.borrow().overview.framed_workspaces {
+                    if let Some(workspace) = layout.active_workspace_mut() {
+                        workspace.reveal_window_from_navigation();
+                    }
+                }
             }
             GestureState::Move => layout.interactive_move_end(&self.window),
             GestureState::ViewOffset => {

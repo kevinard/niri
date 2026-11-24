@@ -35,6 +35,7 @@ pub(super) enum GroupStyle {
 pub(super) enum LabelKind {
     Caption,
     GroupHeading,
+    OverviewCommand,
     StripTray,
     StripButton {
         direction: Option<bool>,
@@ -46,6 +47,7 @@ pub(super) enum LabelKind {
     },
     Preview {
         hovered: bool,
+        hidden: bool,
     },
     Button {
         align_right: bool,
@@ -292,7 +294,7 @@ impl OverviewCaption {
             color,
             0.,
             geometry,
-            3.,
+            2.,
             CornerRadius::from(9.),
             scale as f32,
             1.,
@@ -407,7 +409,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let label = layout(&cr, key);
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
-        LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
+        LabelKind::GroupHeading | LabelKind::OverviewCommand => (max_width.min(4096.), HEIGHT),
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
         LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
@@ -449,6 +451,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
+        LabelKind::OverviewCommand => 9.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton { .. } => 9.,
         _ => height / 2.,
@@ -501,6 +504,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripTray
+                | LabelKind::OverviewCommand
                 | LabelKind::StripButton { outlined: true, .. }
                 | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
@@ -561,6 +565,23 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let label = layout(&cr, key);
         let mut title_width = width - 2. * PADDING;
         let mut title_x = PADDING;
+        if key.kind == LabelKind::OverviewCommand {
+            let keycap = layout(&cr, key);
+            keycap.set_text("Enter");
+            keycap.set_font_description(Some(&FontDescription::from_string(
+                "sans-serif Medium 12px",
+            )));
+            let (w, h) = keycap.pixel_size();
+            let key_width = f64::from(w) + 12.;
+            let left = width - key_width - 6.;
+            cr.rectangle(left, 5., key_width, height - 10.);
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.17);
+            cr.fill()?;
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            cr.move_to(left + 6., (height - f64::from(h)) / 2.);
+            pangocairo::functions::show_layout(&cr, &keycap);
+            title_width = left - title_x - 6.;
+        }
         if let LabelKind::LayerAction { show } = key.kind {
             let x = 13.5;
             let y = height / 2. - 6.5;
@@ -626,18 +647,25 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
-        if let LabelKind::Preview { hovered } = key.kind {
+        let preview_note = match key.kind {
+            LabelKind::Preview { hovered: true, .. } => Some((
+                if width >= 190. {
+                    "Show window"
+                } else if width >= 135. {
+                    "Show"
+                } else {
+                    "↗"
+                },
+                true,
+            )),
+            LabelKind::Preview { hidden: true, .. } => Some(("Hidden", false)),
+            _ => None,
+        };
+        if let Some((text, hovered)) = preview_note {
             let action = layout(&cr, key);
             action.set_font_description(Some(&FontDescription::from_string(
                 "sans-serif Medium 12px",
             )));
-            let text = if width >= 270. {
-                "Show window"
-            } else if width >= 135. {
-                "Show"
-            } else {
-                "↗"
-            };
             action.set_text(text);
             let (w, h) = action.pixel_size();
             let control_width = (f64::from(w) + 14.).max(22.);
@@ -663,7 +691,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 cr.fill()?;
                 cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
             } else {
-                cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.14);
+                cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.17);
                 cr.fill()?;
                 cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
             }
