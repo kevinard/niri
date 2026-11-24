@@ -68,7 +68,7 @@ pub(super) struct OverviewCaption {
     title: PreviewLabel,
     pub(super) desktop_labels: [PreviewLabel; 3],
     group_rules: [RefCell<SolidColorBuffer>; 3],
-    hidden_group: RefCell<BorderRenderElement>,
+    group_backings: [RefCell<BorderRenderElement>; 3],
     selection: RefCell<BorderRenderElement>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
@@ -81,7 +81,7 @@ impl Default for OverviewCaption {
             title: PreviewLabel::default(),
             desktop_labels: Default::default(),
             group_rules: Default::default(),
-            hidden_group: RefCell::new(BorderRenderElement::empty()),
+            group_backings: std::array::from_fn(|_| RefCell::new(BorderRenderElement::empty())),
             selection: RefCell::new(BorderRenderElement::empty()),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
@@ -228,10 +228,13 @@ impl OverviewCaption {
         push(SolidColorRenderElement::from_buffer(&rule, rect.loc, 1., Kind::Unspecified).into());
     }
 
-    pub(super) fn render_hidden_group(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_group_backing(
         &self,
         renderer: &mut impl NiriRenderer,
+        index: usize,
         rect: Rectangle<f64, Logical>,
+        style: GroupStyle,
         backdrop: Color,
         alpha: f32,
         scale: f64,
@@ -240,13 +243,17 @@ impl OverviewCaption {
         if !BorderRenderElement::has_shader(renderer) {
             return;
         }
-        let color = if is_light(backdrop) {
-            Color::new_unpremul(0.78, 0.85, 0.82, alpha * 0.55)
-        } else {
-            Color::new_unpremul(0.05, 0.10, 0.13, alpha * 0.51)
+        let strength = match style {
+            GroupStyle::Desktop => 0.80,
+            GroupStyle::Offscreen => 0.52,
+            GroupStyle::Hidden => 0.38,
+        };
+        let color = Color {
+            a: alpha * strength,
+            ..backdrop
         };
         let geometry = Rectangle::from_size(rect.size);
-        let mut group = self.hidden_group.borrow_mut();
+        let mut group = self.group_backings[index].borrow_mut();
         group.update(
             rect.size,
             geometry,
@@ -669,8 +676,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 1.5 * std::f64::consts::PI,
             );
             cr.close_path();
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.31);
-            cr.fill()?;
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.26);
+            cr.fill_preserve()?;
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.59);
+            cr.set_line_width(1.);
+            cr.stroke()?;
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
             cr.move_to(
                 left + (control_width - f64::from(w)) / 2.,

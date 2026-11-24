@@ -2179,7 +2179,7 @@ impl<W: LayoutElement> Monitor<W> {
             .min(windows.len() - count);
         let width = ((title_space - gap * (count - 1) as f64) / count as f64)
             .floor()
-            .min(218.);
+            .min(194.);
         let titles_width = count as f64 * (width + gap) - gap;
         let x = bounds.start + leading_margin;
         let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
@@ -2432,9 +2432,7 @@ impl<W: LayoutElement> Monitor<W> {
                     Some("Hides floating windows")
                 } else {
                     match title.direction {
-                        Some(_) if hovered => Some("Show this window"),
-                        Some(true) => Some("Offscreen left"),
-                        Some(false) => Some("Offscreen right"),
+                        Some(_) => Some("Show window"),
                         None if hovered && has_layer_action && floating_visible => {
                             Some("Reveal tiled windows")
                         }
@@ -3107,7 +3105,11 @@ impl<W: LayoutElement> Monitor<W> {
                 let badge = if hidden {
                     Some("Hidden")
                 } else if current {
-                    Some("Current")
+                    Some(if label.size.w < 220. {
+                        "Current"
+                    } else {
+                        "Desktop focus"
+                    })
                 } else {
                     None
                 };
@@ -3469,37 +3471,30 @@ impl<W: LayoutElement> Monitor<W> {
                         group_alpha,
                         &mut draw,
                     );
-                    if *style == GroupStyle::Hidden {
-                        let overview_positions = self.floating_overview_positions(ws, progress);
-                        let zoom = self.overview_zoom();
-                        let bottom = ws
-                            .floating()
-                            .tiles_with_preview_positions(&overview_positions)
-                            .map(|(tile, pos)| geo.loc.y + (pos.y + tile.tile_size().h) * zoom)
-                            .reduce(f64::max)
-                            .unwrap_or(geo.loc.y + geo.size.h);
-                        let top = geo.loc.y + strip_offset - 37.;
-                        let backing = Rectangle::new(
-                            Point::from((group.loc.x - 6., top)),
-                            Size::from((group.size.w + 12., bottom - top + 10.)),
+                    let top = geo.loc.y + strip_offset - 39.;
+                    let bottom = geo.loc.y + geo.size.h - 2.;
+                    let backing = Rectangle::new(
+                        Point::from((group.loc.x - 2., top)),
+                        Size::from((group.size.w + 4., (bottom - top).max(0.))),
+                    );
+                    if let Some(backing) = backing.intersection(self.overview_content()) {
+                        ws.overview_caption.render_group_backing(
+                            renderer,
+                            index,
+                            backing,
+                            *style,
+                            ws.options.layout.background_color,
+                            group_alpha,
+                            scale,
+                            &mut draw,
                         );
-                        if let Some(backing) = backing.intersection(self.overview_content()) {
-                            ws.overview_caption.render_hidden_group(
-                                renderer,
-                                backing,
-                                ws.options.layout.background_color,
-                                group_alpha,
-                                scale,
-                                &mut draw,
-                            );
-                        }
                     }
                 }
             }
             let fade = if !active && !ws.has_windows_or_name() {
                 group_alpha
             } else if groups.is_some() {
-                0.45 * group_alpha
+                0.74 * group_alpha
             } else {
                 0.
             };
