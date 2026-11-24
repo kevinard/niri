@@ -28,6 +28,7 @@ pub(super) enum LabelKind {
     GroupHeading,
     StripButton {
         direction: Option<bool>,
+        hidden: bool,
     },
     Preview {
         show_action: bool,
@@ -516,6 +517,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let mut title_x = PADDING;
         if let LabelKind::StripButton {
             direction: Some(left),
+            ..
         } = key.kind
         {
             let arrow = layout(&cr, key);
@@ -536,6 +538,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             if left {
                 title_x += slot;
             }
+        }
+        if matches!(key.kind, LabelKind::StripButton { hidden: true, .. }) {
+            let status = layout(&cr, key);
+            status.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
+            status.set_text("Hidden");
+            let (w, h) = status.pixel_size();
+            title_width -= f64::from(w) + PADDING;
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.78);
+            cr.move_to(width - PADDING - f64::from(w), (height - f64::from(h)) / 2.);
+            pangocairo::functions::show_layout(&cr, &status);
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
         if matches!(key.kind, LabelKind::Preview { show_action: true }) {
             let action = layout(&cr, key);
