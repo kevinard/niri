@@ -373,7 +373,9 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let font = if matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220 {
+    let font = if matches!(key.kind, LabelKind::StripButton { .. })
+        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
+    {
         "sans-serif Medium 13px"
     } else {
         "sans-serif Medium 14px"
@@ -629,9 +631,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         };
         if let Some(status) = status {
             let detail = layout(&cr, key);
-            label.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 14px",
-            )));
             detail.set_font_description(Some(&FontDescription::from_string("sans-serif 13px")));
             detail.set_text(status);
             detail.set_ellipsize(EllipsizeMode::End);
@@ -647,9 +646,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         if let LabelKind::Preview { badge: Some(badge) } = key.kind {
             let action = layout(&cr, key);
-            action.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 12px",
-            )));
+            action
+                .set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
             action.set_text(badge);
             let (w, h) = action.pixel_size();
             let control_width = (f64::from(w) + 14.).max(22.);
@@ -671,7 +669,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 1.5 * std::f64::consts::PI,
             );
             cr.close_path();
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.17);
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.31);
             cr.fill()?;
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
             cr.move_to(

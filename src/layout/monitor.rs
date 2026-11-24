@@ -2151,7 +2151,8 @@ impl<W: LayoutElement> Monitor<W> {
             .iter()
             .position(|(window, _, _)| window.id() == active.id())?;
         let gap = 8.;
-        let available = self.working_area.size.w - 24.;
+        let leading_margin = 16.;
+        let available = bounds.end - bounds.start - leading_margin - 8.;
         let capacity = ((available + gap) / 184.).floor() as usize;
         let count = windows
             .len()
@@ -2176,17 +2177,11 @@ impl<W: LayoutElement> Monitor<W> {
         let first = active_index
             .saturating_sub(count / 2)
             .min(windows.len() - count);
-        let max_width = if layer_destination.is_some() {
-            212.
-        } else {
-            236.
-        };
         let width = ((title_space - gap * (count - 1) as f64) / count as f64)
             .floor()
-            .min(max_width);
+            .min(218.);
         let titles_width = count as f64 * (width + gap) - gap;
-        let strip_width = titles_width + (available - title_space);
-        let x = (bounds.start + bounds.end - strip_width) / 2.;
+        let x = bounds.start + leading_margin;
         let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
         let uncovered = |rect: Rectangle<f64, Logical>| {
             let covered = floating_visible
@@ -2415,7 +2410,6 @@ impl<W: LayoutElement> Monitor<W> {
             let surface = caption_background(accent, ws.options.layout.background_color, false);
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
-            let has_tray = strip.tray.is_some();
             let floating_visible = ws.is_floating_visible();
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
@@ -2428,7 +2422,6 @@ impl<W: LayoutElement> Monitor<W> {
             };
             for (title, label) in strip.titles.into_iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
-                let offscreen = title.direction.is_some();
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2452,8 +2445,6 @@ impl<W: LayoutElement> Monitor<W> {
                     accent
                 } else if hovered {
                     tint_caption(surface, accent)
-                } else if has_tray && !offscreen {
-                    Color { a: 0., ..surface }
                 } else {
                     surface
                 };
@@ -2464,7 +2455,7 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::StripButton {
                         direction: title.direction,
                         status,
-                        outlined: offscreen || !has_tray,
+                        outlined: !title.active,
                     },
                     title.rect.size.w,
                     scale,
