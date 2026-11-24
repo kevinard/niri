@@ -5592,7 +5592,7 @@ impl<W: LayoutElement> Column<W> {
         }
     }
 
-    fn width(&self) -> f64 {
+    pub(super) fn width(&self) -> f64 {
         let mut tiles_width = self
             .data
             .iter()

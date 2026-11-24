@@ -24,13 +24,15 @@ pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) enum LabelKind {
     Caption,
     Preview,
-    Button,
+    Button { align_right: bool },
+    Viewport { start: u32, end: u32 },
 }
 
 #[derive(Debug)]
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
     pub(super) desktop_view: PreviewLabel,
+    pub(super) desktop_track: PreviewLabel,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
 }
@@ -40,6 +42,7 @@ impl Default for OverviewCaption {
         Self {
             title: PreviewLabel::default(),
             desktop_view: PreviewLabel::default(),
+            desktop_track: PreviewLabel::default(),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
         }
@@ -68,7 +71,7 @@ impl PreviewLabel {
         &self,
         renderer: &mut GlesRenderer,
         text: String,
-            background: Color,
+        background: Color,
         kind: LabelKind,
         width: f64,
         scale: f64,
@@ -88,7 +91,9 @@ impl PreviewLabel {
             kind,
             width: match kind {
                 LabelKind::Caption => (width as u32 / 8) * 8,
-                LabelKind::Preview | LabelKind::Button => width as u32,
+                LabelKind::Preview | LabelKind::Button { .. } | LabelKind::Viewport { .. } => {
+                    width as u32
+                }
             },
             scale,
         };
@@ -177,7 +182,7 @@ impl OverviewCaption {
         }
 
         let ink = if is_light(background) { 0.08 } else { 0.94 };
-        let outline_alpha = if active { 0.51 } else { 0.32 };
+        let outline_alpha = if active { 0.22 } else { 0.32 };
         let outline = Color::new_unpremul(ink, ink, ink, outline_alpha * progress);
         let geo = Rectangle::from_size(rect.size);
         let radius =
@@ -230,7 +235,11 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
         "sans-serif Medium 14px",
     )));
     layout.set_single_paragraph_mode(true);
-    layout.set_ellipsize(EllipsizeMode::End);
+    layout.set_ellipsize(if matches!(key.kind, LabelKind::Button { .. }) {
+        EllipsizeMode::Middle
+    } else {
+        EllipsizeMode::End
+    });
     layout.set_text(&key.text);
     layout
 }
@@ -243,7 +252,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
         LabelKind::Preview => (max_width.min(4096.), 22.),
-        LabelKind::Button => (max_width, SCROLL_BUTTON_HEIGHT),
+        LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
+        LabelKind::Viewport { .. } => (max_width, 6.),
         LabelKind::Caption => (
             (f64::from(label.pixel_size().0) + 2. * PADDING)
                 .max(30.)
@@ -257,7 +267,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let surface = ImageSurface::create(cairo::Format::ARgb32, pixel_width, pixel_height)?;
     let cr = cairo::Context::new(&surface)?;
     cr.scale(key.scale, key.scale);
-    let radius = if key.kind == LabelKind::Preview { 7. } else { height / 2. };
+    let radius = if key.kind == LabelKind::Preview {
+        7.
+    } else {
+        height / 2.
+    };
     cr.arc(
         radius,
         radius,
@@ -293,21 +307,43 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     cr.close_path();
     let color = key.background;
+    let ink = key.ink;
+    let track = matches!(key.kind, LabelKind::Viewport { .. });
+    if track {
+        cr.clip();
+        cr.rectangle(0., 0., width, height);
+    }
+    let mix = |base: f32, text: f32| {
+        f64::from(if track {
+            base * 0.72 + text * 0.28
+        } else {
+            base
+        })
+    };
     cr.set_source_rgba(
-        color.r.into(),
-        color.g.into(),
-        color.b.into(),
+        mix(color.r, ink.r),
+        mix(color.g, ink.g),
+        mix(color.b, ink.b),
         color.a.into(),
     );
     cr.fill()?;
 
-    let label = layout(&cr, key);
-    label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
-    let (_, h) = label.pixel_size();
-    let ink = key.ink;
-    cr.move_to(PADDING, (height - f64::from(h)) / 2.);
     cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-    pangocairo::functions::show_layout(&cr, &label);
+    if let LabelKind::Viewport { start, end } = key.kind {
+        cr.rectangle(f64::from(start), 0., f64::from(end - start), height);
+        cr.fill()?;
+    } else {
+        let label = layout(&cr, key);
+        label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
+        let (w, h) = label.pixel_size();
+        let x = if matches!(key.kind, LabelKind::Button { align_right: true }) {
+            width - PADDING - f64::from(w)
+        } else {
+            PADDING
+        };
+        cr.move_to(x, (height - f64::from(h)) / 2.);
+        pangocairo::functions::show_layout(&cr, &label);
+    }
     drop(cr);
 
     Ok(TextureBuffer::from_memory(
