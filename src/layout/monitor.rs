@@ -16,7 +16,8 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, tint_caption, FocusMarker, GroupStyle, LabelKind,
     PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_RANGE_HEIGHT, STRIP_TRAY_PADDING, STRIP_VIEWPORT_BAND_HEIGHT,
+    STRIP_ACTION_HEIGHT, STRIP_BUTTON_HEIGHT, STRIP_LAYER_ACTION_HEIGHT, STRIP_RANGE_HEIGHT,
+    STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING, STRIP_VIEWPORT_BAND_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -190,7 +191,7 @@ struct OverviewGroup {
 
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
-    column_groups: Vec<(Rectangle<f64, Logical>, bool)>,
+    viewports: Vec<Rectangle<f64, Logical>>,
     projections: Vec<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
@@ -208,7 +209,6 @@ struct NavigationTitle<'a, W> {
     window: &'a W,
     active: bool,
     direction: Option<bool>,
-    grouped: bool,
     floating: bool,
 }
 
@@ -2203,16 +2203,6 @@ impl<W: LayoutElement> Monitor<W> {
             _ => None,
         };
         let action_space = layer_destination.map_or(0., |_| action_width + action_gap);
-        let direction_width = 154.;
-        let direction_gap = 8.;
-        let direction_space = 2. * (direction_width + direction_gap);
-        let separate_scroll_actions =
-            available - action_space - direction_space >= (104. + gap) * count as f64;
-        let available = if separate_scroll_actions {
-            available - direction_space
-        } else {
-            available
-        };
         let first = active_index
             .saturating_sub(count / 2)
             .min(windows.len() - count);
@@ -2228,7 +2218,8 @@ impl<W: LayoutElement> Monitor<W> {
         let tabs_width = button_space + gaps;
         let tray_width = tabs_width + action_space;
         let start = (bounds.start + bounds.end - tray_width) / 2.;
-        let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
+        let y = top + 8.;
+        let action_y = y + STRIP_BUTTON_HEIGHT + 1.;
         let uncovered = |rect: Rectangle<f64, Logical>| {
             let covered = floating_visible
                 && floating.iter().any(|(tile, position)| {
@@ -2244,7 +2235,7 @@ impl<W: LayoutElement> Monitor<W> {
             ))
         };
         let mut next_x = start;
-        let mut titles: Vec<_> = windows
+        let titles: Vec<_> = windows
             .iter()
             .filter_map(|&(window, direction, floating, window_width)| {
                 let width = button_space * weight(window_width) / total_weight;
@@ -2256,13 +2247,16 @@ impl<W: LayoutElement> Monitor<W> {
                     window,
                     active: window.id() == active.id(),
                     direction,
-                    grouped: false,
                     floating,
                 })
             })
             .collect();
         let layer_action = layer_destination.and_then(|window| {
-            button(start + tabs_width + action_gap, action_width).map(|rect| (rect, window))
+            uncovered(Rectangle::new(
+                Point::from((start + tabs_width + action_gap, top + 12.)),
+                Size::from((action_width, STRIP_LAYER_ACTION_HEIGHT)),
+            ))
+            .map(|rect| (rect, window))
         });
         let destination_columns = |window: &W| {
             scrolling
@@ -2282,100 +2276,53 @@ impl<W: LayoutElement> Monitor<W> {
                 Size::from((span.end - span.start + 4., STRIP_VIEWPORT_BAND_HEIGHT)),
             ))
         };
-        let mut scroll_actions = [None, None];
-        let mut column_groups = Vec::new();
-        for (side, left) in [true, false].into_iter().enumerate() {
+        let scroll_actions = std::array::from_fn(|side| {
+            let left = side == 0;
             let is_on_side = |title: &NavigationTitle<'_, W>| title.direction == Some(left);
-            let nearest = if left {
+            let index = if left {
                 titles.iter().rposition(is_on_side)
             } else {
                 titles.iter().position(is_on_side)
+            }?;
+            let target = &titles[index];
+            let ids = destination_columns(target.window)?;
+            let belongs = |title: &NavigationTitle<'_, W>| {
+                is_on_side(title) && ids.contains(&title.window.id())
             };
-            let Some(index) = nearest else { continue };
-            let window = titles[index].window;
-            let scroll_x = if left {
-                start - direction_width - direction_gap
+            let adjacent = |first: usize, second: usize| {
+                let first = titles[first].rect;
+                let second = titles[second].rect;
+                second.loc.x <= first.loc.x + first.size.w + gap + 0.001
+            };
+            let mut first = index;
+            let mut last = index;
+            if left {
+                while first > 0 && adjacent(first - 1, first) && belongs(&titles[first - 1]) {
+                    first -= 1;
+                }
             } else {
-                start + tabs_width + direction_gap
-            };
-            let rect = separate_scroll_actions
-                .then(|| button(scroll_x, direction_width))
-                .flatten()
-                .filter(|rect| {
-                    !layer_action.is_some_and(|(action, _)| action.intersection(*rect).is_some())
-                });
-            let projection = decorate.then(|| destination_columns(window)).flatten();
-            if let Some(rect) = rect {
-                let columns = projection.as_ref().map_or(0, Vec::len);
-                scroll_actions[side] = Some(NavigationScroll {
-                    rect,
-                    window,
-                    columns,
-                });
-            }
-            if decorate {
-                let Some(ids) = projection else {
-                    continue;
-                };
-                let shares_view = |title: &NavigationTitle<'_, W>| {
-                    is_on_side(title)
-                        && ids.contains(&title.window.id())
-                        && destination_columns(title.window).as_ref() == Some(&ids)
-                };
-                let mut first = index;
-                let mut last = index;
-                if left {
-                    while first > 0
-                        && titles[first].rect.loc.x - titles[first - 1].rect.loc.x
-                            <= titles[first - 1].rect.size.w + gap + 0.001
-                        && shares_view(&titles[first - 1])
-                    {
-                        first -= 1;
-                    }
-                } else {
-                    while last + 1 < titles.len()
-                        && titles[last + 1].rect.loc.x - titles[last].rect.loc.x
-                            <= titles[last].rect.size.w + gap + 0.001
-                        && shares_view(&titles[last + 1])
-                    {
-                        last += 1;
-                    }
-                }
-                let first_x = titles[first].rect.loc.x;
-                let last_x = titles[last].rect.loc.x + titles[last].rect.size.w;
-                // Attach the control only when no differently positioned tab intervenes.
-                let band = match rect {
-                    Some(rect) if left && first == 0 => rect.loc.x..last_x,
-                    Some(rect) if !left && last + 1 == titles.len() => {
-                        first_x..rect.loc.x + rect.size.w
-                    }
-                    _ => first_x..last_x,
-                };
-                let includes_control = band.start < first_x || band.end > last_x;
-                if first != last || includes_control {
-                    if let Some(rect) = column_band(band) {
-                        column_groups.push((rect, false));
-                        for title in &mut titles[first..=last] {
-                            title.grouped = true;
-                        }
-                    }
+                while last + 1 < titles.len()
+                    && adjacent(last, last + 1)
+                    && belongs(&titles[last + 1])
+                {
+                    last += 1;
                 }
             }
-        }
-        let tray_start = scroll_actions[0]
-            .as_ref()
-            .map_or(start, |action| action.rect.loc.x);
-        let tray_end = scroll_actions[1]
-            .as_ref()
-            .map_or(start + tray_width, |action| {
-                (action.rect.loc.x + action.rect.size.w).max(start + tray_width)
-            });
+            let start = titles[first].rect.loc.x;
+            let end = titles[last].rect.loc.x + titles[last].rect.size.w;
+            let rect = uncovered(Rectangle::new(
+                Point::from((start, action_y)),
+                Size::from((end - start, STRIP_ACTION_HEIGHT)),
+            ))?;
+            Some(NavigationScroll {
+                rect,
+                window: target.window,
+                columns: ids.len(),
+            })
+        });
         let tray = uncovered(Rectangle::new(
-            Point::from((tray_start - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
-            Size::from((
-                tray_end - tray_start + 2. * STRIP_TRAY_PADDING,
-                STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
-            )),
+            Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
+            Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
         ));
         let groups = |matches: &dyn Fn(&NavigationTitle<'_, W>) -> bool| {
             let mut spans: Vec<Range<f64>> = Vec::new();
@@ -2393,25 +2340,19 @@ impl<W: LayoutElement> Monitor<W> {
             }
             spans
         };
-        if decorate {
-            column_groups.extend(
-                groups(&|title| !title.floating && title.direction.is_none())
-                    .into_iter()
-                    .filter_map(|span| column_band(span).map(|rect| (rect, true))),
-            );
-        }
+        let viewports = if decorate {
+            groups(&|title| !title.floating && title.direction.is_none())
+                .into_iter()
+                .filter_map(column_band)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let preview = pointer.and_then(|point| {
             titles
                 .iter()
                 .find(|title| title.direction.is_some() && title.rect.contains(point))
                 .map(|title| title.window)
-                .or_else(|| {
-                    scroll_actions
-                        .iter()
-                        .flatten()
-                        .find(|action| action.rect.contains(point))
-                        .map(|action| action.window)
-                })
         });
         let projections = preview
             .and_then(destination_columns)
@@ -2420,14 +2361,17 @@ impl<W: LayoutElement> Monitor<W> {
             .into_iter()
             .filter_map(|span| {
                 uncovered(Rectangle::new(
-                    Point::from((span.start, y + STRIP_BUTTON_HEIGHT + 2.)),
+                    Point::from((
+                        span.start,
+                        top + NAVIGATION_STRIP_HEIGHT - STRIP_RANGE_HEIGHT,
+                    )),
                     Size::from((span.end - span.start, STRIP_RANGE_HEIGHT)),
                 ))
             })
             .collect();
         Some(NavigationStrip {
             tray,
-            column_groups,
+            viewports,
             projections,
             titles,
             layer_action,
@@ -2640,21 +2584,11 @@ impl<W: LayoutElement> Monitor<W> {
                 .iter()
                 .map(|title| navigation_title(title.window, target, "Window"))
                 .collect();
-            let pending_focus = pointer.and_then(|point| {
-                strip
-                    .scroll_actions
-                    .iter()
-                    .flatten()
-                    .find(|action| action.rect.contains(point))
-                    .map(|action| action.window.id())
-            });
             for (index, (title, label)) in
                 strip.titles.into_iter().zip(&self.strip_labels).enumerate()
             {
-                let will_focus = pending_focus == Some(title.window.id());
-                let hovered = will_focus || pointer.is_some_and(|point| title.rect.contains(point));
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
-                let visible_tile = !offscreen && !title.floating;
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2684,32 +2618,22 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let background = if title.active {
                     accent
-                } else if will_focus {
-                    direction_background
                 } else if hovered {
                     tint_caption(surface, accent)
-                } else if title.grouped {
-                    Color { a: 0., ..surface }
-                } else if offscreen {
-                    Color { a: 0.65, ..surface }
-                } else if visible_tile && strip.tray.is_some() {
+                } else if !title.floating && strip.tray.is_some() {
                     Color { a: 0., ..surface }
                 } else {
                     surface
                 };
                 let kind = LabelKind::StripButton {
                     status,
-                    outlined: !title.active
-                        && ((!visible_tile && !title.grouped) || hovered || strip.tray.is_none()),
+                    outlined: !title.active && (offscreen || hovered || strip.tray.is_none()),
                     direction: title.direction,
                     focus,
-                    show_arrow: offscreen
-                        && !title.grouped
-                        && !title
-                            .direction
-                            .is_some_and(|left| strip.scroll_actions[usize::from(!left)].is_some()),
+                    show_arrow: title
+                        .direction
+                        .is_some_and(|left| strip.scroll_actions[usize::from(!left)].is_none()),
                 };
-                let y_offset = if offscreen { 3. } else { 0. };
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
                     name.to_owned(),
@@ -2717,7 +2641,7 @@ impl<W: LayoutElement> Monitor<W> {
                     kind,
                     title.rect.size.w - 6.,
                     scale,
-                    title.rect.loc + Point::from((3., y_offset)),
+                    title.rect.loc + Point::from((3., 0.)),
                     1.,
                 ) {
                     draw(label);
@@ -2802,20 +2726,12 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            for ((rect, visible), label) in strip
-                .column_groups
-                .into_iter()
-                .zip(&self.strip_viewport_labels)
-            {
+            for (rect, label) in strip.viewports.into_iter().zip(&self.strip_viewport_labels) {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    if visible {
-                        direction_background
-                    } else {
-                        Color { a: 0., ..surface }
-                    },
-                    LabelKind::StripViewport { visible },
+                    direction_background,
+                    LabelKind::StripViewport,
                     rect.size.w,
                     scale,
                     rect.loc,

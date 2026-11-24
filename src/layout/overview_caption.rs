@@ -20,9 +20,12 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
-pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
+pub(super) const STRIP_BUTTON_HEIGHT: f64 = 30.;
+pub(super) const STRIP_ACTION_HEIGHT: f64 = 21.;
+pub(super) const STRIP_LAYER_ACTION_HEIGHT: f64 = 40.;
+pub(super) const STRIP_TRAY_HEIGHT: f64 = 58.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
-pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_BUTTON_HEIGHT + 4.;
+pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_TRAY_HEIGHT - 4.;
 pub(super) const STRIP_RANGE_HEIGHT: f64 = 3.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
@@ -48,9 +51,7 @@ pub(super) enum LabelKind {
     GroupTitle,
     OverviewCommand,
     StripTray,
-    StripViewport {
-        visible: bool,
-    },
+    StripViewport,
     StripRange,
     ScrollAction {
         left: bool,
@@ -440,15 +441,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             (max_width.min(4096.), OVERVIEW_CONTROL_HEIGHT)
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
-        LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
-        LabelKind::StripViewport { .. } => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
+        LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
+        LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
         LabelKind::StripRange => (max_width, STRIP_RANGE_HEIGHT),
-        LabelKind::StripButton {
-            direction: Some(_), ..
-        } => (max_width, STRIP_BUTTON_HEIGHT - 6.),
-        LabelKind::StripButton { .. }
-        | LabelKind::LayerAction { .. }
-        | LabelKind::ScrollAction { .. } => (max_width, STRIP_BUTTON_HEIGHT),
+        LabelKind::StripButton { .. } => (max_width, STRIP_BUTTON_HEIGHT),
+        LabelKind::ScrollAction { .. } => (max_width, STRIP_ACTION_HEIGHT),
+        LabelKind::LayerAction { .. } => (max_width, STRIP_LAYER_ACTION_HEIGHT),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
@@ -486,11 +484,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
-        LabelKind::StripViewport { .. } => 10.,
+        LabelKind::StripViewport => 10.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
-        LabelKind::StripButton {
-            direction: Some(_), ..
-        } => 17.,
         LabelKind::StripButton { .. } | LabelKind::ScrollAction { .. } => 9.,
         _ => height / 2.,
     };
@@ -542,7 +537,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripTray
-                | LabelKind::StripViewport { .. }
+                | LabelKind::StripViewport
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint
                 | LabelKind::StripButton { outlined: true, .. }
@@ -553,63 +548,81 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport { visible: true } => 0.57,
-                LabelKind::StripViewport { visible: false } => 0.34,
+                LabelKind::StripViewport => 0.57,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            if matches!(key.kind, LabelKind::StripViewport { visible: false }) {
-                cr.set_dash(&[3., 3.], 0.);
-            }
-            cr.set_line_width(
-                if matches!(key.kind, LabelKind::StripViewport { visible: true }) {
-                    1.5
-                } else {
-                    1.
-                },
-            );
+            cr.set_line_width(if key.kind == LabelKind::StripViewport {
+                1.5
+            } else {
+                1.
+            });
             cr.stroke()?;
         } else {
             cr.fill()?;
         }
     }
 
-    if matches!(
-        key.kind,
-        LabelKind::StripTray | LabelKind::StripViewport { .. } | LabelKind::StripRange
-    ) {
+    if matches!(key.kind, LabelKind::StripTray | LabelKind::StripRange) {
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
 
-    if let LabelKind::ScrollAction { left, columns } = key.kind {
-        let title = match columns {
-            0 => "Show windows".into(),
-            1 => "Show 1 column".into(),
-            count => format!("Show {count} columns"),
-        };
-        let title = if left {
-            format!("←  {title}")
-        } else {
-            format!("{title}  →")
-        };
-        let label = layout(&cr, key);
+    if key.kind == LabelKind::StripViewport {
+        label.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
         label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         label.set_alignment(pango::Alignment::Center);
-        label.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 13px",
-        )));
-        label.set_text(&title);
-        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-        cr.move_to(PADDING, 4.);
+        label.set_text("Tiled in view");
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.86);
+        cr.move_to(PADDING, height - 19.);
         pangocairo::functions::show_layout(&cr, &label);
+    } else if let LabelKind::ScrollAction { left, columns } = key.kind {
+        let count = match columns {
+            0 => String::new(),
+            1 => "1 column".into(),
+            count => format!("{count} columns"),
+        };
+        let detail = layout(&cr, key);
+        detail.set_font_description(Some(&FontDescription::from_string("sans-serif 11px")));
+        detail.set_text(&count);
+        let (detail_width, _) = detail.pixel_size();
+        let detail_width = f64::from(detail_width);
+        let show_count = detail_width + 132. <= width;
 
-        label.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
+        let text = if left {
+            format!("←  Focus {}", key.text)
+        } else {
+            format!("Focus {}  →", key.text)
+        };
+        label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
         label.set_ellipsize(EllipsizeMode::Middle);
-        label.set_text(&format!("Focus {}", key.text));
-        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.88);
-        cr.move_to(PADDING, 21.);
+        label.set_text(&text);
+        let reserved = if show_count {
+            detail_width + PADDING
+        } else {
+            0.
+        };
+        label.set_width(((width - 2. * PADDING - reserved) * f64::from(pango::SCALE)) as i32);
+        label.set_alignment(if left {
+            pango::Alignment::Left
+        } else {
+            pango::Alignment::Right
+        });
+        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+        cr.move_to(PADDING + if left { 0. } else { reserved }, 2.);
         pangocairo::functions::show_layout(&cr, &label);
+        if show_count {
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.8);
+            cr.move_to(
+                if left {
+                    width - PADDING - detail_width
+                } else {
+                    PADDING
+                },
+                3.,
+            );
+            pangocairo::functions::show_layout(&cr, &detail);
+        }
     } else if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
         title.set_single_paragraph_mode(false);
@@ -746,7 +759,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.93);
             cr.move_to(
                 title_x + (title_width - f64::from(w)) / 2.,
-                height - f64::from(h) - if offscreen { 2. } else { 4. },
+                height - f64::from(h) - 1.,
             );
             pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
@@ -808,11 +821,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             _ => PADDING,
         };
         let y = if status.is_some() {
-            if offscreen {
-                1.
-            } else {
-                3.
-            }
+            0.
         } else {
             (height - f64::from(h)) / 2.
         };
