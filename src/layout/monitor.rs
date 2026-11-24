@@ -1788,6 +1788,29 @@ impl<W: LayoutElement> Monitor<W> {
         )
     }
 
+    fn scroll_viewport(&self, ws: &Workspace<W>) -> Option<(u8, u8)> {
+        let extent = ws
+            .scrolling()
+            .tiles_with_render_positions()
+            .filter(|(_, _, visible)| *visible)
+            .fold(None::<Range<f64>>, |extent, (tile, pos, _)| {
+                let left = pos.x;
+                let right = pos.x + tile.tile_size().w;
+                Some(extent.map_or(left..right, |extent| {
+                    extent.start.min(left)..extent.end.max(right)
+                }))
+            })?;
+        let width = extent.end - extent.start;
+        if width <= 0. {
+            return None;
+        }
+        let view = ws.working_area();
+        let percent = |x: f64| (((x - extent.start) / width).clamp(0., 1.) * 100.).round() as u8;
+        let start = percent(view.loc.x);
+        let end = percent(view.loc.x + view.size.w);
+        (start < end && (start > 0 || end < 100)).then_some((start, end))
+    }
+
     fn render_overview_captions<R: NiriRenderer>(
         &self,
         renderer: &mut R,
@@ -1803,7 +1826,7 @@ impl<W: LayoutElement> Monitor<W> {
             let top = geo.loc.y - 36.;
             let (left, right) = self.overview_horizontal_bounds();
             let x = left + OVERVIEW_INSET;
-            let width = (right - x - OVERVIEW_INSET).min(260.);
+            let width = (right - x - OVERVIEW_INSET).min(350.);
             if top < 0. || alpha == 0. || width < 36. {
                 continue;
             }
@@ -1815,6 +1838,13 @@ impl<W: LayoutElement> Monitor<W> {
                 ws.name().map(String::as_str),
                 !ws.has_windows_or_name(),
                 active,
+                ws.options.layout.border.active_color,
+                ws.options.layout.background_color,
+                if active {
+                    self.scroll_viewport(ws)
+                } else {
+                    None
+                },
                 width,
                 scale,
                 Point::from((x, top)),
