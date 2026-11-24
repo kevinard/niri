@@ -195,6 +195,7 @@ impl OverviewCaption {
         renderer: &mut impl NiriRenderer,
         index: usize,
         rect: Rectangle<f64, Logical>,
+        emphasized: bool,
         backdrop: Color,
         accent: Color,
         alpha: f32,
@@ -209,7 +210,7 @@ impl OverviewCaption {
             return;
         }
         let surface = caption_background(accent, backdrop, false);
-        let tint = if index == 1 { 0.18 } else { 0. };
+        let tint = if emphasized { 0.18 } else { 0. };
         let mix = |base, highlight| base * (1. - tint) + highlight * tint;
         let opacity = if is_light(backdrop) { 0.74 } else { 0.82 };
         let color = Color::new_unpremul(
@@ -256,7 +257,7 @@ impl OverviewCaption {
             color,
             0.,
             geometry,
-            2.,
+            3.,
             CornerRadius::from(9.),
             scale as f32,
             1.,
@@ -552,12 +553,35 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         if matches!(key.kind, LabelKind::Preview { show_action: true }) {
             let action = layout(&cr, key);
-            action.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
+            action.set_font_description(Some(&FontDescription::from_string(
+                "sans-serif Medium 12px",
+            )));
             action.set_text("Show window");
             let (w, h) = action.pixel_size();
-            title_width -= f64::from(w) + PADDING;
-            cr.move_to(width - PADDING - f64::from(w), (height - f64::from(h)) / 2.);
+            let radius = 9.;
+            let right = width - 3.;
+            let left = right - f64::from(w) - 14.;
+            title_width -= f64::from(w) + 15.;
+            cr.arc(
+                right - radius,
+                height / 2.,
+                radius,
+                -std::f64::consts::FRAC_PI_2,
+                std::f64::consts::FRAC_PI_2,
+            );
+            cr.arc(
+                left + radius,
+                height / 2.,
+                radius,
+                std::f64::consts::FRAC_PI_2,
+                1.5 * std::f64::consts::PI,
+            );
+            cr.close_path();
+            cr.fill()?;
+            cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
+            cr.move_to(left + 7., (height - f64::from(h)) / 2.);
             pangocairo::functions::show_layout(&cr, &action);
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();

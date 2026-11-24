@@ -172,6 +172,13 @@ struct InsertHintRenderLoc {
     location: Point<f64, Logical>,
 }
 
+struct OverviewGroup {
+    range: Range<f64>,
+    title: &'static str,
+    minimum_width: f64,
+    emphasized: bool,
+}
+
 struct NavigationTitle<'a, W> {
     rect: Rectangle<f64, Logical>,
     window: &'a W,
@@ -2583,6 +2590,71 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
+    fn overview_groups(
+        &self,
+        ws: &Workspace<W>,
+        geo: Rectangle<f64, Logical>,
+        progress: f64,
+    ) -> Option<[Option<OverviewGroup>; 3]> {
+        if ws.floating().is_empty() {
+            let ranges = self.desktop_window_groups(ws, geo)?;
+            let titles = [
+                "Offscreen to the left",
+                "On desktop",
+                "Offscreen to the right",
+            ];
+            let widths = [172., 114., 180.];
+            let mut ranges = ranges.into_iter();
+            return Some(std::array::from_fn(|index| {
+                let range = ranges.next().unwrap();
+                (!range.is_empty()).then_some(OverviewGroup {
+                    range,
+                    title: titles[index],
+                    minimum_width: widths[index],
+                    emphasized: index == 1,
+                })
+            }));
+        }
+
+        let positions = self.floating_overview_positions(ws, progress);
+        if positions.is_empty() {
+            return None;
+        }
+        let zoom = self.overview_zoom();
+        let area = self.overview_content();
+        let project = |range: Range<f64>| {
+            let x = |x: f64| (geo.loc.x + zoom * x).clamp(area.loc.x, area.loc.x + area.size.w);
+            x(range.start)..x(range.end)
+        };
+        let tiled = visible_extent(ws.scrolling().tiles_with_render_positions()).map(|extent| {
+            OverviewGroup {
+                range: project(extent),
+                title: "Tiled windows",
+                minimum_width: 125.,
+                emphasized: !ws.floating_is_active(),
+            }
+        });
+        let floating = visible_extent(
+            ws.tiles_with_overview_positions(&positions)
+                .filter(|(tile, _, _)| ws.is_floating(tile.window().id())),
+        )?;
+        let (title, minimum_width) = if ws.is_floating_visible() {
+            ("Floating windows", 145.)
+        } else {
+            ("Floating windows · Hidden on desktop", 285.)
+        };
+        Some([
+            tiled,
+            Some(OverviewGroup {
+                range: project(floating),
+                title,
+                minimum_width,
+                emphasized: ws.floating_is_active(),
+            }),
+            None,
+        ])
+    }
+
     fn render_overview_captions<R: NiriRenderer>(
         &self,
         renderer: &mut R,
@@ -2665,34 +2737,28 @@ impl<W: LayoutElement> Monitor<W> {
             }
 
             if let Some(groups) = active
-                .then(|| self.desktop_window_groups(ws, geo))
+                .then(|| self.overview_groups(ws, geo, progress))
                 .flatten()
             {
                 let y = geo.loc.y - 33.;
                 if contains_y(y, 28.) {
-                    let labels = [
-                        ("Offscreen to the left", 172.),
-                        ("On desktop", 114.),
-                        ("Offscreen to the right", 180.),
-                    ];
                     let surface = caption_background(accent, backdrop, false);
-                    for ((range, (title, min_width)), label) in groups
-                        .into_iter()
-                        .zip(labels)
-                        .zip(&ws.overview_caption.desktop_labels)
+                    for (group, label) in
+                        groups.into_iter().zip(&ws.overview_caption.desktop_labels)
                     {
-                        let width = range.end - range.start;
-                        if width < min_width {
+                        let Some(group) = group else { continue };
+                        let width = group.range.end - group.range.start;
+                        if width < group.minimum_width {
                             continue;
                         }
                         if let Some(caption) = label.render(
                             renderer.as_gles_renderer(),
-                            title.into(),
+                            group.title.into(),
                             surface,
                             LabelKind::GroupHeading,
                             width,
                             scale,
-                            Point::from((range.start, y)),
+                            Point::from((group.range.start, y)),
                             label_alpha,
                         ) {
                             draw(MonitorInnerRenderElement::Caption(caption));
@@ -2707,25 +2773,6 @@ impl<W: LayoutElement> Monitor<W> {
             let mut in_front: Vec<Rectangle<f64, Logical>> = Vec::new();
             let focused = active.then(|| ws.active_window()).flatten();
             let preview_positions = self.floating_overview_positions(ws, progress);
-            if let Some((_, position)) = preview_positions.first() {
-                let x = geo.loc.x + position.x * zoom;
-                let y = geo.loc.y - 33.;
-                let width = (right - x).min(220.);
-                if contains_y(y, 28.) && width >= 134. {
-                    if let Some(label) = ws.overview_caption.desktop_labels[2].render(
-                        renderer.as_gles_renderer(),
-                        "Floating windows".into(),
-                        caption_background(accent, backdrop, false),
-                        LabelKind::Caption,
-                        width,
-                        scale,
-                        Point::from((x, y)),
-                        label_alpha,
-                    ) {
-                        draw(MonitorInnerRenderElement::Caption(label));
-                    }
-                }
-            }
             for (tile, pos, visible) in ws.tiles_with_overview_positions(&preview_positions) {
                 if !visible {
                     continue;
@@ -2762,7 +2809,7 @@ impl<W: LayoutElement> Monitor<W> {
                     if let Some(outline) = ws.overview_caption.render_preview_hover(
                         renderer,
                         rect,
-                        accent * (label_alpha * 0.75),
+                        accent * label_alpha,
                         scale,
                     ) {
                         draw(MonitorInnerRenderElement::Decoration(outline));
@@ -3064,7 +3111,7 @@ impl<W: LayoutElement> Monitor<W> {
             let active = index == self.active_workspace_idx;
             let group_alpha = ((progress - 0.80) / 0.20).clamp(0., 1.) as f32;
             let groups = active
-                .then(|| self.desktop_window_groups(ws, geo))
+                .then(|| self.overview_groups(ws, geo, progress))
                 .flatten();
             let mut draw = |elem| {
                 let elem = MonitorInnerRenderElement::Decoration(elem);
@@ -3076,26 +3123,35 @@ impl<W: LayoutElement> Monitor<W> {
                 ));
             };
             let groups = groups.filter(|_| group_alpha > 0.).map(|groups| {
-                groups.map(|range| {
-                    if range.is_empty() {
+                groups.map(|group| {
+                    let group = group?;
+                    if group.range.is_empty() {
                         return None;
                     }
                     Rectangle::new(
-                        Point::from((range.start - 2., geo.loc.y - 37.)),
-                        Size::from((range.end - range.start + 4., geo.size.h + 37.)),
+                        Point::from((group.range.start - 2., geo.loc.y - 37.)),
+                        Size::from((group.range.end - group.range.start + 4., geo.size.h + 37.)),
                     )
                     .intersection(self.overview_content())
-                    .map(|rect| rect.to_physical_precise_round(scale).to_logical(scale))
+                    .map(|rect| {
+                        (
+                            rect.to_physical_precise_round(scale).to_logical(scale),
+                            group.emphasized,
+                        )
+                    })
                 })
             });
 
             if let Some(groups) = &groups {
                 for (index, group) in groups.iter().enumerate() {
-                    let Some(group) = group else { continue };
+                    let Some((group, emphasized)) = group else {
+                        continue;
+                    };
                     ws.overview_caption.render_desktop_group(
                         renderer,
                         index,
                         *group,
+                        *emphasized,
                         ws.options.layout.background_color,
                         ws.options.layout.border.active_color,
                         group_alpha,
@@ -3147,7 +3203,7 @@ impl<W: LayoutElement> Monitor<W> {
             };
             if let Some(groups) = groups {
                 for (rect, shadow) in groups.into_iter().zip(&ws.overview_caption.group_shadows) {
-                    if let Some(rect) = rect {
+                    if let Some((rect, _)) = rect {
                         draw_shadow(shadow, rect, group_alpha);
                     }
                 }
