@@ -714,9 +714,15 @@ impl State {
                 if matches!(res, ShouldInterceptResult::Forward) {
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
+                        let framed = this.niri.config.borrow().overview.framed_workspaces;
                         if let Some(bind) =
-                            modified.and_then(|key| hardcoded_overview_bind(key, modifiers))
+                            modified.and_then(|key| hardcoded_overview_bind(key, modifiers, framed))
                         {
+                            if framed && modified == Some(Keysym::Return) {
+                                if let Some(workspace) = this.niri.layout.active_workspace_mut() {
+                                    workspace.reveal_window_from_navigation();
+                                }
+                            }
                             this.niri.suppressed_keys.insert(key_code);
                             return ShouldInterceptResult::InterceptAndHandle(bind);
                         }
@@ -5319,7 +5325,7 @@ fn bind_allowed_during_screenshot(bind: &Bind, pressed: bool) -> bool {
     }
 }
 
-fn hardcoded_overview_bind(key: Keysym, mods: Modifiers) -> Option<Bind> {
+fn hardcoded_overview_bind(key: Keysym, mods: Modifiers, framed: bool) -> Option<Bind> {
     if !mods.is_empty() {
         return None;
     }
@@ -5332,6 +5338,10 @@ fn hardcoded_overview_bind(key: Keysym, mods: Modifiers) -> Option<Bind> {
         }
         Keysym::Left => Action::FocusColumnLeft,
         Keysym::Right => Action::FocusColumnRight,
+        Keysym::Tab if framed => {
+            repeat = false;
+            Action::SwitchFocusBetweenFloatingAndTiling
+        }
         Keysym::Up => Action::FocusWindowOrWorkspaceUp,
         Keysym::Down => Action::FocusWindowOrWorkspaceDown,
         _ => {
