@@ -11,7 +11,6 @@ use smithay::backend::renderer::element::utils::{
 use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
-use super::focus_ring::FocusRingRenderElement;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -194,11 +193,10 @@ niri_render_elements! {
     MonitorInnerRenderElement<R> => {
         Workspace = CropRenderElement<WorkspaceRenderElement<R>>,
         InsertHint = CropRenderElement<InsertHintRenderElement>,
-        UncroppedInsertHint = InsertHintRenderElement,
+        Decoration = InsertHintRenderElement,
         Shadow = ShadowRenderElement,
         SolidColor = SolidColorRenderElement,
         Caption = PrimaryGpuTextureRenderElement,
-        OverviewFrame = FocusRingRenderElement,
     }
 }
 
@@ -1747,7 +1745,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         self.insert_hint_element
             .render(renderer, render_loc.location, &mut |elem| {
-                let elem = MonitorInnerRenderElement::UncroppedInsertHint(elem);
+                let elem = MonitorInnerRenderElement::Decoration(elem);
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
                 let elem =
                     RelocateRenderElement::from_element(elem, Point::default(), Relocate::Relative);
@@ -2040,7 +2038,7 @@ impl<W: LayoutElement> Monitor<W> {
                 progress as f32,
                 scale,
                 &mut |elem| {
-                    let elem = MonitorInnerRenderElement::OverviewFrame(elem);
+                    let elem = MonitorInnerRenderElement::Decoration(elem);
                     let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
                     push(RelocateRenderElement::from_element(
                         elem,
