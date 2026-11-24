@@ -20,6 +20,7 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
+pub(super) const VIEWPORT_TRACK_HEIGHT: f64 = 14.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
@@ -27,6 +28,7 @@ pub(super) enum LabelKind {
     Preview,
     Button { align_right: bool },
     Viewport { start: u32, end: u32 },
+    EdgeFade { height: u32, from_left: bool },
 }
 
 #[derive(Debug)]
@@ -94,9 +96,7 @@ impl PreviewLabel {
             kind,
             width: match kind {
                 LabelKind::Caption => (width as u32 / 8) * 8,
-                LabelKind::Preview | LabelKind::Button { .. } | LabelKind::Viewport { .. } => {
-                    width as u32
-                }
+                _ => width as u32,
             },
             scale,
         };
@@ -259,7 +259,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let (width, height) = match key.kind {
         LabelKind::Preview => (max_width.min(4096.), 22.),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
-        LabelKind::Viewport { .. } => (max_width, 6.),
+        LabelKind::Viewport { .. } => (max_width, VIEWPORT_TRACK_HEIGHT),
+        LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
         LabelKind::Caption => (
             (f64::from(label.pixel_size().0) + 2. * PADDING)
                 .max(30.)
@@ -273,6 +274,24 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let surface = ImageSurface::create(cairo::Format::ARgb32, pixel_width, pixel_height)?;
     let cr = cairo::Context::new(&surface)?;
     cr.scale(key.scale, key.scale);
+    if let LabelKind::EdgeFade { from_left, .. } = key.kind {
+        let (from, to) = if from_left { (0., width) } else { (width, 0.) };
+        let gradient = cairo::LinearGradient::new(from, 0., to, 0.);
+        let color = key.background;
+        for (stop, alpha) in [(0., 0.97), (0.45, 0.55), (1., 0.)] {
+            gradient.add_color_stop_rgba(
+                stop,
+                color.r.into(),
+                color.g.into(),
+                color.b.into(),
+                alpha,
+            );
+        }
+        cr.set_source(&gradient)?;
+        cr.paint()?;
+        drop(cr);
+        return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
+    }
     let radius = if key.kind == LabelKind::Preview {
         7.
     } else {
@@ -352,13 +371,23 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     drop(cr);
 
+    upload_texture(renderer, surface, pixel_width, pixel_height, key.scale)
+}
+
+fn upload_texture(
+    renderer: &mut GlesRenderer,
+    surface: ImageSurface,
+    pixel_width: i32,
+    pixel_height: i32,
+    scale: f64,
+) -> anyhow::Result<TextureBuffer<GlesTexture>> {
     Ok(TextureBuffer::from_memory(
         renderer,
         &surface.take_data()?,
         Fourcc::Argb8888,
         (pixel_width, pixel_height),
         false,
-        key.scale,
+        scale,
         Transform::Normal,
         Vec::new(),
     )?)
