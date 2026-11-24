@@ -2202,7 +2202,7 @@ impl<W: LayoutElement> Monitor<W> {
             _ => None,
         };
         let action_space = layer_destination.map_or(0., |_| action_width + action_gap);
-        let direction_width = 116.;
+        let direction_width = 156.;
         let direction_gap = 14.;
         let direction_space = 2. * (direction_width + direction_gap);
         let directions_fit =
@@ -2660,31 +2660,30 @@ impl<W: LayoutElement> Monitor<W> {
             {
                 let Some(action) = action else { continue };
                 let left = index == 0;
-                let count = action.columns;
-                let text = match count {
-                    0 => "Scroll".into(),
-                    1 => "1 column".into(),
-                    _ => format!("{count} columns"),
-                };
-                let text = if left {
-                    format!("←  {text}")
-                } else {
-                    format!("{text}  →")
-                };
+                let title = navigation_title(action.destination, target, "Window");
+                let suffix = window_title_suffix(&title);
+                let distinct = titles
+                    .iter()
+                    .filter(|title| window_title_suffix(title) == suffix)
+                    .count()
+                    == 1;
+                let text = if distinct { suffix } else { &title };
                 let hovered = pointer.is_some_and(|point| action.rect.contains(point));
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
-                    text,
+                    text.into(),
                     if hovered {
                         tint_caption(direction_background, accent)
                     } else {
                         direction_background
                     },
-                    LabelKind::Button { align_right: !left },
+                    LabelKind::ScrollDestination {
+                        left,
+                        columns: action.columns,
+                    },
                     action.rect.size.w,
                     scale,
-                    action.rect.loc
-                        + Point::from((0., (STRIP_BUTTON_HEIGHT - SCROLL_BUTTON_HEIGHT) / 2.)),
+                    action.rect.loc,
                     1.,
                 ) {
                     draw(label);
@@ -2738,7 +2737,7 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    tint_caption(surface, accent),
+                    direction_background,
                     LabelKind::StripViewport,
                     rect.size.w,
                     scale,

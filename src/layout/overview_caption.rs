@@ -50,6 +50,10 @@ pub(super) enum LabelKind {
     StripTray,
     StripViewport,
     StripRange,
+    ScrollDestination {
+        left: bool,
+        columns: usize,
+    },
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
@@ -395,8 +399,10 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let font = if matches!(key.kind, LabelKind::StripButton { .. })
-        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
+    let font = if matches!(
+        key.kind,
+        LabelKind::StripButton { .. } | LabelKind::ScrollDestination { .. }
+    ) || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
     {
         "sans-serif Medium 13px"
     } else {
@@ -408,6 +414,7 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
         if matches!(
             key.kind,
             LabelKind::StripButton { .. }
+                | LabelKind::ScrollDestination { .. }
                 | LabelKind::Preview { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::Button { .. }
@@ -440,9 +447,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::StripButton {
             direction: Some(_), ..
         } => (max_width, STRIP_BUTTON_HEIGHT - 6.),
-        LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
-            (max_width, STRIP_BUTTON_HEIGHT)
-        }
+        LabelKind::StripButton { .. }
+        | LabelKind::LayerAction { .. }
+        | LabelKind::ScrollDestination { .. } => (max_width, STRIP_BUTTON_HEIGHT),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
@@ -481,6 +488,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
         LabelKind::StripViewport => 10.,
+        LabelKind::ScrollDestination { .. } => 17.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton {
             direction: Some(_), ..
@@ -537,6 +545,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             key.kind,
             LabelKind::StripTray
                 | LabelKind::StripViewport
+                | LabelKind::ScrollDestination { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint
                 | LabelKind::StripButton { outlined: true, .. }
@@ -647,6 +656,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 "sans-serif Medium 13px",
             )));
         }
+        let scroll_status = match key.kind {
+            LabelKind::ScrollDestination { columns: 0, .. } => None,
+            LabelKind::ScrollDestination { columns: 1, .. } => Some("1 column".into()),
+            LabelKind::ScrollDestination { columns, .. } => Some(format!("{columns} columns")),
+            _ => None,
+        };
         let (status, direction, focus, show_arrow) = match key.kind {
             LabelKind::StripButton {
                 status,
@@ -655,9 +670,21 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 show_arrow,
                 ..
             } => (status, direction, focus, show_arrow),
+            LabelKind::ScrollDestination { left, .. } => (
+                scroll_status.as_deref(),
+                Some(left),
+                FocusMarker::None,
+                true,
+            ),
             _ => (None, None, FocusMarker::None, false),
         };
-        let offscreen = direction.is_some();
+        let offscreen = matches!(
+            key.kind,
+            LabelKind::StripButton {
+                direction: Some(_),
+                ..
+            }
+        );
         if let Some(left) = direction.filter(|_| show_arrow) {
             let x = if left { 19. } else { width - 19. };
             let y = height / 2.;
@@ -756,7 +783,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let (w, h) = label.pixel_size();
         let x = match key.kind {
             LabelKind::NavigationHint => (width - f64::from(w)) / 2.,
-            LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
+            LabelKind::StripButton { .. } | LabelKind::ScrollDestination { .. } => {
+                title_x + (title_width - f64::from(w)) / 2.
+            }
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
@@ -784,6 +813,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 cr.set_line_width(1.5);
                 cr.stroke()?;
             }
+        }
+        if offscreen && !show_arrow && focus == FocusMarker::None {
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.78);
         }
         cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
