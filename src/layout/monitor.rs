@@ -1873,7 +1873,15 @@ impl<W: LayoutElement> Monitor<W> {
                     };
                 ScrollCue {
                     rect: Rectangle::new(
-                        Point::from((if left { x } else { right_edge - width }, y)),
+                        Point::from((
+                            match (left, card) {
+                                (true, true) => bounds.start,
+                                (false, true) => bounds.end - width,
+                                (true, false) => x,
+                                (false, false) => right_edge - width,
+                            },
+                            y,
+                        )),
                         Size::from((width, height)),
                     ),
                     destination: column.active_window(),
@@ -2174,7 +2182,7 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         ws: &Workspace<W>,
         geo: Rectangle<f64, Logical>,
-    ) -> Option<(Range<f64>, Range<f64>)> {
+    ) -> Option<[Range<f64>; 3]> {
         let tiles = || ws.scrolling().tiles_with_render_positions();
         let extent = visible_extent(tiles())?;
         let view = ws.working_area();
@@ -2200,7 +2208,15 @@ impl<W: LayoutElement> Monitor<W> {
             x(range.start)..x(range.end)
         };
         let visible = project(visible);
-        (visible.end - visible.start >= pixel).then(|| (project(extent), visible))
+        (visible.end - visible.start >= pixel).then(|| {
+            let before = visible_extent(
+                tiles().filter(|(tile, pos, _)| pos.x + tile.tile_size().w <= bounds.start + pixel),
+            )
+            .map_or(visible.start..visible.start, project);
+            let after = visible_extent(tiles().filter(|(_, pos, _)| pos.x >= bounds.end - pixel))
+                .map_or(visible.end..visible.end, project);
+            [before, visible, after]
+        })
     }
 
     fn render_overview_captions<R: NiriRenderer>(
@@ -2260,20 +2276,22 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            if let Some((strip, visible)) = active
+            if let Some(groups) = active
                 .then(|| self.desktop_window_groups(ws, geo))
                 .flatten()
             {
                 let y = geo.loc.y - 33.;
                 if contains_y(y, 28.) {
-                    let groups = [
-                        (strip.start..visible.start, "Offscreen to the left", 154.),
-                        (visible.clone(), "On desktop", 100.),
-                        (visible.end..strip.end, "Offscreen to the right", 163.),
+                    let labels = [
+                        ("Offscreen to the left", 160.),
+                        ("On desktop", 102.),
+                        ("Offscreen to the right", 169.),
                     ];
                     let surface = caption_background(accent, backdrop, false);
-                    for ((range, title, min_width), label) in
-                        groups.into_iter().zip(&ws.overview_caption.desktop_labels)
+                    for ((range, (title, min_width)), label) in groups
+                        .into_iter()
+                        .zip(labels)
+                        .zip(&ws.overview_caption.desktop_labels)
                     {
                         let width = range.end - range.start;
                         if width < min_width {
@@ -2284,9 +2302,9 @@ impl<W: LayoutElement> Monitor<W> {
                             title.into(),
                             surface,
                             LabelKind::Caption,
-                            width.min(184.),
+                            min_width,
                             scale,
-                            Point::from((range.start, y)),
+                            Point::from(((range.start + range.end - min_width) / 2., y)),
                             label_alpha,
                         ) {
                             draw(MonitorInnerRenderElement::Caption(caption));
@@ -2569,50 +2587,55 @@ impl<W: LayoutElement> Monitor<W> {
             let Some(rect) = self.overview_frame_geometry(ws, index, geo) else {
                 continue;
             };
-            if index == self.active_workspace_idx {
-                if let Some((_, visible)) = self.desktop_window_groups(ws, geo) {
-                    let left = (visible.start - 4.).max(rect.loc.x);
-                    let right = (visible.end + 4.).min(rect.loc.x + rect.size.w);
+            let active = index == self.active_workspace_idx;
+            let group_alpha = ((progress - 0.80) / 0.20).clamp(0., 1.) as f32;
+            let groups = active
+                .then(|| self.desktop_window_groups(ws, geo))
+                .flatten();
+            let mut draw = |elem| {
+                let elem = MonitorInnerRenderElement::Decoration(elem);
+                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                push(RelocateRenderElement::from_element(
+                    elem,
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            };
+            if let Some(groups) = groups.as_ref().filter(|_| group_alpha > 0.) {
+                for (index, range) in groups.iter().enumerate() {
+                    if range.is_empty() {
+                        continue;
+                    }
                     let group = Rectangle::new(
-                        Point::from((left, rect.loc.y + 3.)),
-                        Size::from(((right - left).max(0.), (rect.size.h - 6.).max(0.))),
+                        Point::from((range.start - 2., geo.loc.y - 37.)),
+                        Size::from((range.end - range.start + 4., geo.size.h + 37.)),
                     );
-                    ws.overview_caption.render_desktop_outline(
+                    let Some(group) = group.intersection(self.overview_content()) else {
+                        continue;
+                    };
+                    ws.overview_caption.render_desktop_group(
                         renderer,
-                        group,
+                        index,
+                        group.to_physical_precise_round(scale).to_logical(scale),
                         ws.options.layout.background_color,
-                        ((progress - 0.80) / 0.20).clamp(0., 1.) as f32,
+                        ws.options.layout.border.active_color,
+                        group_alpha,
                         scale,
-                        &mut |elem| {
-                            let elem = MonitorInnerRenderElement::Decoration(elem);
-                            let elem =
-                                RescaleRenderElement::from_element(elem, Point::default(), 1.);
-                            push(RelocateRenderElement::from_element(
-                                elem,
-                                Point::default(),
-                                Relocate::Relative,
-                            ));
-                        },
+                        &mut draw,
                     );
                 }
             }
-            ws.overview_caption.render_frame(
-                renderer,
-                rect,
-                ws.options.layout.background_color,
-                index == self.active_workspace_idx,
-                progress as f32,
-                scale,
-                &mut |elem| {
-                    let elem = MonitorInnerRenderElement::Decoration(elem);
-                    let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
-                    push(RelocateRenderElement::from_element(
-                        elem,
-                        Point::default(),
-                        Relocate::Relative,
-                    ));
-                },
-            );
+            if groups.is_none() || group_alpha < 1. {
+                ws.overview_caption.render_frame(
+                    renderer,
+                    rect,
+                    ws.options.layout.background_color,
+                    active,
+                    progress as f32,
+                    scale,
+                    &mut draw,
+                );
+            }
             if shadow_config.on {
                 let mut shadow = ws.overview_caption.shadow.borrow_mut();
                 shadow.update_config(shadow_config);
