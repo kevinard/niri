@@ -718,8 +718,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     };
                     if let Some(neighbor) = neighbor.filter(|&neighbor| {
                         self.options.layout.clip_scroll_to_work_area
-                            && self.data[idx].pinned.is_none()
-                            && self.data[neighbor].pinned.is_none()
                             && self.columns[idx].sizing_mode().is_normal()
                             && self.columns[neighbor].sizing_mode().is_normal()
                     }) {
