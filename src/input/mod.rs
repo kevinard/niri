@@ -3029,25 +3029,21 @@ impl State {
             return false;
         }
 
-        let cue = self.niri.output_under(location).and_then(|(output, point)| {
+        let window = self.niri.output_under(location).and_then(|(output, point)| {
             let monitor = self.niri.layout.monitor_for_output(output)?;
-            let direction = monitor.scroll_cue_under(point)?;
+            let destination = monitor.scroll_cue_under(point)?;
             self.niri
                 .contents_under(location)
                 .layer
                 .is_none()
-                .then(|| (output.clone(), direction))
+                .then(|| destination.window.clone())
         });
-        let Some((output, direction)) = cue else {
+        let Some(window) = window else {
             return false;
         };
 
-        self.niri.layout.focus_output(&output);
-        match direction {
-            ScrollDirection::Left => self.niri.layout.focus_left(),
-            ScrollDirection::Right => self.niri.layout.focus_right(),
-        }
         self.niri.layer_shell_on_demand_focus = None;
+        self.focus_window(&window);
         self.niri.queue_redraw_all();
         true
     }

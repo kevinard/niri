@@ -13,7 +13,7 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{caption_background, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT};
-use super::scrolling::{Column, ColumnWidth, ScrollDirection};
+use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
 use super::workspace::{
     OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
@@ -1742,46 +1742,40 @@ impl<W: LayoutElement> Monitor<W> {
             return [None, None];
         }
         let scrolling = ws.scrolling();
-        let Some(extent) = visible_extent(scrolling.tiles_with_render_positions()) else {
-            return [None, None];
-        };
         let Some(active) = scrolling.active_column().map(Column::id) else {
             return [None, None];
         };
-        let mut columns = scrolling.columns();
-        let mut previous = None;
-        for column in columns.by_ref() {
-            if column.id() == active {
-                break;
-            }
-            previous = Some(column);
-        }
-        let next = columns.next();
         let tolerance = 1. / self.scale.fractional_scale();
+        let columns = || {
+            scrolling.columns_with_render_positions()
+                .filter(|(column, _)| column.id() != active)
+        };
+        let left = columns()
+            .filter(|(_, pos)| pos.x < bounds.start - tolerance)
+            .max_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
+        let right = columns()
+            .filter(|(column, pos)| pos.x + column.width() > bounds.end + tolerance)
+            .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
         let y = self.working_area.loc.y + (self.working_area.size.h - height) / 2.;
         let rect = |x| Rectangle::new(Point::from((x, y)), Size::from((width, height)));
         [
-            previous
-                .filter(|_| extent.start < bounds.start - tolerance)
-                .map(|column| ScrollCue {
-                    rect: rect(bounds.start + 4.),
-                    destination: column.active_window(),
-                }),
-            next.filter(|_| extent.end > bounds.end + tolerance)
-                .map(|column| ScrollCue {
-                    rect: rect(bounds.end - width - 4.),
-                    destination: column.active_window(),
-                }),
+            left.map(|(column, _)| ScrollCue {
+                rect: rect(bounds.start + 4.),
+                destination: column.active_window(),
+            }),
+            right.map(|(column, _)| ScrollCue {
+                rect: rect(bounds.end - width - 4.),
+                destination: column.active_window(),
+            }),
         ]
     }
 
-    pub fn scroll_cue_under(&self, position: Point<f64, Logical>) -> Option<ScrollDirection> {
+    pub fn scroll_cue_under(&self, position: Point<f64, Logical>) -> Option<&W> {
         self.scroll_cues()
             .into_iter()
-            .zip([ScrollDirection::Left, ScrollDirection::Right])
-            .find_map(|(cue, direction)| {
-                cue.filter(|cue| cue.rect.contains(position)).map(|_| direction)
-            })
+            .flatten()
+            .find(|cue| cue.rect.contains(position))
+            .map(|cue| cue.destination)
     }
 
     fn render_scroll_cues<R: NiriRenderer>(
