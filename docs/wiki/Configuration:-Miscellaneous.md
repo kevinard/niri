@@ -464,7 +464,8 @@ overview {
 Centers the overview in the usable area and keeps scrolling window previews
 clear of reserved side panels. Each visible workspace has a full-size caption
 with its number and configured name. The overview centers the full strip when
-it fits at the configured zoom. Visible thumbnails keep readable titles and the
-focus accent. The desktop tray contains whole previews for the windows that are
-fully or partly visible on the desktop. Other previews remain available to select.
-Wider strips retain the usual gestures and shortcuts.
+it fits at the configured zoom. Overview groups the titled previews by desktop
+position and keeps hidden floating windows available. Hover or use the arrow
+keys to select a window. Tab moves selection between tiled and floating
+windows. Click a preview or press Enter to open the selected window. Wider strips
+retain the usual gestures and shortcuts.

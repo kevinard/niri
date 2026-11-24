@@ -643,7 +643,10 @@ layout {
 layout { clip-scroll-to-work-area; }
 ```
 
-Clip the scrolling strip at the horizontal space reserved by side panels.
-This keeps passing tiled window content and controls out of the panel margin.
-A button at the edge names the neighboring window and brings its column into view.
+Keep scrolling tiles and their controls within the work area reserved by panels.
+When the work area has room for a window strip, it lists the surrounding columns
+in layout order and marks the tiles currently in view. Hover over an offscreen
+window to preview which columns will come into view. Click a window to bring it
+into view and focus it. With both tiled and floating windows, the strip also
+offers a control to hide or show the floating layer when there is room.
 Floating, maximized and fullscreen windows retain their usual bounds.
