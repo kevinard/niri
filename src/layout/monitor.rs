@@ -1807,6 +1807,7 @@ impl<W: LayoutElement> Monitor<W> {
                 renderer.as_gles_renderer(),
                 index + 1,
                 ws.name().map(String::as_str),
+                !ws.has_windows_or_name(),
                 active,
                 width,
                 scale,
@@ -1971,6 +1972,46 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 }
             }
+        }
+    }
+
+    pub fn has_framed_overview(&self) -> bool {
+        self.options.overview.framed_workspaces && self.overview_progress.is_some()
+    }
+
+    pub fn render_overview_frames<R: NiriRenderer>(
+        &self,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let progress = self
+            .overview_progress_value()
+            .unwrap_or_default()
+            .clamp(0., 1.);
+        let scale = self.scale.fractional_scale();
+        for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
+            let left = self.working_area.loc.x + 12.;
+            let width = (self.working_area.size.w - 24.).max(0.);
+            let position = Point::from((geo.loc.x + (left - geo.loc.x) * progress, geo.loc.y));
+            let size = Size::from((geo.size.w + (width - geo.size.w) * progress, geo.size.h));
+            let rect = Rectangle::new(position, size)
+                .to_physical_precise_round(scale)
+                .to_logical(scale);
+            ws.overview_caption.render_frame(
+                rect,
+                ws.options.layout.background_color,
+                index == self.active_workspace_idx,
+                progress as f32,
+                scale,
+                &mut |elem| {
+                    let elem = MonitorInnerRenderElement::SolidColor(elem);
+                    let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                    push(RelocateRenderElement::from_element(
+                        elem,
+                        Point::default(),
+                        Relocate::Relative,
+                    ));
+                },
+            );
         }
     }
 

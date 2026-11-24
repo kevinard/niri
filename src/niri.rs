@@ -4732,11 +4732,17 @@ impl Niri {
                 push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
-                process!(geo)(ws.render_background());
+                if !mon.has_framed_overview() {
+                    process!(geo)(ws.render_background());
+                }
             }
         }
 
-        mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
+        if mon.has_framed_overview() {
+            mon.render_overview_frames(&mut |elem| push(elem.into()));
+        } else {
+            mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
+        }
 
         // Then the backdrop.
         push_popups_from_layer!(Layer::Background, true);
