@@ -18,13 +18,13 @@ use super::{
 use crate::animation::{Animation, Clock};
 use crate::layout::RenderLayer;
 use crate::niri_render_elements;
+use crate::render_helpers::RenderCtx;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::xray::XrayPos;
-use crate::render_helpers::RenderCtx;
 use crate::utils::transaction::TransactionBlocker;
 use crate::utils::{
-    center_preferring_top_left_in_area, clamp_preferring_top_left_in_area, ensure_min_max_size,
-    ensure_min_max_size_maybe_zero, ResizeEdge,
+    ResizeEdge, center_preferring_top_left_in_area, clamp_preferring_top_left_in_area,
+    ensure_min_max_size, ensure_min_max_size_maybe_zero,
 };
 use crate::window::ResolvedWindowRules;
 
@@ -1049,7 +1049,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
             tile.window_mut().on_commit(serial);
         }
 
-        let prev_size = data.size;
+        let previous = Rectangle::new(data.logical_pos, data.size);
 
         tile.update_window();
         data.update(tile);
@@ -1058,12 +1058,27 @@ impl<W: LayoutElement> FloatingSpace<W> {
         if let Some(resize) = resize {
             let mut offset = Point::from((0., 0.));
             if resize.edges.contains(ResizeEdge::LEFT) {
-                offset.x += prev_size.w - data.size.w;
+                offset.x += previous.size.w - data.size.w;
             }
             if resize.edges.contains(ResizeEdge::TOP) {
-                offset.y += prev_size.h - data.size.h;
+                offset.y += previous.size.h - data.size.h;
             }
             data.set_logical_pos(data.logical_pos + offset);
+        } else if previous.size != data.size {
+            // Keep a visible window's titlebar and controls reachable when the client
+            // grows in response to a size action. Pointer resizing still anchors the
+            // opposite edge, and deliberately off-screen windows retain their position.
+            let area = data.working_area;
+            let mut next = Rectangle::new(data.logical_pos, data.size);
+            if area.intersection(previous) == Some(previous)
+                && next.size.w <= area.size.w
+                && next.size.h <= area.size.h
+            {
+                clamp_preferring_top_left_in_area(area, &mut next);
+                if next.loc != data.logical_pos {
+                    data.set_logical_pos(next.loc);
+                }
+            }
         }
 
         true
