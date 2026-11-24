@@ -16,7 +16,7 @@ use super::overview_caption::{
     caption_background, frame_radius, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
     SCROLL_CARD_HEIGHT, VIEWPORT_TRACK_HEIGHT,
 };
-use super::scrolling::{Column, ColumnWidth};
+use super::scrolling::{Column, ColumnWidth, ViewOffset};
 use super::tile::Tile;
 use super::workspace::{
     compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
@@ -168,6 +168,7 @@ struct ScrollCue<'a, W> {
     rect: Rectangle<f64, Logical>,
     destination: &'a W,
     clipped_column_edge: Option<f64>,
+    opacity: f32,
 }
 
 #[derive(Debug)]
@@ -1756,7 +1757,10 @@ impl<W: LayoutElement> Monitor<W> {
         Some(bounds)
     }
 
-    fn exclude_narrow_peeks(mut bounds: Range<f64>, [left, right]: [Option<ScrollCue<'_, W>>; 2]) -> Range<f64> {
+    fn exclude_narrow_peeks(
+        mut bounds: Range<f64>,
+        [left, right]: [Option<ScrollCue<'_, W>>; 2],
+    ) -> Range<f64> {
         if let Some(edge) = left.and_then(|cue| cue.clipped_column_edge) {
             bounds.start = bounds.start.max(edge);
         }
@@ -1777,7 +1781,11 @@ impl<W: LayoutElement> Monitor<W> {
         self.scroll_cues_for(ws, &bounds)
     }
 
-    fn scroll_cues_for<'a>(&self, ws: &'a Workspace<W>, bounds: &Range<f64>) -> [Option<ScrollCue<'a, W>>; 2] {
+    fn scroll_cues_for<'a>(
+        &self,
+        ws: &'a Workspace<W>,
+        bounds: &Range<f64>,
+    ) -> [Option<ScrollCue<'a, W>>; 2] {
         if ws.floating_is_active() {
             return [None, None];
         }
@@ -1805,51 +1813,87 @@ impl<W: LayoutElement> Monitor<W> {
         let right = columns()
             .filter(|(column, pos)| pos.x + column.width() > bounds.end + tolerance)
             .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
+        let fully_visible = columns()
+            .filter(|(column, pos)| {
+                pos.x >= bounds.start - tolerance
+                    && pos.x + column.width() <= bounds.end + tolerance
+            })
+            .fold(
+                (
+                    active_x.unwrap_or(bounds.start),
+                    active_x.unwrap_or(bounds.end) + active.width(),
+                ),
+                |(start, end), (column, pos)| (start.min(pos.x), end.max(pos.x + column.width())),
+            );
         let inset = 12.;
         let left_edge = bounds.start + inset;
         let right_edge = bounds.end - inset;
-        let left_width = active_x.map_or(width, |x| (x - left_edge - 4.).floor().clamp(32., width));
+        let left_width =
+            active_x.map_or(width, |x| (x - left_edge - inset).floor().clamp(32., width));
         let right_width = active_x.map_or(width, |x| {
-            (right_edge - x - active.width() - 4.)
+            (right_edge - x - active.width() - inset)
                 .floor()
                 .clamp(32., width)
         });
-        let stationary = !scrolling.are_transitions_ongoing();
-        let make_cue = |(column, pos): (&'a Column<W>, Point<f64, Logical>), x, width, left| {
-            let edge = if left { pos.x + column.width() } else { pos.x };
-            let exposed = if left {
-                edge - bounds.start
-            } else {
-                bounds.end - edge
-            };
-            let unclipped = active_x.is_some_and(|x| {
-                if left {
-                    edge <= x
-                } else {
-                    edge >= x + active.width()
-                }
-            });
-            // A narrow cut through an inactive window is rarely useful at rest.
-            // Preserve the complete strip while the camera moves or a gesture is held.
-            let card = stationary
-                && unclipped
-                && width >= 144.
-                && self.working_area.size.h >= SCROLL_CARD_HEIGHT
-                && exposed < column.width() * 0.60;
-            let height = if card { SCROLL_CARD_HEIGHT } else { height };
-            let available = self.working_area.size.h - height;
-            let y = self.working_area.loc.y
-                + if card {
-                    available / 2.
-                } else {
-                    available.min(72.)
-                };
-            ScrollCue {
-                rect: Rectangle::new(Point::from((x, y)), Size::from((width, height))),
-                destination: column.active_window(),
-                clipped_column_edge: card.then_some(edge),
+        let card_progress = match scrolling.view_offset() {
+            ViewOffset::Static(_) if !scrolling.are_transitions_ongoing() => 1.,
+            ViewOffset::Animation(animation) => {
+                let distance = (animation.to() - animation.clamped_value()).abs();
+                (1. - distance / SCROLL_CARD_HEIGHT).clamp(0., 1.).powi(2)
             }
+            _ => 0.,
         };
+        let make_cue =
+            |(column, pos): (&'a Column<W>, Point<f64, Logical>), x, width: f64, left| {
+                let edge = if left { pos.x + column.width() } else { pos.x };
+                let exposed = if left {
+                    edge - bounds.start
+                } else {
+                    bounds.end - edge
+                };
+                let unclipped = active_x.is_some_and(|x| {
+                    if left {
+                        edge <= x
+                    } else {
+                        edge >= x + active.width()
+                    }
+                });
+                let space = if left {
+                    fully_visible.0 - x - inset
+                } else {
+                    right_edge - fully_visible.1 - inset
+                };
+                let width = width.min(space.floor().max(36.));
+                // Keep the live strip during a gesture. Reveal the resting control
+                // as the camera approaches its final position.
+                let card = card_progress > 0.
+                    && unclipped
+                    && width >= 144.
+                    && self.working_area.size.h >= SCROLL_CARD_HEIGHT
+                    && exposed < column.width() * 0.60;
+                let height = if card { SCROLL_CARD_HEIGHT } else { height };
+                let available = self.working_area.size.h - height;
+                let y = self.working_area.loc.y
+                    + if card {
+                        available * 0.72
+                    } else if space < 36. {
+                        (available - inset).max(0.)
+                    } else {
+                        available.min(72.)
+                    };
+                ScrollCue {
+                    rect: Rectangle::new(
+                        Point::from((if left { x } else { right_edge - width }, y)),
+                        Size::from((width, height)),
+                    ),
+                    destination: column.active_window(),
+                    clipped_column_edge: card.then(|| {
+                        let boundary = if left { bounds.start } else { bounds.end };
+                        boundary + (edge - boundary) * card_progress
+                    }),
+                    opacity: if card { card_progress as f32 } else { 1. },
+                }
+            };
         [
             left.map(|column| make_cue(column, left_edge, left_width, true)),
             right.map(|column| make_cue(column, right_edge - right_width, right_width, false)),
@@ -1890,7 +1934,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.scroll_cues()
             .into_iter()
             .flatten()
-            .find(|cue| cue.rect.contains(position))
+            .find(|cue| cue.opacity > 0.5 && cue.rect.contains(position))
             .map(|cue| cue.destination)
     }
 
@@ -1986,7 +2030,7 @@ impl<W: LayoutElement> Monitor<W> {
                 cue.rect.size.w,
                 scale,
                 cue.rect.loc,
-                1.,
+                cue.opacity,
             ) {
                 draw(label);
             }
@@ -2280,15 +2324,16 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 }
                 let caption_end = x + if ws.name().is_some() { width } else { 116. };
-                let centered = (visible.start + visible.end - 144.) / 2.;
-                let label_x = centered.max(caption_end).min(right - 144.);
+                let caption_width = 264.;
+                let centered = (visible.start + visible.end - caption_width) / 2.;
+                let label_x = centered.max(caption_end).min(right - caption_width);
                 if contains_y(top, 28.) && label_x >= caption_end {
                     if let Some(caption) = ws.overview_caption.desktop_view.render(
                         renderer.as_gles_renderer(),
-                        "Desktop viewport".into(),
+                        "Desktop viewport · Click to scroll".into(),
                         surface,
                         LabelKind::Caption,
-                        144.,
+                        caption_width,
                         scale,
                         Point::from((label_x, top)),
                         label_alpha,

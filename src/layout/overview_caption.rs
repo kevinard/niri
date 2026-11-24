@@ -382,9 +382,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let heading = layout(&cr, key);
         heading.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
         heading.set_text(if left {
-            "←  Previous window"
+            "←  Show previous window"
         } else {
-            "Next window  →"
+            "Show next window  →"
         });
         cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.76);
         cr.move_to(align(heading.pixel_size().0), 12.);
