@@ -3021,6 +3021,37 @@ impl State {
         find_configured_bind(bindings, mod_key, trigger, mods)
     }
 
+    fn activate_scroll_cue(&mut self, location: Point<f64, Logical>) -> bool {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.exit_confirm_dialog.is_open()
+        {
+            return false;
+        }
+
+        let cue = self.niri.output_under(location).and_then(|(output, point)| {
+            let monitor = self.niri.layout.monitor_for_output(output)?;
+            let direction = monitor.scroll_cue_under(point)?;
+            self.niri
+                .contents_under(location)
+                .layer
+                .is_none()
+                .then(|| (output.clone(), direction))
+        });
+        let Some((output, direction)) = cue else {
+            return false;
+        };
+
+        self.niri.layout.focus_output(&output);
+        match direction {
+            ScrollDirection::Left => self.niri.layout.focus_left(),
+            ScrollDirection::Right => self.niri.layout.focus_right(),
+        }
+        self.niri.layer_shell_on_demand_focus = None;
+        self.niri.queue_redraw_all();
+        true
+    }
+
     fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
         let pointer = self.niri.seat.get_pointer().unwrap();
 
@@ -3116,31 +3147,10 @@ impl State {
                 && !mod_down
                 && !pointer.is_grabbed()
                 && !is_mru_open
-                && !self.niri.is_locked()
-                && !self.niri.screenshot_ui.is_open()
-                && !self.niri.exit_confirm_dialog.is_open()
+                && self.activate_scroll_cue(pointer.current_location())
             {
-                let location = pointer.current_location();
-                let cue = self.niri.output_under(location).and_then(|(output, point)| {
-                    let monitor = self.niri.layout.monitor_for_output(output)?;
-                    let direction = monitor.scroll_cue_under(point)?;
-                    self.niri
-                        .contents_under(location)
-                        .layer
-                        .is_none()
-                        .then(|| (output.clone(), direction))
-                });
-                if let Some((output, direction)) = cue {
-                    self.niri.layout.focus_output(&output);
-                    match direction {
-                        ScrollDirection::Left => self.niri.layout.focus_left(),
-                        ScrollDirection::Right => self.niri.layout.focus_right(),
-                    };
-                    self.niri.layer_shell_on_demand_focus = None;
-                    self.niri.suppressed_buttons.insert(button_code);
-                    self.niri.queue_redraw_all();
-                    return;
-                }
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
             }
 
             if is_overview_open && !pointer.is_grabbed() && button == Some(MouseButton::Right) {
@@ -4605,6 +4615,10 @@ impl State {
                 }
             }
         } else if !handle.is_grabbed() {
+            if !mod_down && self.activate_scroll_cue(pos) {
+                self.niri.pointer_visibility = PointerVisibility::Disabled;
+                return;
+            }
             if under.overview && !mod_down && under.output.is_some() {
                 let (output, pos_within_output) = self.niri.output_under(pos).unwrap();
                 let output = output.clone();
