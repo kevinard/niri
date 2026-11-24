@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 use std::iter::{self, zip};
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -3630,6 +3631,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        visible_x: Option<&Range<f64>>,
         push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
@@ -3653,6 +3655,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         for (col, col_pos) in self.columns_with_render_positions() {
             // Skip columns belonging to a different render layer.
             if layer.is_normal() == col.is_moving_between_workspaces() {
+                continue;
+            }
+            // Skip the whole offscreen column, including its shadows, when
+            // the compositor substitutes a navigation control for a narrow peek.
+            if visible_x.is_some_and(|bounds| {
+                col_pos.x >= bounds.end || col_pos.x + col.width() <= bounds.start
+            }) {
+                first = false;
                 continue;
             }
 

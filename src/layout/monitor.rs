@@ -90,6 +90,7 @@ pub struct Monitor<W: LayoutElement> {
     /// Insert hint element for rendering.
     insert_hint_element: InsertHintElement,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    overview_action_label: PreviewLabel,
     scroll_cue_labels: [PreviewLabel; 2],
     additional_scroll_cue_labels: [PreviewLabel; 2],
     scroll_edge_fades: [PreviewLabel; 2],
@@ -444,6 +445,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             strip_labels: Default::default(),
+            overview_action_label: PreviewLabel::default(),
             scroll_cue_labels: Default::default(),
             additional_scroll_cue_labels: Default::default(),
             scroll_edge_fades: Default::default(),
@@ -1989,65 +1991,76 @@ impl<W: LayoutElement> Monitor<W> {
     /// remain available in each position without painting over a client surface.
     fn navigation_titles(&self) -> Option<Vec<NavigationTitle<'_, W>>> {
         let ws = self.active_workspace_ref();
-        if self.workspace_switch.is_some() || ws.floating_is_active() {
+        if self.workspace_switch.is_some() {
             return None;
         }
         let top = self.navigation_strip_top()?;
         let bounds = self.scroll_clip(ws)?;
         let scrolling = ws.scrolling();
-        let active = scrolling.active_column()?.id();
-        let columns = scrolling.columns().collect::<Vec<_>>();
-        let active_index = columns.iter().position(|column| column.id() == active)?;
+        let active = ws.active_window()?;
         let positions: HashMap<_, _> = scrolling
             .columns_with_render_positions()
             .map(|(column, position)| (column.id(), position))
             .collect();
+        let visible = Self::exclude_narrow_peeks(bounds.clone(), self.scroll_cues_for(ws, &bounds));
+        let pixel = 1. / self.scale.fractional_scale();
+        let mut windows = scrolling
+            .columns()
+            .map(|column| {
+                let position = positions[&column.id()];
+                let direction = if position.x + column.width() <= visible.start + pixel {
+                    Some(true)
+                } else if position.x >= visible.end - pixel {
+                    Some(false)
+                } else {
+                    None
+                };
+                (column.active_window(), direction)
+            })
+            .collect::<Vec<_>>();
+        let mut floating = ws
+            .floating()
+            .tiles_with_render_positions()
+            .collect::<Vec<_>>();
+        floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        windows.extend(floating.iter().map(|(tile, _)| (tile.window(), None)));
+
+        let active_index = windows
+            .iter()
+            .position(|(window, _)| window.id() == active.id())?;
         let gap = 8.;
         let available = bounds.end - bounds.start - 24.;
         let capacity = ((available + gap) / 184.).floor() as usize;
-        let count = columns
+        let count = windows
             .len()
             .min(capacity.max(1))
             .min(MAX_NAVIGATION_TITLES);
         let first = active_index
             .saturating_sub(count / 2)
-            .min(columns.len() - count);
+            .min(windows.len() - count);
         let width = ((available - gap * (count - 1) as f64) / count as f64)
             .floor()
             .min(236.);
         let strip_width = count as f64 * (width + gap) - gap;
         let x = (bounds.start + bounds.end - strip_width) / 2.;
         let y = top + (NAVIGATION_STRIP_HEIGHT - SCROLL_BUTTON_HEIGHT) / 2.;
-        let visible = Self::exclude_narrow_peeks(bounds.clone(), self.scroll_cues_for(ws, &bounds));
-        let pixel = 1. / self.scale.fractional_scale();
         Some(
-            columns[first..first + count]
+            windows[first..first + count]
                 .iter()
                 .enumerate()
-                .filter_map(|(index, column)| {
-                    let position = positions[&column.id()];
-                    let direction = if position.x + column.width() <= visible.start + pixel {
-                        Some(true)
-                    } else if position.x >= visible.end - pixel {
-                        Some(false)
-                    } else {
-                        None
-                    };
+                .filter_map(|(index, &(window, direction))| {
                     let rect = Rectangle::new(
                         Point::from((x + index as f64 * (width + gap), y)),
                         Size::from((width, SCROLL_BUTTON_HEIGHT)),
                     );
-                    let covered =
-                        ws.floating()
-                            .tiles_with_render_positions()
-                            .any(|(tile, position)| {
-                                rect.intersection(Rectangle::new(position, tile.tile_size()))
-                                    .is_some()
-                            });
+                    let covered = floating.iter().any(|(tile, position)| {
+                        rect.intersection(Rectangle::new(*position, tile.tile_size()))
+                            .is_some()
+                    });
                     (!covered).then_some(NavigationTitle {
                         rect,
-                        window: column.active_window(),
-                        active: column.id() == active,
+                        window,
+                        active: window.id() == active.id(),
                         direction,
                     })
                 })
@@ -2559,6 +2572,26 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
+            if active
+                && ws.active_window().is_some()
+                && contains_y(top, 28.)
+                && right - left >= 520.
+            {
+                let width = 146.;
+                if let Some(action_label) = self.overview_action_label.render(
+                    renderer.as_gles_renderer(),
+                    "Select a window".into(),
+                    caption_background(accent, backdrop, false),
+                    LabelKind::GroupHeading,
+                    width,
+                    scale,
+                    Point::from((right - OVERVIEW_INSET - width, top)),
+                    alpha,
+                ) {
+                    draw(MonitorInnerRenderElement::Caption(action_label));
+                }
+            }
+
             if let Some(groups) = active
                 .then(|| self.desktop_window_groups(ws, geo))
                 .flatten()
@@ -2761,10 +2794,11 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     crop_bounds
                 };
-                if let Some(bounds) = (pass == 3)
+                let visible_x = (pass == 3)
                     .then(|| self.scrolling_visible_span(ws))
-                    .flatten()
-                {
+                    .flatten();
+                let mut shadow_crop = crop_bounds;
+                if let Some(bounds) = &visible_x {
                     let left = ((bounds.start - geo.loc.x) * scale).ceil() as i32;
                     let right = ((bounds.end - geo.loc.x) * scale).floor() as i32;
                     crop_bounds.loc.x = left;
@@ -2775,6 +2809,14 @@ impl<W: LayoutElement> Monitor<W> {
                             .size
                             .h
                             .min(bottom.saturating_sub(crop_bounds.loc.y).max(0));
+                    }
+                    // A visible tile's soft shadow can extend into the gap
+                    // next to its window. Clip it only at the panel bounds.
+                    if let Some(panels) = self.scroll_clip(ws) {
+                        let left = ((panels.start - geo.loc.x) * scale).ceil() as i32;
+                        let right = ((panels.end - geo.loc.x) * scale).floor() as i32;
+                        shadow_crop.loc.x = left;
+                        shadow_crop.size.w = right.saturating_sub(left).max(0);
                     }
                 }
                 // Macro instead of closure because ws and insert hint have different elem types.
@@ -2827,6 +2869,7 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::MovingBetweenWorkspaces,
+                            None,
                             push!(),
                         );
                     }
@@ -2836,7 +2879,19 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::Normal,
-                            push!(),
+                            visible_x.as_ref(),
+                            &mut |elem| {
+                                let clip = if elem.is_window_shadow() {
+                                    shadow_crop
+                                } else {
+                                    crop_bounds
+                                };
+                                if let Some(elem) =
+                                    CropRenderElement::from_element(elem, scale, clip)
+                                {
+                                    push(scale_relocate(geo, elem.into()));
+                                }
+                            },
                         );
                     }
                 }
