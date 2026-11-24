@@ -48,7 +48,7 @@ pub(super) enum LabelKind {
     Preview {
         hovered: bool,
         hidden: bool,
-        quiet_selection: bool,
+        selected: bool,
     },
     Button {
         align_right: bool,
@@ -70,10 +70,8 @@ pub(super) struct OverviewCaption {
     pub(super) desktop_labels: [PreviewLabel; 3],
     desktop_groups: [RefCell<[BorderRenderElement; 2]>; 3],
     frame: RefCell<[BorderRenderElement; 2]>,
-    preview_hover: RefCell<BorderRenderElement>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
-    pub(super) group_shadows: [RefCell<Shadow>; 3],
 }
 
 impl Default for OverviewCaption {
@@ -85,12 +83,8 @@ impl Default for OverviewCaption {
                 RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty()))
             }),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
-            preview_hover: RefCell::new(BorderRenderElement::empty()),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
-            group_shadows: std::array::from_fn(|_| {
-                RefCell::new(Shadow::new(niri_config::Shadow::default()))
-            }),
         }
     }
 }
@@ -275,34 +269,6 @@ impl OverviewCaption {
         }
     }
 
-    pub(super) fn render_preview_hover(
-        &self,
-        renderer: &mut impl NiriRenderer,
-        rect: Rectangle<f64, Logical>,
-        color: Color,
-        scale: f64,
-    ) -> Option<FocusRingRenderElement> {
-        if !BorderRenderElement::has_shader(renderer) {
-            return None;
-        }
-        let geometry = Rectangle::from_size(rect.size);
-        let mut border = self.preview_hover.borrow_mut();
-        border.update(
-            rect.size,
-            geometry,
-            Default::default(),
-            color,
-            color,
-            0.,
-            geometry,
-            2.,
-            CornerRadius::from(9.),
-            scale as f32,
-            1.,
-        );
-        Some(border.clone().with_location(rect.loc).into())
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_frame(
         &self,
@@ -391,6 +357,7 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
         if matches!(
             key.kind,
             LabelKind::StripButton { .. }
+                | LabelKind::OverviewCommand
                 | LabelKind::Button { .. }
                 | LabelKind::WindowNavigation { .. }
         ) {
@@ -649,6 +616,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
         let preview_note = match key.kind {
+            LabelKind::Preview { selected: true, .. } => Some(("Enter", false)),
             LabelKind::Preview { hovered: true, .. } => Some((
                 if width >= 190. {
                     "Show window"
@@ -660,10 +628,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 true,
             )),
             LabelKind::Preview { hidden: true, .. } => Some(("Hidden", false)),
-            LabelKind::Preview {
-                quiet_selection: true,
-                ..
-            } => Some(("Selected", false)),
             _ => None,
         };
         if let Some((text, hovered)) = preview_note {
