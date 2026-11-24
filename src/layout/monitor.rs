@@ -2197,21 +2197,21 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
-    fn overview_command(&self) -> Option<Rectangle<f64, Logical>> {
+    fn overview_command(&self) -> Option<(Rectangle<f64, Logical>, &W)> {
         if !self.overview_open || !self.has_framed_overview() {
             return None;
         }
 
         let area = self.overview_content();
-        if area.size.w < 500. || self.overview_progress_value()? < 0.82 {
+        if area.size.w < 550. || self.overview_progress_value()? < 0.82 {
             return None;
         }
 
-        self.active_workspace_ref().active_window()?;
+        let window = self.active_workspace_ref().active_window()?;
         let geo = self
             .workspaces_with_render_geo_idx()
             .find_map(|((idx, _), geo)| (idx == self.active_workspace_idx).then_some(geo))?;
-        let width = 216.;
+        let width = (area.size.w - 275.).min(316.);
         let rect = Rectangle::new(
             Point::from((
                 area.loc.x + area.size.w - OVERVIEW_INSET - width,
@@ -2219,15 +2219,15 @@ impl<W: LayoutElement> Monitor<W> {
             )),
             Size::from((width, 28.)),
         );
-        (rect.intersection(area) == Some(rect)).then_some(rect)
+        (rect.intersection(area) == Some(rect)).then_some((rect, window))
     }
 
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
         if self.overview_open {
             return self
                 .overview_command()
-                .filter(|rect| rect.contains(position))
-                .and_then(|_| self.active_workspace_ref().active_window());
+                .filter(|(rect, _)| rect.contains(position))
+                .map(|(_, window)| window);
         }
 
         if let Some(strip) = self.navigation_strip() {
@@ -2888,7 +2888,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            if let Some(rect) = active.then(|| self.overview_command()).flatten() {
+            if let Some((rect, window)) = active.then(|| self.overview_command()).flatten() {
                 let surface = caption_background(accent, backdrop, false);
                 let hovered = pointer.is_some_and(|point| rect.contains(point));
                 let background = if hovered {
@@ -2896,9 +2896,10 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     tint_caption(surface, accent)
                 };
+                let title = navigation_title(window, target, "selected window");
                 if let Some(command) = self.overview_command_label.render(
                     renderer.as_gles_renderer(),
-                    "Show selected".into(),
+                    format!("Show {title}"),
                     background,
                     LabelKind::OverviewCommand,
                     rect.size.w,
@@ -3002,20 +3003,9 @@ impl<W: LayoutElement> Monitor<W> {
                 }
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
-                let quiet_selection = selected && hovered.is_some_and(|id| id != window.id());
                 let hovered = hovered.is_some_and(|id| id == window.id());
                 let hidden = !ws.is_floating_visible() && ws.is_floating(window.id());
                 let hover_ink = preview_hover_ink(backdrop);
-                if hovered && contains_y(rect.loc.y, rect.size.h) {
-                    if let Some(outline) = ws.overview_caption.render_preview_hover(
-                        renderer,
-                        rect,
-                        hover_ink * label_alpha,
-                        scale,
-                    ) {
-                        draw(MonitorInnerRenderElement::Decoration(outline));
-                    }
-                }
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -3025,11 +3015,8 @@ impl<W: LayoutElement> Monitor<W> {
                     if title.trim().is_empty() {
                         return;
                     }
-                    let background =
-                        caption_background(accent, backdrop, selected && !quiet_selection);
-                    let background = if quiet_selection {
-                        tint_caption(background, accent)
-                    } else if hovered && !selected {
+                    let background = caption_background(accent, backdrop, selected);
+                    let background = if hovered && !selected {
                         tint_caption(background, hover_ink)
                     } else {
                         background
@@ -3041,7 +3028,7 @@ impl<W: LayoutElement> Monitor<W> {
                         LabelKind::Preview {
                             hovered,
                             hidden,
-                            quiet_selection,
+                            selected,
                         },
                         label.size.w,
                         scale,
@@ -3352,10 +3339,7 @@ impl<W: LayoutElement> Monitor<W> {
                         });
                     Rectangle::new(
                         Point::from((range.start - leading, geo.loc.y - 37.)),
-                        Size::from((
-                            range.end - range.start + leading + trailing,
-                            geo.size.h + 37.,
-                        )),
+                        Size::from((range.end - range.start + leading + trailing, 32.)),
                     )
                     .intersection(self.overview_content())
                     .map(|rect| {
@@ -3385,8 +3369,13 @@ impl<W: LayoutElement> Monitor<W> {
                     );
                 }
             }
-            let frame_alpha =
-                progress as f32 * (1. - if groups.is_some() { group_alpha } else { 0. });
+            let frame_alpha = progress as f32
+                * (1.
+                    - if groups.is_some() {
+                        0.75 * group_alpha
+                    } else {
+                        0.
+                    });
             if frame_alpha > 0. {
                 ws.overview_caption.render_frame(
                     renderer,
@@ -3398,42 +3387,27 @@ impl<W: LayoutElement> Monitor<W> {
                     &mut draw,
                 );
             }
-            if !shadow_config.on {
+            if !shadow_config.on || frame_alpha == 0. {
                 continue;
             }
-            let mut draw_shadow = |shadow: &std::cell::RefCell<super::shadow::Shadow>,
-                                   rect: Rectangle<f64, Logical>,
-                                   alpha| {
-                if alpha == 0. {
-                    return;
-                }
-                let mut shadow = shadow.borrow_mut();
-                shadow.update_config(shadow_config);
-                shadow.update_render_elements(
-                    rect.size,
-                    active,
-                    frame_radius(rect, progress as f32),
-                    scale,
-                    alpha,
-                );
-                shadow.render(renderer, rect.loc, &mut |elem| {
-                    let elem = MonitorInnerRenderElement::Shadow(elem);
-                    let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
-                    push(RelocateRenderElement::from_element(
-                        elem,
-                        Point::default(),
-                        Relocate::Relative,
-                    ));
-                });
-            };
-            if let Some(groups) = groups {
-                for (rect, shadow) in groups.into_iter().zip(&ws.overview_caption.group_shadows) {
-                    if let Some((rect, _)) = rect {
-                        draw_shadow(shadow, rect, group_alpha * 0.52);
-                    }
-                }
-            }
-            draw_shadow(&ws.overview_caption.shadow, rect, frame_alpha);
+            let mut shadow = ws.overview_caption.shadow.borrow_mut();
+            shadow.update_config(shadow_config);
+            shadow.update_render_elements(
+                rect.size,
+                active,
+                frame_radius(rect, progress as f32),
+                scale,
+                frame_alpha,
+            );
+            shadow.render(renderer, rect.loc, &mut |elem| {
+                let elem = MonitorInnerRenderElement::Shadow(elem);
+                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                push(RelocateRenderElement::from_element(
+                    elem,
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            });
         }
     }
 
