@@ -154,7 +154,7 @@ impl OverviewCaption {
         alpha: f32,
         push: &mut dyn FnMut(SolidColorRenderElement),
     ) {
-        let shade = Color::new_unpremul(0., 0.035, 0.025, 0.17 * alpha);
+        let shade = Color::new_unpremul(0., 0.035, 0.025, 0.29 * alpha);
         let height = vertical.end - vertical.start;
         if height <= 0. {
             return;
@@ -333,7 +333,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
     let status = key.status.filter(|_| width >= 178.).map(|text| {
         let layout = pangocairo::functions::create_layout(&cr);
-        layout.set_font_description(Some(&FontDescription::from_string("sans-serif Medium 11px")));
+        layout.set_font_description(Some(&FontDescription::from_string("sans-serif Medium 12px")));
         layout.set_text(text);
         let (width, height) = layout.pixel_size();
         (layout, f64::from(width), f64::from(height))
