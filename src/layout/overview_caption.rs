@@ -23,6 +23,8 @@ pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
+pub(super) const GUTTER_PREVIEW_HEIGHT: f64 = 130.;
+pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GroupStyle {
@@ -34,7 +36,7 @@ pub(super) enum GroupStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
     Caption,
-    ShortcutHints,
+    NavigationHint,
     GroupTitle,
     OverviewCommand,
     StripTray,
@@ -51,11 +53,11 @@ pub(super) enum LabelKind {
     Button {
         align_right: bool,
     },
+    GutterPreview,
     WindowNavigation {
         left: bool,
         offset: usize,
         more: usize,
-        in_gutter: bool,
     },
     EdgeFade {
         height: u32,
@@ -380,8 +382,10 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let font = if matches!(key.kind, LabelKind::StripButton { .. })
-        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
+    let font = if matches!(
+        key.kind,
+        LabelKind::StripButton { .. } | LabelKind::GutterPreview
+    ) || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
     {
         "sans-serif Medium 13px"
     } else {
@@ -414,8 +418,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let label = layout(&cr, key);
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
-        LabelKind::ShortcutHints | LabelKind::GroupTitle | LabelKind::OverviewCommand => {
-            (max_width.min(4096.), HEIGHT)
+        LabelKind::GroupTitle => (max_width.min(4096.), HEIGHT),
+        LabelKind::NavigationHint | LabelKind::OverviewCommand => {
+            (max_width.min(4096.), OVERVIEW_CONTROL_HEIGHT)
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
@@ -424,6 +429,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
+        LabelKind::GutterPreview => (max_width, GUTTER_PREVIEW_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
         LabelKind::Caption => (
             (f64::from(label.pixel_size().0) + 2. * PADDING)
@@ -458,8 +464,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
-        LabelKind::OverviewCommand | LabelKind::ShortcutHints => 9.,
-        LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
+        LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
+        LabelKind::StripTray | LabelKind::WindowNavigation { .. } | LabelKind::GutterPreview => 14.,
         LabelKind::StripButton { .. } => 9.,
         _ => height / 2.,
     };
@@ -512,7 +518,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             key.kind,
             LabelKind::StripTray
                 | LabelKind::OverviewCommand
-                | LabelKind::ShortcutHints
+                | LabelKind::NavigationHint
+                | LabelKind::GutterPreview
                 | LabelKind::StripButton { outlined: true, .. }
                 | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
@@ -532,13 +539,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
 
-    if let LabelKind::WindowNavigation {
-        left,
-        offset,
-        more,
-        in_gutter,
-    } = key.kind
-    {
+    if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
         title.set_single_paragraph_mode(false);
         title.set_wrap(pango::WrapMode::WordChar);
@@ -557,12 +558,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
         let heading = layout(&cr, key);
         heading.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
-        let action = match (in_gutter, offset, left) {
-            (true, _, _) => "Show window",
-            (false, 1, true) => "Previous window",
-            (false, 1, false) => "Next window",
-            (false, _, true) => "Two windows back",
-            (false, _, false) => "Two windows ahead",
+        let action = match (offset, left) {
+            (1, true) => "Previous window",
+            (1, false) => "Next window",
+            (_, true) => "Two windows back",
+            (_, false) => "Two windows ahead",
         };
         let text = match (left, more) {
             (true, 0) => format!("←  {action}"),
@@ -676,13 +676,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::ShortcutHints => (width - f64::from(w)) / 2.,
+            LabelKind::NavigationHint | LabelKind::GutterPreview => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        let y = if status.is_some() {
+        let y = if key.kind == LabelKind::GutterPreview {
+            8.
+        } else if status.is_some() {
             3.
         } else {
             (height - f64::from(h)) / 2.

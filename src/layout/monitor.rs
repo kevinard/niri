@@ -15,7 +15,8 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, tint_caption, GroupStyle, LabelKind, PreviewLabel,
-    SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT, STRIP_TRAY_PADDING,
+    GUTTER_PREVIEW_HEIGHT, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
+    STRIP_BUTTON_HEIGHT, STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -95,6 +96,7 @@ pub struct Monitor<W: LayoutElement> {
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
+    gutter_headings: [PreviewLabel; 2],
     scroll_cue_labels: [PreviewLabel; 2],
     additional_scroll_cue_labels: [PreviewLabel; 2],
     scroll_edge_fades: [PreviewLabel; 2],
@@ -188,7 +190,13 @@ struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
-    previews: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
+    gutters: [Option<NavigationGutter<'a, W>>; 2],
+}
+
+struct NavigationGutter<'a, W> {
+    heading: Rectangle<f64, Logical>,
+    count: usize,
+    previews: Vec<(Rectangle<f64, Logical>, &'a W)>,
 }
 
 struct NavigationTitle<'a, W> {
@@ -469,6 +477,7 @@ impl<W: LayoutElement> Monitor<W> {
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
+            gutter_headings: Default::default(),
             scroll_cue_labels: Default::default(),
             additional_scroll_cue_labels: Default::default(),
             scroll_edge_fades: Default::default(),
@@ -2232,20 +2241,16 @@ impl<W: LayoutElement> Monitor<W> {
                 });
         let visible_extent = visible_tiles
             .reduce(|existing, tile| existing.start.min(tile.start)..existing.end.max(tile.end));
-        let previews = std::array::from_fn(|index| {
+        let gutters = std::array::from_fn(|index| {
             let extent = visible_extent.as_ref()?;
-            let cue = cues[index].as_ref()?;
-            let left = index == 0;
-            let offscreen = windows.iter().any(|(window, direction, _)| {
-                window.id() == cue.destination.id() && *direction == Some(left)
-            });
-            if !offscreen
+            if ws.floating_is_active()
                 || scrolling
                     .distance_to_stationary_view()
                     .is_none_or(|distance| distance > 1.)
             {
                 return None;
             }
+            let left = index == 0;
             let margin = 10.;
             let width = 124.;
             let (x, space) = if left {
@@ -2256,17 +2261,51 @@ impl<W: LayoutElement> Monitor<W> {
             if space < width + 2. * margin {
                 return None;
             }
-            let rect = Rectangle::new(
-                Point::from((x, top + NAVIGATION_STRIP_HEIGHT + 16.)),
-                Size::from((width, SCROLL_CARD_HEIGHT)),
-            );
-            uncovered(rect).map(|rect| (rect, cue.destination))
+            let mut destinations = windows
+                .iter()
+                .filter_map(|(window, direction, _)| (*direction == Some(left)).then_some(*window))
+                .collect::<Vec<_>>();
+            if left {
+                destinations.reverse();
+            }
+            let count = destinations.len();
+            let y = top + NAVIGATION_STRIP_HEIGHT + 16.;
+            let heading = uncovered(Rectangle::new(
+                Point::from((x, y)),
+                Size::from((width, OVERVIEW_CONTROL_HEIGHT)),
+            ))?;
+            let previews = destinations
+                .into_iter()
+                .take(2)
+                .enumerate()
+                .filter_map(|(index, window)| {
+                    let top = y
+                        + OVERVIEW_CONTROL_HEIGHT
+                        + 8.
+                        + index as f64 * (GUTTER_PREVIEW_HEIGHT + 8.);
+                    let rect = Rectangle::new(
+                        Point::from((x, top)),
+                        Size::from((width, GUTTER_PREVIEW_HEIGHT)),
+                    );
+                    if top + GUTTER_PREVIEW_HEIGHT
+                        > self.working_area.loc.y + self.working_area.size.h
+                    {
+                        return None;
+                    }
+                    uncovered(rect).map(|rect| (rect, window))
+                })
+                .collect::<Vec<_>>();
+            (!previews.is_empty()).then_some(NavigationGutter {
+                heading,
+                count,
+                previews,
+            })
         });
         Some(NavigationStrip {
             tray,
             titles,
             layer_action,
-            previews,
+            gutters,
         })
     }
 
@@ -2334,7 +2373,7 @@ impl<W: LayoutElement> Monitor<W> {
         let width = 216.;
         let rect = Rectangle::new(
             Point::from((area.loc.x + (area.size.w - width) / 2., bottom + 17.)),
-            Size::from((width, 28.)),
+            Size::from((width, OVERVIEW_CONTROL_HEIGHT)),
         );
         let fits = |part: Rectangle<f64, Logical>| {
             part.loc.x >= area.loc.x
@@ -2370,9 +2409,10 @@ impl<W: LayoutElement> Monitor<W> {
                 })
                 .or_else(|| {
                     strip
-                        .previews
+                        .gutters
                         .into_iter()
                         .flatten()
+                        .flat_map(|gutter| gutter.previews)
                         .find(|(rect, _)| rect.contains(position))
                         .map(|(_, window)| window)
                 });
@@ -2397,9 +2437,10 @@ impl<W: LayoutElement> Monitor<W> {
             || self.navigation_strip().is_some_and(|strip| {
                 strip.titles.iter().any(|title| title.window.id() == id)
                     || strip
-                        .previews
+                        .gutters
                         .iter()
                         .flatten()
+                        .flat_map(|gutter| &gutter.previews)
                         .any(|(_, window)| window.id() == id)
             })
             || self.scroll_cues().into_iter().flatten().any(|cue| {
@@ -2424,16 +2465,15 @@ impl<W: LayoutElement> Monitor<W> {
         if source.w <= 0. || source.h <= 0. {
             return;
         }
-        let width = rect.size.w - 20.;
-        let height = rect.size.h - 88.;
+        let width = rect.size.w;
+        let height = rect.size.h;
         let scale = self.scale.fractional_scale();
         let zoom = (width / source.w).min(1.);
         let crop = Rectangle::from_size(Size::from((
             (width / zoom * scale).floor() as i32,
             (height / zoom * scale).floor() as i32,
         )));
-        let location = rect.loc + Point::from((10., 78.));
-        let location = location.to_physical_precise_round(scale);
+        let location = rect.loc.to_physical_precise_round(scale);
         let ctx = RenderCtx {
             renderer,
             target,
@@ -2466,8 +2506,14 @@ impl<W: LayoutElement> Monitor<W> {
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible();
-            for (rect, window) in strip.previews.iter().flatten() {
-                self.render_scroll_preview(renderer, target, *rect, *window, 1., push);
+            for gutter in strip.gutters.iter().flatten() {
+                for (rect, window) in &gutter.previews {
+                    let thumbnail = Rectangle::new(
+                        rect.loc + Point::from((8., 30.)),
+                        Size::from((rect.size.w - 16., rect.size.h - 38.)),
+                    );
+                    self.render_scroll_preview(renderer, target, thumbnail, *window, 1., push);
+                }
             }
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
@@ -2478,32 +2524,57 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
-            for (index, preview) in strip.previews.into_iter().enumerate() {
-                let Some((rect, window)) = preview else {
-                    continue;
-                };
-                let hovered = pointer.is_some_and(|point| rect.contains(point));
-                let background = if hovered {
-                    tint_caption(tint_caption(surface, accent), accent)
+            for (index, gutter) in strip.gutters.into_iter().enumerate() {
+                let Some(gutter) = gutter else { continue };
+                let unit = if gutter.count == 1 {
+                    "window"
                 } else {
-                    surface
+                    "windows"
                 };
-                if let Some(label) = self.scroll_cue_labels[index].render(
+                let heading = if index == 0 {
+                    format!("←  {} {unit}", gutter.count)
+                } else {
+                    format!("{} {unit}  →", gutter.count)
+                };
+                if let Some(label) = self.gutter_headings[index].render(
                     renderer.as_gles_renderer(),
-                    navigation_title(window, target, "Window"),
-                    background,
-                    LabelKind::WindowNavigation {
-                        left: index == 0,
-                        offset: 1,
-                        more: 0,
-                        in_gutter: true,
-                    },
-                    rect.size.w,
+                    heading,
+                    surface,
+                    LabelKind::NavigationHint,
+                    gutter.heading.size.w,
                     scale,
-                    rect.loc,
+                    gutter.heading.loc,
                     1.,
                 ) {
                     draw(label);
+                }
+                for ((rect, window), cache) in gutter.previews.into_iter().zip([
+                    &self.scroll_cue_labels[index],
+                    &self.additional_scroll_cue_labels[index],
+                ]) {
+                    let hovered = pointer.is_some_and(|point| rect.contains(point));
+                    let background = if hovered {
+                        tint_caption(tint_caption(surface, accent), accent)
+                    } else {
+                        surface
+                    };
+                    let title = navigation_title(window, target, "Window");
+                    let caption = title
+                        .rsplit_once(" — ")
+                        .filter(|(_, name)| !name.is_empty())
+                        .map_or(title.as_str(), |(_, name)| name);
+                    if let Some(label) = cache.render(
+                        renderer.as_gles_renderer(),
+                        caption.to_owned(),
+                        background,
+                        LabelKind::GutterPreview,
+                        rect.size.w,
+                        scale,
+                        rect.loc,
+                        1.,
+                    ) {
+                        draw(label);
+                    }
                 }
             }
             for (title, label) in strip.titles.into_iter().zip(&self.strip_labels) {
@@ -2610,7 +2681,18 @@ impl<W: LayoutElement> Monitor<W> {
                 for (rect, window) in
                     std::iter::once((cue.rect, cue.destination)).chain(cue.additional)
                 {
-                    self.render_scroll_preview(renderer, target, rect, window, cue.opacity, push);
+                    let thumbnail = Rectangle::new(
+                        rect.loc + Point::from((10., 78.)),
+                        Size::from((rect.size.w - 20., rect.size.h - 88.)),
+                    );
+                    self.render_scroll_preview(
+                        renderer,
+                        target,
+                        thumbnail,
+                        window,
+                        cue.opacity,
+                        push,
+                    );
                 }
             }
             let mut draw = |label| {
@@ -2654,7 +2736,6 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::WindowNavigation {
                         left,
                         offset: 1,
-                        in_gutter: false,
                         more: if cue.additional.is_some() {
                             0
                         } else {
@@ -2683,7 +2764,6 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::WindowNavigation {
                         left,
                         offset: 2,
-                        in_gutter: false,
                         more: cue.offscreen_columns.saturating_sub(2),
                     },
                     rect.size.w,
@@ -3083,13 +3163,13 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(MonitorInnerRenderElement::Caption(command));
                 }
             }
-            if active && ws.active_window().is_some() && contains_y(top, 28.) {
+            if active && ws.active_window().is_some() && contains_y(top, OVERVIEW_CONTROL_HEIGHT) {
                 let surface = caption_background(accent, backdrop, false);
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
-                    ("← →  Select     Tab  Choose tiled or floating", 312.)
+                    ("← →  Select     Tab  Change window layer", 306.)
                 } else {
-                    ("← →  Select", 103.)
+                    ("← →  Select window", 154.)
                 };
                 let header = Point::from((right - OVERVIEW_INSET - width, top));
                 let position = command
@@ -3101,7 +3181,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         shortcuts.into(),
                         surface,
-                        LabelKind::ShortcutHints,
+                        LabelKind::NavigationHint,
                         width,
                         scale,
                         position,
