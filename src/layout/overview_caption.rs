@@ -23,7 +23,7 @@ const PADDING: f64 = 10.;
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
     viewport_label: PreviewLabel,
-    viewport_rules: RefCell<[SolidColorBuffer; 2]>,
+    viewport_rules: RefCell<[SolidColorBuffer; 7]>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
 }
@@ -117,9 +117,9 @@ pub(super) fn caption_background(accent: Color, backdrop: Color, active: bool) -
     if active {
         Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
     } else if is_light(backdrop) {
-        Color::new_unpremul(0.92, 0.95, 0.93, 0.97)
+        Color::new_unpremul(0.92, 0.95, 0.93, 1.)
     } else {
-        Color::new_unpremul(0.08, 0.14, 0.15, 0.96)
+        Color::new_unpremul(0.08, 0.14, 0.15, 1.)
     }
 }
 
@@ -155,40 +155,45 @@ impl OverviewCaption {
         renderer: &mut GlesRenderer,
         strip: std::ops::Range<f64>,
         visible: std::ops::Range<f64>,
-        y: f64,
+        top: f64,
+        bottom: f64,
         accent: Color,
         backdrop: Color,
         scale: f64,
         alpha: f32,
         push: &mut dyn FnMut(ViewportDecoration),
     ) {
+        let width = visible.end - visible.start;
+        if width <= 0. || bottom <= top {
+            return;
+        }
+
         let mut lines = self.viewport_rules.borrow_mut();
-        let track = Color::new_unpremul(accent.r, accent.g, accent.b, 0.36 * alpha);
+        let track = Color::new_unpremul(accent.r, accent.g, accent.b, 0.27 * alpha);
+        let edge = Color::new_unpremul(accent.r, accent.g, accent.b, 0.55 * alpha);
         let highlight = Color::new_unpremul(accent.r, accent.g, accent.b, alpha);
-        for (buffer, (range, color)) in lines
-            .iter_mut()
-            .zip([(visible.clone(), highlight), (strip, track)])
-        {
-            let width = range.end - range.start;
-            if width <= 0. {
-                continue;
-            }
-            buffer.update((width, 2.), color);
+        let end = visible.end - 2.;
+        let bars = [
+            ((visible.start, top), (width, 2.), highlight),
+            ((visible.start, top), (2., 10.), highlight),
+            ((end, top), (2., 10.), highlight),
+            ((visible.start, top), (1., bottom - top), edge),
+            ((end + 1., top), (1., bottom - top), edge),
+            ((visible.start, bottom), (width, 1.), edge),
+            ((strip.start, top), (strip.end - strip.start, 2.), track),
+        ];
+        for (buffer, (location, size, color)) in lines.iter_mut().zip(bars) {
+            buffer.update(size, color);
             push(ViewportDecoration::Rule(
-                SolidColorRenderElement::from_buffer(
-                    buffer,
-                    (range.start, y),
-                    1.,
-                    Kind::Unspecified,
-                ),
+                SolidColorRenderElement::from_buffer(buffer, location, 1., Kind::Unspecified),
             ));
         }
-        if visible.end - visible.start >= 118. {
-            let position = Point::from(((visible.start + visible.end) / 2. - 49., y - 30.));
+        if width >= 160. {
+            let position = Point::from(((visible.start + visible.end) / 2. - 43., top - 29.));
             if let Some(element) = self.viewport_label.render(
                 renderer,
-                "Visible area".into(),
-                caption_background(accent, backdrop, false),
+                "On screen".into(),
+                caption_background(accent, backdrop, true),
                 false,
                 120.,
                 scale,
