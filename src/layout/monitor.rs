@@ -15,9 +15,12 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, tint_caption, GroupStyle, LabelKind, PreviewLabel,
-    SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT, STRIP_TRAY_PADDING,
+    SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, SCROLL_HANDLE_HEIGHT, STRIP_BUTTON_HEIGHT,
+    STRIP_TRAY_PADDING,
 };
-use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
+use super::scrolling::{
+    navigation_strip_fits, scroll_handle_inset, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT,
+};
 use super::tile::Tile;
 use super::workspace::{
     compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
@@ -194,6 +197,7 @@ struct NavigationStrip<'a, W> {
 struct ScrollAction<'a, W> {
     rect: Rectangle<f64, Logical>,
     destination: Option<&'a W>,
+    count: usize,
 }
 
 struct NavigationTitle<'a, W> {
@@ -1860,8 +1864,6 @@ impl<W: LayoutElement> Monitor<W> {
     /// Clip normal tiled windows at exclusive side panels, while leaving the
     /// floating layer and maximized or full-screen window behavior intact.
     fn scroll_clip(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
-        let area = self.working_area;
-        let right = area.loc.x + area.size.w;
         if !ws.options.layout.clip_scroll_to_work_area
             || self.overview_progress.is_some()
             || !ws
@@ -1871,7 +1873,13 @@ impl<W: LayoutElement> Monitor<W> {
         {
             return None;
         }
-        Some(area.loc.x..right)
+        Some(self.scroll_view_bounds())
+    }
+
+    fn scroll_view_bounds(&self) -> Range<f64> {
+        let area = self.working_area;
+        let inset = scroll_handle_inset(area);
+        (area.loc.x + inset)..(area.loc.x + area.size.w - inset)
     }
 
     fn scrolling_visible_span(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
@@ -2143,12 +2151,7 @@ impl<W: LayoutElement> Monitor<W> {
             .iter()
             .position(|(window, _, _)| window.id() == active.id())?;
         let gap = 8.;
-        let available = bounds.end - bounds.start - 24.;
-        let scroll_width = 100.;
-        let scroll_slot = scroll_width + gap;
-        let reserve_scroll = scrolling.columns().count() > 1 && available >= 640.;
-        let scroll_space = if reserve_scroll { 2. * scroll_slot } else { 0. };
-        let available = available - scroll_space;
+        let available = self.working_area.size.w - 24.;
         let capacity = ((available + gap) / 184.).floor() as usize;
         let count = windows
             .len()
@@ -2217,11 +2220,20 @@ impl<W: LayoutElement> Monitor<W> {
             button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
         });
         let [left, right] = cues;
-        let scroll_actions = if reserve_scroll && (left.is_some() || right.is_some()) {
-            [(x - scroll_slot, left), (x + strip_width + gap, right)].map(|(x, cue)| {
-                button(x, scroll_width).map(|rect| ScrollAction {
+        let area = self.working_area;
+        let inset = scroll_handle_inset(area);
+        let scroll_actions = if inset > 0. && (left.is_some() || right.is_some()) {
+            let y = (area.loc.y + top - SCROLL_HANDLE_HEIGHT) / 2.;
+            let positions = [(area.loc.x + 2., left), (bounds.end + 2., right)];
+            positions.map(|(x, cue)| {
+                let rect = Rectangle::new(
+                    Point::from((x, y)),
+                    Size::from((inset - 4., SCROLL_HANDLE_HEIGHT)),
+                );
+                uncovered(rect).map(|rect| ScrollAction {
                     rect,
-                    destination: cue.map(|cue| cue.destination),
+                    destination: cue.as_ref().map(|cue| cue.destination),
+                    count: cue.map_or(0, |cue| cue.offscreen_columns),
                 })
             })
         } else {
@@ -2455,8 +2467,13 @@ impl<W: LayoutElement> Monitor<W> {
                     Some("Hides floating windows")
                 } else {
                     match title.direction {
-                        Some(true) => Some("Offscreen left"),
-                        Some(false) => Some("Offscreen right"),
+                        Some(left) => Some(if strip.scroll_actions[usize::from(!left)].is_some() {
+                            "Offscreen"
+                        } else if left {
+                            "Offscreen left"
+                        } else {
+                            "Offscreen right"
+                        }),
                         None if hovered && has_layer_action && floating_visible => {
                             Some("Reveal tiled windows")
                         }
@@ -2534,7 +2551,12 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             for (index, action) in strip.scroll_actions.into_iter().enumerate() {
-                let Some(ScrollAction { rect, destination }) = action else {
+                let Some(ScrollAction {
+                    rect,
+                    destination,
+                    count,
+                }) = action
+                else {
                     continue;
                 };
                 let left = index == 0;
@@ -2547,13 +2569,13 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(label) = self.scroll_cue_labels[index].render(
                     renderer.as_gles_renderer(),
-                    "Scroll".into(),
-                    background,
-                    LabelKind::StripButton {
-                        direction: Some(left),
-                        status: None,
-                        outlined: true,
+                    if count > 0 {
+                        count.to_string()
+                    } else {
+                        String::new()
                     },
+                    background,
+                    LabelKind::ScrollHandle { left },
                     rect.size.w,
                     scale,
                     rect.loc,
@@ -2850,11 +2872,11 @@ impl<W: LayoutElement> Monitor<W> {
         let tiles = || ws.scrolling().tiles_with_render_positions();
         let extent = visible_extent(tiles())?;
         let view = ws.working_area();
-        let bounds = view.loc.x..view.loc.x + view.size.w;
         let bounds = if ws.options.layout.clip_scroll_to_work_area {
+            let bounds = self.scroll_view_bounds();
             Self::exclude_narrow_peeks(bounds.clone(), &self.scroll_cues_for(ws, &bounds))
         } else {
-            bounds
+            view.loc.x..view.loc.x + view.size.w
         };
         let pixel = 1. / self.scale.fractional_scale();
         let visible = visible_extent(tiles().filter(|(tile, pos, _)| {
