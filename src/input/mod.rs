@@ -3021,7 +3021,7 @@ impl State {
         find_configured_bind(bindings, mod_key, trigger, mods)
     }
 
-    fn activate_scroll_cue(&mut self, location: Point<f64, Logical>) -> bool {
+    fn activate_window_navigation(&mut self, location: Point<f64, Logical>) -> bool {
         if self.niri.is_locked()
             || self.niri.screenshot_ui.is_open()
             || self.niri.exit_confirm_dialog.is_open()
@@ -3034,7 +3034,7 @@ impl State {
             .output_under(location)
             .and_then(|(output, point)| {
                 let monitor = self.niri.layout.monitor_for_output(output)?;
-                let destination = monitor.scroll_cue_under(point)?;
+                let destination = monitor.navigation_window_under(point)?;
                 self.niri
                     .contents_under(location)
                     .layer
@@ -3149,7 +3149,7 @@ impl State {
                 && !mod_down
                 && !pointer.is_grabbed()
                 && !is_mru_open
-                && self.activate_scroll_cue(pointer.current_location())
+                && self.activate_window_navigation(pointer.current_location())
             {
                 self.niri.suppressed_buttons.insert(button_code);
                 return;
@@ -4617,7 +4617,7 @@ impl State {
                 }
             }
         } else if !handle.is_grabbed() {
-            if !mod_down && self.activate_scroll_cue(pos) {
+            if !mod_down && self.activate_window_navigation(pos) {
                 self.niri.pointer_visibility = PointerVisibility::Disabled;
                 return;
             }

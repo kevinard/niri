@@ -14,6 +14,7 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
+    VIEWPORT_TRACK_HEIGHT,
 };
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -84,6 +85,7 @@ pub struct Monitor<W: LayoutElement> {
     /// Insert hint element for rendering.
     insert_hint_element: InsertHintElement,
     scroll_cue_labels: [PreviewLabel; 2],
+    scroll_edge_fades: [PreviewLabel; 2],
     /// Location to render the insert hint element.
     insert_hint_render_loc: Option<InsertHintRenderLoc>,
     /// Whether the overview is open.
@@ -313,6 +315,13 @@ fn visible_extent<'a, W: LayoutElement + 'a>(
         .reduce(|extent, next| extent.start.min(next.start)..extent.end.max(next.end))
 }
 
+fn desktop_track(strip: &Range<f64>, geo: Rectangle<f64, Logical>) -> Rectangle<f64, Logical> {
+    Rectangle::new(
+        Point::from((strip.start, geo.loc.y - VIEWPORT_TRACK_HEIGHT - 3.)),
+        Size::from(((strip.end - strip.start).floor(), VIEWPORT_TRACK_HEIGHT)),
+    )
+}
+
 /// Center the complete strip in the overview when it fits at the configured
 /// zoom. Wider strips keep the scrolling layout's camera position.
 fn fit_overview_strip(
@@ -405,6 +414,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             scroll_cue_labels: Default::default(),
+            scroll_edge_fades: Default::default(),
             insert_hint_render_loc: None,
             overview_open: false,
             overview_progress: None,
@@ -1771,7 +1781,7 @@ impl<W: LayoutElement> Monitor<W> {
             .filter(|(column, pos)| pos.x + column.width() > bounds.end + tolerance)
             .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
         let inset = 12.;
-        let y = self.working_area.loc.y + (self.working_area.size.h - height - inset).max(0.);
+        let y = self.working_area.loc.y + (self.working_area.size.h - height).min(72.);
         let left_edge = bounds.start + inset;
         let right_edge = bounds.end - inset;
         let left_width = active_x.map_or(width, |x| (x - left_edge - 4.).floor().clamp(32., width));
@@ -1793,7 +1803,37 @@ impl<W: LayoutElement> Monitor<W> {
         ]
     }
 
-    pub fn scroll_cue_under(&self, position: Point<f64, Logical>) -> Option<&W> {
+    pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
+        if self.has_framed_overview() && self.overview_open {
+            let ((_, ws), geo) = self
+                .workspaces_with_render_geo_idx()
+                .find(|((index, _), _)| *index == self.active_workspace_idx)?;
+            let (strip, _) = self.desktop_viewport(ws, geo)?;
+            let track = desktop_track(&strip, geo);
+            let area = self.overview_content();
+            let progress = self.overview_progress_value().unwrap_or_default();
+            if !track.contains(position)
+                || !area.contains(position)
+                || track.loc.y < area.loc.y
+                || track.loc.y + track.size.h > area.loc.y + area.size.h
+                || track.size.w < VIEWPORT_TRACK_HEIGHT
+                || progress <= 0.82
+            {
+                return None;
+            }
+            let x = (position.x - geo.loc.x) / self.overview_zoom();
+            let distance = |column: &Column<W>, start: f64| {
+                let end = start + column.width();
+                (start - x).max(x - end).max(0.)
+            };
+            return ws
+                .scrolling()
+                .columns_with_render_positions()
+                .min_by(|(a, a_pos), (b, b_pos)| {
+                    distance(a, a_pos.x).total_cmp(&distance(b, b_pos.x))
+                })
+                .map(|(column, _)| column.active_window());
+        }
         self.scroll_cues()
             .into_iter()
             .flatten()
@@ -1826,9 +1866,23 @@ impl<W: LayoutElement> Monitor<W> {
             mix(surface.b, accent.b),
             1.,
         );
-        for ((label, cue), left) in self
+        let Some(bounds) = self.scroll_clip(ws) else {
+            return;
+        };
+        let scale = self.scale.fractional_scale();
+        let mut draw = |label| {
+            let elem = MonitorInnerRenderElement::Caption(label);
+            let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+            push(RelocateRenderElement::from_element(
+                elem,
+                Point::default(),
+                Relocate::Relative,
+            ));
+        };
+        for (((label, fade), cue), left) in self
             .scroll_cue_labels
             .iter()
+            .zip(&self.scroll_edge_fades)
             .zip(self.scroll_cues())
             .zip([true, false])
         {
@@ -1869,17 +1923,52 @@ impl<W: LayoutElement> Monitor<W> {
                 color,
                 LabelKind::Button { align_right: !left },
                 cue.rect.size.w,
-                self.scale.fractional_scale(),
+                scale,
                 cue.rect.loc,
                 1.,
             ) {
-                let elem = MonitorInnerRenderElement::Caption(label);
-                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
-                push(RelocateRenderElement::from_element(
-                    elem,
-                    Point::default(),
-                    Relocate::Relative,
-                ));
+                draw(label);
+            }
+            let Some((tile, pos, _)) = ws
+                .scrolling()
+                .tiles_with_render_positions()
+                .find(|(tile, _, visible)| *visible && tile.window().id() == cue.destination.id())
+            else {
+                continue;
+            };
+            let tile_right = pos.x + tile.tile_size().w;
+            let boundary = if left { bounds.start } else { bounds.end };
+            if !(pos.x..tile_right).contains(&boundary) {
+                continue;
+            }
+            let width = if left {
+                tile_right - boundary
+            } else {
+                boundary - pos.x
+            };
+            let width = width.floor().min(36.);
+            let top = pos.y.max(self.working_area.loc.y);
+            let bottom = (pos.y + tile.tile_size().h)
+                .min(self.working_area.loc.y + self.working_area.size.h);
+            let height = (bottom - top).floor().max(0.) as u32;
+            if width < 2. || height == 0 {
+                continue;
+            }
+            let x = if left { boundary } else { boundary - width };
+            if let Some(fade) = fade.render(
+                renderer.as_gles_renderer(),
+                String::new(),
+                surface,
+                LabelKind::EdgeFade {
+                    height,
+                    from_left: left,
+                },
+                width,
+                scale,
+                Point::from((x, top)),
+                1.,
+            ) {
+                draw(fade);
             }
         }
     }
@@ -2075,7 +2164,7 @@ impl<W: LayoutElement> Monitor<W> {
             let top = if empty && !active {
                 geo.loc.y + 11.
             } else {
-                geo.loc.y - 36.
+                geo.loc.y - 48.
             };
             let x = left + OVERVIEW_INSET;
             let width = (right - x - OVERVIEW_INSET).min(235.);
@@ -2097,12 +2186,15 @@ impl<W: LayoutElement> Monitor<W> {
 
             if let Some((strip, visible)) = active.then(|| self.desktop_viewport(ws, geo)).flatten()
             {
-                let track_top = geo.loc.y - 8.;
-                let track_width = (strip.end - strip.start).floor();
+                let track_geometry = desktop_track(&strip, geo);
+                let track_width = track_geometry.size.w;
                 let surface = caption_background(accent, backdrop, false);
                 let start = (visible.start - strip.start).round().clamp(0., track_width) as u32;
                 let end = (visible.end - strip.start).round().clamp(0., track_width) as u32;
-                if contains_y(track_top, 6.) && track_width >= 6. && start < end {
+                if contains_y(track_geometry.loc.y, VIEWPORT_TRACK_HEIGHT)
+                    && track_width >= VIEWPORT_TRACK_HEIGHT
+                    && start < end
+                {
                     let track =
                         niri_config::Color::new_unpremul(surface.r, surface.g, surface.b, 0.78);
                     if let Some(track) = ws.overview_caption.desktop_track.render(
@@ -2112,7 +2204,7 @@ impl<W: LayoutElement> Monitor<W> {
                         LabelKind::Viewport { start, end },
                         track_width,
                         scale,
-                        Point::from((strip.start, track_top)),
+                        track_geometry.loc,
                         label_alpha,
                     ) {
                         draw(MonitorInnerRenderElement::Caption(track));
