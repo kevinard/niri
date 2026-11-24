@@ -55,6 +55,7 @@ pub(super) enum LabelKind {
         left: bool,
         offset: usize,
         more: usize,
+        in_gutter: bool,
     },
     EdgeFade {
         height: u32,
@@ -531,7 +532,13 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
 
-    if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
+    if let LabelKind::WindowNavigation {
+        left,
+        offset,
+        more,
+        in_gutter,
+    } = key.kind
+    {
         let title = layout(&cr, key);
         title.set_single_paragraph_mode(false);
         title.set_wrap(pango::WrapMode::WordChar);
@@ -550,11 +557,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
         let heading = layout(&cr, key);
         heading.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
-        let action = match (offset, left) {
-            (1, true) => "Previous window",
-            (1, false) => "Next window",
-            (_, true) => "Two windows back",
-            (_, false) => "Two windows ahead",
+        let action = match (in_gutter, offset, left) {
+            (true, _, _) => "Show window",
+            (false, 1, true) => "Previous window",
+            (false, 1, false) => "Next window",
+            (false, _, true) => "Two windows back",
+            (false, _, false) => "Two windows ahead",
         };
         let text = match (left, more) {
             (true, 0) => format!("←  {action}"),

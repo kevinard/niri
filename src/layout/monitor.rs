@@ -188,6 +188,7 @@ struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
+    previews: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
 }
 
 struct NavigationTitle<'a, W> {
@@ -2221,10 +2222,51 @@ impl<W: LayoutElement> Monitor<W> {
                 STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
             )),
         ));
+        let visible_tiles =
+            scrolling
+                .tiles_with_render_positions()
+                .filter_map(|(tile, pos, shown)| {
+                    let left = pos.x.max(visible.start);
+                    let right = (pos.x + tile.tile_size().w).min(visible.end);
+                    (shown && left < right).then_some(left..right)
+                });
+        let visible_extent = visible_tiles
+            .reduce(|existing, tile| existing.start.min(tile.start)..existing.end.max(tile.end));
+        let previews = std::array::from_fn(|index| {
+            let extent = visible_extent.as_ref()?;
+            let cue = cues[index].as_ref()?;
+            let left = index == 0;
+            let offscreen = windows.iter().any(|(window, direction, _)| {
+                window.id() == cue.destination.id() && *direction == Some(left)
+            });
+            if !offscreen
+                || scrolling
+                    .distance_to_stationary_view()
+                    .is_none_or(|distance| distance > 1.)
+            {
+                return None;
+            }
+            let margin = 10.;
+            let width = 124.;
+            let (x, space) = if left {
+                (bounds.start + margin, extent.start - bounds.start)
+            } else {
+                (bounds.end - margin - width, bounds.end - extent.end)
+            };
+            if space < width + 2. * margin {
+                return None;
+            }
+            let rect = Rectangle::new(
+                Point::from((x, top + NAVIGATION_STRIP_HEIGHT + 16.)),
+                Size::from((width, SCROLL_CARD_HEIGHT)),
+            );
+            uncovered(rect).map(|rect| (rect, cue.destination))
+        });
         Some(NavigationStrip {
             tray,
             titles,
             layer_action,
+            previews,
         })
     }
 
@@ -2325,6 +2367,14 @@ impl<W: LayoutElement> Monitor<W> {
                         .layer_action
                         .filter(|(rect, _)| rect.contains(position))
                         .map(|(_, window)| window)
+                })
+                .or_else(|| {
+                    strip
+                        .previews
+                        .into_iter()
+                        .flatten()
+                        .find(|(rect, _)| rect.contains(position))
+                        .map(|(_, window)| window)
                 });
         }
         self.scroll_cues()
@@ -2344,9 +2394,14 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
-            || self
-                .navigation_strip()
-                .is_some_and(|strip| strip.titles.iter().any(|title| title.window.id() == id))
+            || self.navigation_strip().is_some_and(|strip| {
+                strip.titles.iter().any(|title| title.window.id() == id)
+                    || strip
+                        .previews
+                        .iter()
+                        .flatten()
+                        .any(|(_, window)| window.id() == id)
+            })
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
                     || cue.additional.is_some_and(|(_, window)| window.id() == id)
@@ -2411,6 +2466,9 @@ impl<W: LayoutElement> Monitor<W> {
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible();
+            for (rect, window) in strip.previews.iter().flatten() {
+                self.render_scroll_preview(renderer, target, *rect, *window, 1., push);
+            }
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
@@ -2420,6 +2478,34 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
+            for (index, preview) in strip.previews.into_iter().enumerate() {
+                let Some((rect, window)) = preview else {
+                    continue;
+                };
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let background = if hovered {
+                    tint_caption(tint_caption(surface, accent), accent)
+                } else {
+                    surface
+                };
+                if let Some(label) = self.scroll_cue_labels[index].render(
+                    renderer.as_gles_renderer(),
+                    navigation_title(window, target, "Window"),
+                    background,
+                    LabelKind::WindowNavigation {
+                        left: index == 0,
+                        offset: 1,
+                        more: 0,
+                        in_gutter: true,
+                    },
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(label);
+                }
+            }
             for (title, label) in strip.titles.into_iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let status = if title.floating {
@@ -2568,6 +2654,7 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::WindowNavigation {
                         left,
                         offset: 1,
+                        in_gutter: false,
                         more: if cue.additional.is_some() {
                             0
                         } else {
@@ -2596,6 +2683,7 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::WindowNavigation {
                         left,
                         offset: 2,
+                        in_gutter: false,
                         more: cue.offscreen_columns.saturating_sub(2),
                     },
                     rect.size.w,
