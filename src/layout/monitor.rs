@@ -12,7 +12,7 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
-use super::overview_caption::{ViewportDecoration, caption_background};
+use super::overview_caption::caption_background;
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
 use super::workspace::{
@@ -1861,7 +1861,12 @@ impl<W: LayoutElement> Monitor<W> {
             let active = index == self.active_workspace_idx;
             let accent = ws.options.layout.border.active_color;
             let backdrop = ws.options.layout.background_color;
-            let top = geo.loc.y - 36.;
+            let empty = !ws.has_windows_or_name();
+            let top = if empty && !active {
+                geo.loc.y + 11.
+            } else {
+                geo.loc.y - 36.
+            };
             let x = left + OVERVIEW_INSET;
             let width = (right - x - OVERVIEW_INSET).min(235.);
             if top >= 0. && width >= 36. {
@@ -1869,7 +1874,7 @@ impl<W: LayoutElement> Monitor<W> {
                     renderer.as_gles_renderer(),
                     index + 1,
                     ws.name().map(String::as_str),
-                    !ws.has_windows_or_name(),
+                    empty,
                     caption_background(accent, backdrop, active),
                     width,
                     scale,
@@ -1878,29 +1883,17 @@ impl<W: LayoutElement> Monitor<W> {
                 ) {
                     draw(MonitorInnerRenderElement::Caption(caption));
                 }
-                if active {
-                    if let Some((strip, visible)) = self.scroll_viewport(ws, geo) {
-                        ws.overview_caption.render_viewport(
-                            renderer.as_gles_renderer(),
-                            strip,
-                            visible,
-                            geo.loc.y - 4.,
-                            geo.loc.y + geo.size.h + 4.,
-                            accent,
-                            backdrop,
-                            scale,
-                            alpha,
-                            &mut |element| match element {
-                                ViewportDecoration::Rule(element) => {
-                                    draw(MonitorInnerRenderElement::SolidColor(element))
-                                }
-                                ViewportDecoration::Caption(element) => {
-                                    draw(MonitorInnerRenderElement::Caption(element))
-                                }
-                            },
-                        );
-                    }
-                }
+            }
+
+            let desktop_view = active.then(|| self.scroll_viewport(ws, geo)).flatten();
+            if let Some((strip, visible)) = &desktop_view {
+                ws.overview_caption.render_outside_view(
+                    strip.clone(),
+                    visible,
+                    (geo.loc.y + 10.)..(geo.loc.y + geo.size.h - 10.),
+                    alpha,
+                    &mut |element| draw(MonitorInnerRenderElement::SolidColor(element)),
+                );
             }
 
             if label_alpha == 0. {
@@ -1938,6 +1931,19 @@ impl<W: LayoutElement> Monitor<W> {
                 }
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
+                let status = desktop_view.as_ref().and_then(|(_, view)| {
+                    if ws.is_floating(window.id()) {
+                        return None;
+                    }
+                    let end = location.x + size.w;
+                    Some(if end <= view.start + 1. || location.x >= view.end - 1. {
+                        "Offscreen"
+                    } else if location.x < view.start - 1. || end > view.end + 1. {
+                        "Partly visible"
+                    } else {
+                        "On desktop"
+                    })
+                });
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -1950,6 +1956,7 @@ impl<W: LayoutElement> Monitor<W> {
                     if let Some(label) = tile.overview_label.render(
                         renderer.as_gles_renderer(),
                         title,
+                        status,
                         caption_background(accent, backdrop, selected),
                         true,
                         label.size.w,
@@ -2131,7 +2138,7 @@ impl<W: LayoutElement> Monitor<W> {
         let left = self.working_area.loc.x + margin;
         let width = self.working_area.size.w - 2. * margin;
         let height = if index != self.active_workspace_idx && !ws.has_windows_or_name() {
-            geo.size.h.min(94.)
+            geo.size.h.min(50.)
         } else {
             geo.size.h
         };
