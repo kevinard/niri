@@ -3002,6 +3002,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
+                let quiet_selection = selected && hovered.is_some_and(|id| id != window.id());
                 let hovered = hovered.is_some_and(|id| id == window.id());
                 let hidden = !ws.is_floating_visible() && ws.is_floating(window.id());
                 let hover_ink = preview_hover_ink(backdrop);
@@ -3024,8 +3025,11 @@ impl<W: LayoutElement> Monitor<W> {
                     if title.trim().is_empty() {
                         return;
                     }
-                    let background = caption_background(accent, backdrop, selected);
-                    let background = if hovered && !selected {
+                    let background =
+                        caption_background(accent, backdrop, selected && !quiet_selection);
+                    let background = if quiet_selection {
+                        tint_caption(background, accent)
+                    } else if hovered && !selected {
                         tint_caption(background, hover_ink)
                     } else {
                         background
@@ -3034,7 +3038,11 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         title,
                         background,
-                        LabelKind::Preview { hovered, hidden },
+                        LabelKind::Preview {
+                            hovered,
+                            hidden,
+                            quiet_selection,
+                        },
                         label.size.w,
                         scale,
                         label.loc,

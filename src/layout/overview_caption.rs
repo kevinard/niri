@@ -48,6 +48,7 @@ pub(super) enum LabelKind {
     Preview {
         hovered: bool,
         hidden: bool,
+        quiet_selection: bool,
     },
     Button {
         align_right: bool,
@@ -659,6 +660,10 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 true,
             )),
             LabelKind::Preview { hidden: true, .. } => Some(("Hidden", false)),
+            LabelKind::Preview {
+                quiet_selection: true,
+                ..
+            } => Some(("Selected", false)),
             _ => None,
         };
         if let Some((text, hovered)) = preview_note {
