@@ -26,6 +26,7 @@ pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) enum LabelKind {
     Caption,
     GroupHeading,
+    StripButton,
     Preview {
         show_action: bool,
     },
@@ -49,6 +50,7 @@ pub(super) struct OverviewCaption {
     pub(super) desktop_labels: [PreviewLabel; 3],
     desktop_groups: [RefCell<BorderRenderElement>; 3],
     frame: RefCell<[BorderRenderElement; 2]>,
+    preview_hover: RefCell<BorderRenderElement>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
     pub(super) group_shadows: [RefCell<Shadow>; 3],
@@ -61,6 +63,7 @@ impl Default for OverviewCaption {
             desktop_labels: Default::default(),
             desktop_groups: std::array::from_fn(|_| RefCell::new(BorderRenderElement::empty())),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
+            preview_hover: RefCell::new(BorderRenderElement::empty()),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
             group_shadows: std::array::from_fn(|_| {
@@ -230,6 +233,34 @@ impl OverviewCaption {
         push(group.clone().with_location(rect.loc).into());
     }
 
+    pub(super) fn render_preview_hover(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        rect: Rectangle<f64, Logical>,
+        color: Color,
+        scale: f64,
+    ) -> Option<FocusRingRenderElement> {
+        if !BorderRenderElement::has_shader(renderer) {
+            return None;
+        }
+        let geometry = Rectangle::from_size(rect.size);
+        let mut border = self.preview_hover.borrow_mut();
+        border.update(
+            rect.size,
+            geometry,
+            Default::default(),
+            color,
+            color,
+            0.,
+            geometry,
+            2.,
+            CornerRadius::from(9.),
+            scale as f32,
+            1.,
+        );
+        Some(border.clone().with_location(rect.loc).into())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_frame(
         &self,
@@ -317,7 +348,7 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     layout.set_ellipsize(
         if matches!(
             key.kind,
-            LabelKind::Button { .. } | LabelKind::WindowNavigation { .. }
+            LabelKind::StripButton | LabelKind::Button { .. } | LabelKind::WindowNavigation { .. }
         ) {
             EllipsizeMode::Middle
         } else {
@@ -337,7 +368,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let (width, height) = match key.kind {
         LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
-        LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
+        LabelKind::StripButton | LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
         LabelKind::Caption => (
@@ -423,7 +454,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         );
         if matches!(
             key.kind,
-            LabelKind::Button { .. } | LabelKind::WindowNavigation { .. }
+            LabelKind::StripButton | LabelKind::Button { .. } | LabelKind::WindowNavigation { .. }
         ) {
             cr.fill_preserve()?;
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.28);
@@ -486,7 +517,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
+            LabelKind::GroupHeading | LabelKind::StripButton => (width - f64::from(w)) / 2.,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };

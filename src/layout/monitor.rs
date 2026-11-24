@@ -16,7 +16,7 @@ use super::overview_caption::{
     caption_background, frame_radius, tint_caption, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
     SCROLL_CARD_HEIGHT,
 };
-use super::scrolling::{Column, ColumnWidth};
+use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
 use super::workspace::{
     compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
@@ -47,6 +47,7 @@ const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
 
 const OVERVIEW_INSET: f64 = 20.;
 const OVERVIEW_FRAME_MARGIN: f64 = 12.;
+const MAX_NAVIGATION_TITLES: usize = 5;
 
 const WORKSPACE_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
     stiffness: 0.5,
@@ -87,6 +88,7 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) insert_hint: Option<InsertHint>,
     /// Insert hint element for rendering.
     insert_hint_element: InsertHintElement,
+    strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     scroll_cue_labels: [PreviewLabel; 2],
     additional_scroll_cue_labels: [PreviewLabel; 2],
     scroll_edge_fades: [PreviewLabel; 2],
@@ -166,6 +168,13 @@ pub(super) struct InsertHint {
 struct InsertHintRenderLoc {
     workspace: InsertWorkspace,
     location: Point<f64, Logical>,
+}
+
+struct NavigationTitle<'a, W> {
+    rect: Rectangle<f64, Logical>,
+    window: &'a W,
+    active: bool,
+    direction: Option<bool>,
 }
 
 struct ScrollCue<'a, W> {
@@ -433,6 +442,7 @@ impl<W: LayoutElement> Monitor<W> {
             previous_workspace_id: None,
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
+            strip_labels: Default::default(),
             scroll_cue_labels: Default::default(),
             additional_scroll_cue_labels: Default::default(),
             scroll_edge_fades: Default::default(),
@@ -1960,7 +1970,77 @@ impl<W: LayoutElement> Monitor<W> {
         ]
     }
 
+    /// Normal tiled windows leave a footer for the strip, so the same controls
+    /// remain available in each position without painting over a client surface.
+    fn navigation_titles(&self) -> Option<Vec<NavigationTitle<'_, W>>> {
+        let ws = self.active_workspace_ref();
+        if self.workspace_switch.is_some()
+            || ws.floating_is_active()
+            || !navigation_strip_fits(self.working_area)
+        {
+            return None;
+        }
+        let bounds = self.scroll_clip(ws)?;
+        let scrolling = ws.scrolling();
+        let active = scrolling.active_column()?.id();
+        let columns = scrolling
+            .columns_with_render_positions()
+            .collect::<Vec<_>>();
+        let active_index = columns
+            .iter()
+            .position(|(column, _)| column.id() == active)?;
+        let gap = 8.;
+        let available = bounds.end - bounds.start - 24.;
+        let capacity = ((available + gap) / 184.).floor() as usize;
+        let count = columns
+            .len()
+            .min(capacity.max(1))
+            .min(MAX_NAVIGATION_TITLES);
+        let first = active_index
+            .saturating_sub(count / 2)
+            .min(columns.len() - count);
+        let width = ((available - gap * (count - 1) as f64) / count as f64)
+            .floor()
+            .min(236.);
+        let strip_width = count as f64 * (width + gap) - gap;
+        let x = (bounds.start + bounds.end - strip_width) / 2.;
+        let y = self.working_area.loc.y + self.working_area.size.h
+            - (NAVIGATION_STRIP_HEIGHT + SCROLL_BUTTON_HEIGHT) / 2.;
+        let visible = Self::exclude_narrow_peeks(bounds.clone(), self.scroll_cues_for(ws, &bounds));
+        let pixel = 1. / self.scale.fractional_scale();
+        Some(
+            columns[first..first + count]
+                .iter()
+                .enumerate()
+                .map(|(index, (column, position))| {
+                    let direction = if position.x + column.width() <= visible.start + pixel {
+                        Some(true)
+                    } else if position.x >= visible.end - pixel {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    NavigationTitle {
+                        rect: Rectangle::new(
+                            Point::from((x + index as f64 * (width + gap), y)),
+                            Size::from((width, SCROLL_BUTTON_HEIGHT)),
+                        ),
+                        window: column.active_window(),
+                        active: column.id() == active,
+                        direction,
+                    }
+                })
+                .collect(),
+        )
+    }
+
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
+        if let Some(titles) = self.navigation_titles() {
+            return titles
+                .into_iter()
+                .find(|title| title.rect.contains(position))
+                .map(|title| title.window);
+        }
         self.scroll_cues()
             .into_iter()
             .flatten()
@@ -1978,6 +2058,9 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
+            || self
+                .navigation_titles()
+                .is_some_and(|titles| titles.iter().any(|title| title.window.id() == id))
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
                     || cue.additional.is_some_and(|(_, window)| window.id() == id)
@@ -2035,6 +2118,46 @@ impl<W: LayoutElement> Monitor<W> {
         pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
+        if let Some(titles) = self.navigation_titles() {
+            let ws = self.active_workspace_ref();
+            let accent = ws.options.layout.border.active_color;
+            let surface = caption_background(accent, ws.options.layout.background_color, false);
+            let scale = self.scale.fractional_scale();
+            for (title, label) in titles.into_iter().zip(&self.strip_labels) {
+                let name = navigation_title(title.window, target, "Window");
+                let text = match title.direction {
+                    Some(true) => format!("←  {name}"),
+                    Some(false) => format!("{name}  →"),
+                    None => name,
+                };
+                let background = if title.active {
+                    accent
+                } else if pointer.is_some_and(|point| title.rect.contains(point)) {
+                    tint_caption(surface, accent)
+                } else {
+                    surface
+                };
+                if let Some(label) = label.render(
+                    renderer.as_gles_renderer(),
+                    text,
+                    background,
+                    LabelKind::StripButton,
+                    title.rect.size.w,
+                    scale,
+                    title.rect.loc,
+                    1.,
+                ) {
+                    let elem = MonitorInnerRenderElement::Caption(label);
+                    let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                    push(RelocateRenderElement::from_element(
+                        elem,
+                        Point::default(),
+                        Relocate::Relative,
+                    ));
+                }
+            }
+            return;
+        }
         let ws = self.active_workspace_ref();
         let accent = ws.options.layout.border.active_color;
         let surface = caption_background(accent, ws.options.layout.background_color, false);
@@ -2489,6 +2612,17 @@ impl<W: LayoutElement> Monitor<W> {
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
                 let hovered = hovered.is_some_and(|id| id == window.id());
+                if hovered
+                    && contains_y(rect.loc.y, rect.size.h)
+                    && let Some(outline) = ws.overview_caption.render_preview_hover(
+                        renderer,
+                        rect,
+                        accent * (label_alpha * 0.75),
+                        scale,
+                    )
+                {
+                    draw(MonitorInnerRenderElement::Decoration(outline));
+                }
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -2684,7 +2818,12 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn has_navigation_controls(&self) -> bool {
-        self.has_framed_overview() || self.options.layout.clip_scroll_to_work_area
+        self.has_framed_overview()
+            || self
+                .active_workspace_ref()
+                .options
+                .layout
+                .clip_scroll_to_work_area
     }
 
     pub fn has_framed_overview(&self) -> bool {
