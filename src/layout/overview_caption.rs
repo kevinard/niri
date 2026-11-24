@@ -35,7 +35,7 @@ pub(super) enum LabelKind {
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
     pub(super) desktop_labels: [PreviewLabel; 3],
-    desktop_outline: RefCell<BorderRenderElement>,
+    desktop_groups: [RefCell<BorderRenderElement>; 3],
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
@@ -46,7 +46,7 @@ impl Default for OverviewCaption {
         Self {
             title: PreviewLabel::default(),
             desktop_labels: Default::default(),
-            desktop_outline: RefCell::new(BorderRenderElement::empty()),
+            desktop_groups: std::array::from_fn(|_| RefCell::new(BorderRenderElement::empty())),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
@@ -157,11 +157,14 @@ impl OverviewCaption {
         )
     }
 
-    pub(super) fn render_desktop_outline(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_desktop_group(
         &self,
         renderer: &mut impl NiriRenderer,
+        index: usize,
         rect: Rectangle<f64, Logical>,
         backdrop: Color,
+        accent: Color,
         alpha: f32,
         scale: f64,
         push: &mut dyn FnMut(FocusRingRenderElement),
@@ -173,11 +176,19 @@ impl OverviewCaption {
         {
             return;
         }
-        let ink = if is_light(backdrop) { 0.16 } else { 0.91 };
-        let color = Color::new_unpremul(ink, ink, ink, alpha * 0.72);
+        let surface = caption_background(accent, backdrop, false);
+        let tint = if index == 1 { 0.18 } else { 0. };
+        let mix = |base, highlight| base * (1. - tint) + highlight * tint;
+        let opacity = if is_light(backdrop) { 0.74 } else { 0.82 };
+        let color = Color::new_unpremul(
+            mix(surface.r, accent.r),
+            mix(surface.g, accent.g),
+            mix(surface.b, accent.b),
+            alpha * opacity,
+        );
         let geometry = Rectangle::from_size(rect.size);
-        let mut outline = self.desktop_outline.borrow_mut();
-        outline.update(
+        let mut group = self.desktop_groups[index].borrow_mut();
+        group.update(
             rect.size,
             geometry,
             Default::default(),
@@ -185,12 +196,12 @@ impl OverviewCaption {
             color,
             0.,
             geometry,
-            (1.5 / scale) as f32,
+            0.,
             frame_radius(rect, 1.),
             scale as f32,
             1.,
         );
-        push(outline.clone().with_location(rect.loc).into());
+        push(group.clone().with_location(rect.loc).into());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -338,17 +349,27 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::WindowNavigation { .. } => 14.,
         _ => height / 2.,
     };
+    let left_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: true }) {
+        0.
+    } else {
+        radius
+    };
+    let right_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: false }) {
+        0.
+    } else {
+        radius
+    };
     cr.arc(
-        radius,
-        radius,
-        radius,
+        left_radius,
+        left_radius,
+        left_radius,
         std::f64::consts::PI,
         1.5 * std::f64::consts::PI,
     );
     cr.arc(
-        width - radius,
-        radius,
-        radius,
+        width - right_radius,
+        right_radius,
+        right_radius,
         -std::f64::consts::FRAC_PI_2,
         0.,
     );
@@ -357,16 +378,16 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         cr.line_to(0., height);
     } else {
         cr.arc(
-            width - radius,
-            height - radius,
-            radius,
+            width - right_radius,
+            height - right_radius,
+            right_radius,
             0.,
             std::f64::consts::FRAC_PI_2,
         );
         cr.arc(
-            radius,
-            height - radius,
-            radius,
+            left_radius,
+            height - left_radius,
+            left_radius,
             std::f64::consts::FRAC_PI_2,
             std::f64::consts::PI,
         );
