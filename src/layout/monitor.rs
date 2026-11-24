@@ -199,6 +199,7 @@ struct NavigationTitle<'a, W> {
     companions: Vec<&'a W>,
     active: bool,
     direction: Option<bool>,
+    fully_visible: bool,
     floating: bool,
 }
 
@@ -373,6 +374,19 @@ fn window_title_suffix(title: &str) -> &str {
         .map(|(_, suffix)| suffix.trim())
         .filter(|suffix| !suffix.is_empty())
         .unwrap_or(title)
+}
+
+fn compact_window_title(title: &str, distinct_app: bool) -> &str {
+    let name = if distinct_app {
+        window_title_suffix(title)
+    } else {
+        title
+            .rsplit_once(" — ")
+            .map(|(context, _)| context.trim())
+            .filter(|context| !context.is_empty())
+            .unwrap_or(title)
+    };
+    name.strip_prefix("Canopa ").unwrap_or(name)
 }
 
 fn visible_extent<'a, W: LayoutElement + 'a>(
@@ -2150,7 +2164,15 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     None
                 };
-                (column.active_window(), direction, false, column.width())
+                let fully_visible = position.x >= visible.start - pixel
+                    && position.x + column.width() <= visible.end + pixel;
+                (
+                    column.active_window(),
+                    direction,
+                    fully_visible,
+                    false,
+                    column.width(),
+                )
             })
             .collect::<Vec<_>>();
         let mut floating = ws
@@ -2161,7 +2183,7 @@ impl<W: LayoutElement> Monitor<W> {
         windows.extend(
             floating
                 .iter()
-                .map(|(tile, _)| (tile.window(), None, true, tile.tile_size().w)),
+                .map(|(tile, _)| (tile.window(), None, false, true, tile.tile_size().w)),
         );
 
         let active_index = windows
@@ -2195,10 +2217,13 @@ impl<W: LayoutElement> Monitor<W> {
         let button_space = (available - action_space - gaps).min(194. * count as f64);
         let widest_window = windows
             .iter()
-            .map(|(_, _, _, width)| *width)
+            .map(|(_, _, _, _, width)| *width)
             .fold(1., f64::max);
         let weight = |width: f64| width.max(widest_window * 0.55);
-        let total_weight: f64 = windows.iter().map(|(_, _, _, width)| weight(*width)).sum();
+        let total_weight: f64 = windows
+            .iter()
+            .map(|(_, _, _, _, width)| weight(*width))
+            .sum();
         let tabs_width = button_space + gaps;
         let tray_width = tabs_width + action_space;
         let start = (bounds.start + bounds.end - tray_width) / 2.;
@@ -2237,24 +2262,27 @@ impl<W: LayoutElement> Monitor<W> {
         let mut next_x = start;
         let titles: Vec<_> = windows
             .iter()
-            .filter_map(|&(window, direction, floating, window_width)| {
-                let width = button_space * weight(window_width) / total_weight;
-                let x = next_x;
-                next_x += width + gap;
-                let rect = button(x, width)?;
-                Some(NavigationTitle {
-                    rect,
-                    window,
-                    companions: if decorate && direction.is_some() {
-                        companions(window)
-                    } else {
-                        Vec::new()
-                    },
-                    active: window.id() == active.id(),
-                    direction,
-                    floating,
-                })
-            })
+            .filter_map(
+                |&(window, direction, fully_visible, floating, window_width)| {
+                    let width = button_space * weight(window_width) / total_weight;
+                    let x = next_x;
+                    next_x += width + gap;
+                    let rect = button(x, width)?;
+                    Some(NavigationTitle {
+                        rect,
+                        window,
+                        companions: if decorate && direction.is_some() {
+                            companions(window)
+                        } else {
+                            Vec::new()
+                        },
+                        active: window.id() == active.id(),
+                        direction,
+                        fully_visible,
+                        floating,
+                    })
+                },
+            )
             .collect();
         let layer_action = layer_destination.and_then(|window| {
             button(start + tabs_width + action_gap, action_width).map(|rect| (rect, window))
@@ -2286,7 +2314,7 @@ impl<W: LayoutElement> Monitor<W> {
             spans
         };
         let viewports = if decorate {
-            groups(&|title| !title.floating && title.direction.is_none())
+            groups(&|title| title.fully_visible)
                 .into_iter()
                 .filter_map(column_band)
                 .collect()
@@ -2498,9 +2526,30 @@ impl<W: LayoutElement> Monitor<W> {
                 .iter()
                 .map(|title| navigation_title(title.window, target, "Window"))
                 .collect();
-            for (index, (title, label)) in
-                strip.titles.into_iter().zip(&self.strip_labels).enumerate()
-            {
+            let aliases: Vec<_> = titles
+                .iter()
+                .enumerate()
+                .map(|(index, title)| {
+                    let suffix = window_title_suffix(title);
+                    let distinct = titles.iter().enumerate().all(|(other, title)| {
+                        other == index || window_title_suffix(title) != suffix
+                    });
+                    compact_window_title(title, distinct)
+                })
+                .collect();
+            let display_title = |index: usize| {
+                let alias = aliases[index];
+                let distinct = aliases
+                    .iter()
+                    .enumerate()
+                    .all(|(other, name)| other == index || *name != alias);
+                if distinct {
+                    alias
+                } else {
+                    titles[index].as_str()
+                }
+            };
+            for (index, (title, label)) in strip.titles.iter().zip(&self.strip_labels).enumerate() {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
                 let status = if title.floating {
@@ -2516,13 +2565,7 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     None
                 };
-                let name = &titles[index];
-                let suffix = window_title_suffix(name);
-                let distinct = titles
-                    .iter()
-                    .enumerate()
-                    .all(|(other, name)| other == index || window_title_suffix(name) != suffix);
-                let name = if distinct { suffix } else { name };
+                let name = display_title(index);
                 let focus = if title.active {
                     FocusMarker::Current
                 } else if hovered {
@@ -2555,17 +2598,24 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 };
                 let text = if offscreen {
-                    let action = match title.companions.as_slice() {
-                        [] => "Show window".to_owned(),
+                    let reveal = match title.companions.as_slice() {
+                        [] => "Moves into view".to_owned(),
                         [neighbor] => {
-                            let neighbor = navigation_title(*neighbor, target, "window");
-                            let neighbor = window_title_suffix(&neighbor);
-                            let neighbor = neighbor.strip_prefix("Canopa ").unwrap_or(neighbor);
-                            format!("Show with {neighbor}")
+                            let name = strip
+                                .titles
+                                .iter()
+                                .position(|title| title.window.id() == neighbor.id())
+                                .map(display_title);
+                            if let Some(name) = name {
+                                format!("Also shows {name}")
+                            } else {
+                                let name = navigation_title(*neighbor, target, "window");
+                                format!("Also shows {name}")
+                            }
                         }
-                        companions => format!("Show with {} more", companions.len()),
+                        companions => format!("Also shows {} more", companions.len()),
                     };
-                    format!("{name}\n{action}")
+                    format!("Focus {name}\n{reveal}")
                 } else {
                     name.to_owned()
                 };
@@ -3121,13 +3171,20 @@ impl<W: LayoutElement> Monitor<W> {
                     .active_window()
                     .is_some_and(|active| active.id() == window.id())
                 {
-                    "Return to window"
+                    "Return to window".to_owned()
                 } else {
-                    "Switch to window"
+                    let title = navigation_title(window, target, "window");
+                    let suffix = window_title_suffix(&title);
+                    let distinct = ws
+                        .windows()
+                        .filter(|other| other.id() != window.id())
+                        .map(|other| navigation_title(other, target, "window"))
+                        .all(|other| window_title_suffix(&other) != suffix);
+                    format!("Switch to {}", compact_window_title(&title, distinct))
                 };
                 if let Some(command) = self.overview_command_label.render(
                     renderer.as_gles_renderer(),
-                    action.into(),
+                    action,
                     background,
                     LabelKind::OverviewCommand,
                     rect.size.w,
