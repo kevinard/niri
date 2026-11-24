@@ -208,7 +208,6 @@ struct NavigationTitle<'a, W> {
     active: bool,
     direction: Option<bool>,
     destination_x: Option<f64>,
-    has_direction_label: bool,
     fully_visible: bool,
     floating: bool,
 }
@@ -2172,9 +2171,10 @@ impl<W: LayoutElement> Monitor<W> {
                 .then_some(area.loc.x..area.loc.x + area.size.w)
         })?;
         let active = ws.active_window()?;
+        let pixel = 1. / self.scale.fractional_scale();
         let moving_left = scrolling
             .remaining_view_movement()
-            .filter(|movement| *movement != 0.)
+            .filter(|movement| movement.abs() > 2. * pixel)
             .map(|movement| movement < 0.);
         let moving = moving_left.is_some();
         let positions: HashMap<_, _> = scrolling
@@ -2183,7 +2183,6 @@ impl<W: LayoutElement> Monitor<W> {
             .collect();
         let cues = self.scroll_cues_for(ws, &bounds);
         let visible = Self::exclude_narrow_peeks(bounds.clone(), &cues);
-        let pixel = 1. / self.scale.fractional_scale();
         let mut windows = scrolling
             .columns()
             .map(|column| {
@@ -2192,9 +2191,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let clipped_left = (visible.start - x).max(0.);
                 let clipped_right = (x + column.width() - visible.end).max(0.);
                 let fully_visible = clipped_left.max(clipped_right) <= pixel;
-                // Keep window names in place during the slide. Its live range
-                // takes over from the directional commands until it settles.
-                let direction = (!moving && !fully_visible && window.id() != active.id())
+                let direction = (!fully_visible && window.id() != active.id())
                     .then_some(clipped_left >= clipped_right);
                 (window, direction, fully_visible, false, column.width(), x)
             })
@@ -2303,8 +2300,9 @@ impl<W: LayoutElement> Monitor<W> {
                     next_x += width + gap;
                     let mut rect = button(x, width)?;
                     let compact = !floating
-                        && direction.is_none()
-                        && (!floating_visible || layer_destination.is_some() || moving);
+                        && (moving
+                            || direction.is_none()
+                                && (!floating_visible || layer_destination.is_some()));
                     if compact {
                         rect.size.h = STRIP_GROUP_BUTTON_HEIGHT;
                     }
@@ -2319,6 +2317,7 @@ impl<W: LayoutElement> Monitor<W> {
                         }
                     }
                     let (destination_x, companions) = direction
+                        .filter(|_| !moving)
                         .and_then(|_| destination(window))
                         .map_or((None, Vec::new()), |(x, companions)| (Some(x), companions));
                     Some(NavigationTitle {
@@ -2328,7 +2327,6 @@ impl<W: LayoutElement> Monitor<W> {
                         active: window.id() == active.id(),
                         direction,
                         destination_x,
-                        has_direction_label: false,
                         fully_visible,
                         floating,
                     })
@@ -2373,7 +2371,6 @@ impl<W: LayoutElement> Monitor<W> {
             if let Some(rect) = column_band(span) {
                 destinations.push((rect, left, (end - first).max(1 + title.companions.len())));
                 for title in &mut titles[first..end] {
-                    title.has_direction_label = true;
                     title.rect.size.h = STRIP_GROUP_BUTTON_HEIGHT;
                 }
             }
@@ -2700,7 +2697,7 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     surface
                 };
-                let fallback = title.direction.filter(|_| !title.has_direction_label);
+                let fallback = title.direction.filter(|_| !compact);
                 let kind = if let Some(left) = fallback {
                     LabelKind::ScrollWindow { left, hovered }
                 } else {
