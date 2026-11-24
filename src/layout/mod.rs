@@ -1872,6 +1872,10 @@ impl<W: LayoutElement> Layout<W> {
         Some(&mut monitors[*active_monitor_idx])
     }
 
+    pub fn take_overview_pointer_selection(&mut self) -> Option<&W> {
+        self.active_monitor()?.take_overview_pointer_selection()
+    }
+
     pub fn active_monitor_ref(&self) -> Option<&Monitor<W>> {
         let MonitorSet::Normal {
             monitors,

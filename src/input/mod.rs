@@ -204,8 +204,14 @@ impl State {
                 self.on_device_removed(device);
             }
             Keyboard { event } => self.on_keyboard::<I>(event, &mut consumed_by_a11y),
-            PointerMotion { event } => self.on_pointer_motion::<I>(event),
-            PointerMotionAbsolute { event } => self.on_pointer_motion_absolute::<I>(event),
+            PointerMotion { event } => {
+                self.on_pointer_motion::<I>(event);
+                self.update_overview_pointer_selection();
+            }
+            PointerMotionAbsolute { event } => {
+                self.on_pointer_motion_absolute::<I>(event);
+                self.update_overview_pointer_selection();
+            }
             PointerButton { event } => self.on_pointer_button::<I>(event),
             PointerAxis { event } => self.on_pointer_axis::<I>(event),
             TabletToolAxis { event } => self.on_tablet_tool_axis::<I>(event),
@@ -812,9 +818,18 @@ impl State {
                         if let Some(bind) =
                             modified.and_then(|key| hardcoded_overview_bind(key, modifiers, framed))
                         {
-                            if framed && modified == Some(Keysym::Return) {
-                                if let Some(workspace) = this.niri.layout.active_workspace_mut() {
-                                    workspace.reveal_window_from_navigation();
+                            if framed && modified != Some(Keysym::Escape) {
+                                let layout = &mut this.niri.layout;
+                                let window = layout
+                                    .take_overview_pointer_selection()
+                                    .map(|mapped| mapped.window.clone());
+                                if let Some(window) = window {
+                                    layout.activate_window(&window);
+                                }
+                                if modified == Some(Keysym::Return) {
+                                    if let Some(workspace) = layout.active_workspace_mut() {
+                                        workspace.reveal_window_from_navigation();
+                                    }
                                 }
                             }
                             this.niri.suppressed_keys.insert(key_code);
@@ -3257,6 +3272,26 @@ impl State {
         );
 
         find_configured_bind(bindings, mod_key, trigger, mods)
+    }
+
+    fn update_overview_pointer_selection(&mut self) {
+        let under = &self.niri.pointer_contents;
+        if !under.overview || self.niri.seat.get_pointer().unwrap().is_grabbed() {
+            return;
+        }
+
+        let (Some(output), Some((window, _))) = (&under.output, &under.window) else {
+            return;
+        };
+        if self
+            .niri
+            .layout
+            .monitor_for_output_mut(output)
+            .is_some_and(|mon| mon.select_overview_preview(window))
+        {
+            let output = output.clone();
+            self.niri.queue_redraw(&output);
+        }
     }
 
     fn activate_window_navigation(&mut self, location: Point<f64, Logical>) -> bool {
