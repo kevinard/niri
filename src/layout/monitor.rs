@@ -1918,6 +1918,22 @@ impl<W: LayoutElement> Monitor<W> {
 
             let desktop_view = active.then(|| self.scroll_viewport(ws, geo)).flatten();
             if let Some((strip, visible)) = &desktop_view {
+                let caption_end = x + if ws.name().is_some() { width } else { 125. };
+                let label_x = (visible.start + 10.).max(caption_end);
+                if top >= 0. && visible.end - label_x >= 148. {
+                    if let Some(caption) = ws.overview_caption.desktop_view.render(
+                        renderer.as_gles_renderer(),
+                        "Visible on desktop".into(),
+                        caption_background(accent, backdrop, false),
+                        false,
+                        172.,
+                        scale,
+                        Point::from((label_x, top)),
+                        alpha,
+                    ) {
+                        draw(MonitorInnerRenderElement::Caption(caption));
+                    }
+                }
                 ws.overview_caption.render_outside_view(
                     strip.clone(),
                     visible,
@@ -1962,21 +1978,6 @@ impl<W: LayoutElement> Monitor<W> {
                 }
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
-                let status = desktop_view.as_ref().and_then(|(_, view)| {
-                    if ws.is_floating(window.id()) {
-                        return None;
-                    }
-                    let end = location.x + size.w;
-                    Some(if end <= view.start + 1. {
-                        "Beyond left edge"
-                    } else if location.x >= view.end - 1. {
-                        "Beyond right edge"
-                    } else if location.x < view.start - 1. || end > view.end + 1. {
-                        "Partly on desktop"
-                    } else {
-                        "On desktop"
-                    })
-                });
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -1989,7 +1990,6 @@ impl<W: LayoutElement> Monitor<W> {
                     if let Some(label) = tile.overview_label.render(
                         renderer.as_gles_renderer(),
                         title,
-                        status,
                         caption_background(accent, backdrop, selected),
                         true,
                         label.size.w,
@@ -2205,9 +2205,26 @@ impl<W: LayoutElement> Monitor<W> {
             .clamp(0., 1.);
         let scale = self.scale.fractional_scale();
         for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
-            let Some(rect) = self.overview_frame_geometry(ws, index, geo) else {
+            let Some(mut rect) = self.overview_frame_geometry(ws, index, geo) else {
                 continue;
             };
+            if index == self.active_workspace_idx {
+                if let Some((_, desktop)) = self.scroll_viewport(ws, geo) {
+                    // The tray is behind the windows, so it connects the visible part of
+                    // the strip without drawing across the previews.
+                    let inset = 8. * progress;
+                    let right = rect.loc.x + rect.size.w;
+                    let start = (desktop.start - inset).max(rect.loc.x);
+                    let end = (desktop.end + inset).min(right);
+                    let reveal = ((progress - 0.35) / 0.65).clamp(0., 1.);
+                    let start = rect.loc.x + (start - rect.loc.x) * reveal;
+                    let end = right + (end - right) * reveal;
+                    rect.loc.x = start;
+                    rect.size.w = end - start;
+                    rect.loc.y -= inset;
+                    rect.size.h += 2. * inset;
+                }
+            }
             ws.overview_caption.render_frame(
                 renderer,
                 rect,

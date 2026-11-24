@@ -465,6 +465,6 @@ Centers the overview in the usable area and keeps scrolling window previews
 clear of reserved side panels. Each visible workspace has a full-size caption
 with its number and configured name. The overview centers the full strip when
 it fits at the configured zoom. Visible thumbnails keep readable titles and the
-focus accent. When the desktop shows only part of the strip, each wide preview
-identifies its visibility on the desktop and the offscreen region is shaded.
+focus accent. When the strip extends beyond the desktop, a tray sits behind
+the visible part and the previews outside it remain available to select.
 Wider strips retain the usual gestures and shortcuts.
