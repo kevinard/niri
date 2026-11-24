@@ -2614,16 +2614,15 @@ impl<W: LayoutElement> Monitor<W> {
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
                 let hovered = hovered.is_some_and(|id| id == window.id());
-                if hovered
-                    && contains_y(rect.loc.y, rect.size.h)
-                    && let Some(outline) = ws.overview_caption.render_preview_hover(
+                if hovered && contains_y(rect.loc.y, rect.size.h) {
+                    if let Some(outline) = ws.overview_caption.render_preview_hover(
                         renderer,
                         rect,
                         accent * (label_alpha * 0.75),
                         scale,
-                    )
-                {
-                    draw(MonitorInnerRenderElement::Decoration(outline));
+                    ) {
+                        draw(MonitorInnerRenderElement::Decoration(outline));
+                    }
                 }
                 window.with_overview_title(|title| {
                     let title: String = title
