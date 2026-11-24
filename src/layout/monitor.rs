@@ -1794,7 +1794,7 @@ impl<W: LayoutElement> Monitor<W> {
         let accent = ws.options.layout.border.active_color;
         let surface = caption_background(accent, ws.options.layout.background_color, false);
         let mix = |base, highlight| base * 0.76 + highlight * 0.24;
-        let color = Color::new_unpremul(
+        let color = niri_config::Color::new_unpremul(
             mix(surface.r, accent.r),
             mix(surface.g, accent.g),
             mix(surface.b, accent.b),
