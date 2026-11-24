@@ -661,6 +661,17 @@ impl LayoutElement for Mapped {
         &self.window
     }
 
+    fn with_overview_title<T>(&self, display: impl FnOnce(&str) -> T) -> T {
+        with_toplevel_role(self.toplevel(), |role| {
+            display(
+                role.title
+                    .as_deref()
+                    .or(role.app_id.as_deref())
+                    .unwrap_or_default(),
+            )
+        })
+    }
+
     fn update_config(&mut self, blur_config: niri_config::Blur) {
         self.blur_config = blur_config;
     }

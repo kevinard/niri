@@ -39,6 +39,7 @@ use crate::utils::{
 /// Toplevel window with decorations.
 #[derive(Debug)]
 pub struct Tile<W: LayoutElement> {
+    pub(super) overview_label: super::overview_caption::PreviewLabel,
     /// The toplevel window itself.
     window: W,
 
@@ -201,6 +202,7 @@ impl<W: LayoutElement> Tile<W> {
         let fullscreen_backdrop_color = options.layout.fullscreen_backdrop_color;
 
         let mut tile = Self {
+            overview_label: Default::default(),
             window,
             titlebar: Titlebar::default(),
             last_titlebar_height: 0.,
