@@ -12,14 +12,14 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
-use super::overview_caption::{caption_background, ViewportDecoration};
+use super::overview_caption::{ViewportDecoration, caption_background};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
 use super::workspace::{
-    compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
-    WorkspaceRenderElement,
+    OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
+    compute_working_area,
 };
-use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
+use super::{ActivateWindow, HitType, LayoutElement, Options, compute_overview_zoom};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
@@ -33,7 +33,7 @@ use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::rubber_band::RubberBand;
 use crate::utils::transaction::Transaction;
 use crate::utils::{
-    output_size, round_logical_in_physical, round_logical_in_physical_max1, ResizeEdge,
+    ResizeEdge, output_size, round_logical_in_physical, round_logical_in_physical_max1,
 };
 
 /// Amount of touchpad movement to scroll the height of one workspace.
@@ -1860,7 +1860,8 @@ impl<W: LayoutElement> Monitor<W> {
                             renderer.as_gles_renderer(),
                             strip,
                             visible,
-                            geo.loc.y + 2.,
+                            geo.loc.y - 4.,
+                            geo.loc.y + geo.size.h + 4.,
                             accent,
                             backdrop,
                             scale,
