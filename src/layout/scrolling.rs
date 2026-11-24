@@ -320,7 +320,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         clock: Clock,
         options: Rc<Options>,
     ) -> Self {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let working_area = compute_scrolling_area(parent_area, scale, &options);
 
         Self {
             columns: Vec::new(),
@@ -347,7 +347,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         scale: f64,
         options: Rc<Options>,
     ) {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let working_area = compute_scrolling_area(parent_area, scale, &options);
 
         for (column, data) in zip(&mut self.columns, &mut self.data) {
             column.update_config(view_size, working_area, parent_area, scale, options.clone());
@@ -3820,7 +3820,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         assert_eq!(self.columns.len(), self.data.len());
         assert_eq!(
             self.working_area,
-            compute_working_area(self.parent_area, self.scale, self.options.layout.struts)
+            compute_scrolling_area(self.parent_area, self.scale, &self.options)
         );
 
         if !self.columns.is_empty() {
@@ -5653,6 +5653,24 @@ fn compute_new_view_offset(
     } else {
         -(view_width - padding - new_col_width)
     }
+}
+
+pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 46.;
+
+pub(super) fn navigation_strip_fits(area: Rectangle<f64, Logical>) -> bool {
+    area.size.w >= 420. && area.size.h >= 400.
+}
+
+fn compute_scrolling_area(
+    parent_area: Rectangle<f64, Logical>,
+    scale: f64,
+    options: &Options,
+) -> Rectangle<f64, Logical> {
+    let mut struts = options.layout.struts;
+    if options.layout.clip_scroll_to_work_area && navigation_strip_fits(parent_area) {
+        struts.bottom.0 = struts.bottom.0.max(NAVIGATION_STRIP_HEIGHT);
+    }
+    compute_working_area(parent_area, scale, struts)
 }
 
 fn compute_working_area(
