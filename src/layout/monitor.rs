@@ -1749,27 +1749,38 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     fn scrolling_visible_span(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
-        let mut bounds = self.scroll_clip(ws)?;
+        let bounds = self.scroll_clip(ws)?;
         if ws.id() == self.active_workspace_ref().id() {
-            let [left, right] = self.scroll_cues();
-            if let Some(edge) = left.and_then(|cue| cue.clipped_column_edge) {
-                bounds.start = bounds.start.max(edge);
-            }
-            if let Some(edge) = right.and_then(|cue| cue.clipped_column_edge) {
-                bounds.end = bounds.end.min(edge);
-            }
+            return Some(Self::exclude_narrow_peeks(bounds, self.scroll_cues()));
         }
         Some(bounds)
     }
 
+    fn exclude_narrow_peeks(mut bounds: Range<f64>, [left, right]: [Option<ScrollCue<'_, W>>; 2]) -> Range<f64> {
+        if let Some(edge) = left.and_then(|cue| cue.clipped_column_edge) {
+            bounds.start = bounds.start.max(edge);
+        }
+        if let Some(edge) = right.and_then(|cue| cue.clipped_column_edge) {
+            bounds.end = bounds.end.min(edge);
+        }
+        bounds
+    }
+
     fn scroll_cues(&self) -> [Option<ScrollCue<'_, W>>; 2] {
         let ws = self.active_workspace_ref();
-        if self.workspace_switch.is_some() || ws.floating_is_active() {
+        if self.workspace_switch.is_some() {
             return [None, None];
         }
         let Some(bounds) = self.scroll_clip(ws) else {
             return [None, None];
         };
+        self.scroll_cues_for(ws, &bounds)
+    }
+
+    fn scroll_cues_for<'a>(&self, ws: &'a Workspace<W>, bounds: &Range<f64>) -> [Option<ScrollCue<'a, W>>; 2] {
+        if ws.floating_is_active() {
+            return [None, None];
+        }
         let width = ((bounds.end - bounds.start) / 4.).floor().min(230.);
         let height = SCROLL_BUTTON_HEIGHT;
         if width < 32. || self.working_area.size.h < height {
@@ -2162,7 +2173,13 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> Option<(Range<f64>, Range<f64>)> {
         let extent = visible_extent(ws.scrolling().tiles_with_render_positions())?;
         let view = ws.working_area();
-        let visible = extent.start.max(view.loc.x)..extent.end.min(view.loc.x + view.size.w);
+        let bounds = view.loc.x..view.loc.x + view.size.w;
+        let bounds = if ws.options.layout.clip_scroll_to_work_area {
+            Self::exclude_narrow_peeks(bounds.clone(), self.scroll_cues_for(ws, &bounds))
+        } else {
+            bounds
+        };
+        let visible = extent.start.max(bounds.start)..extent.end.min(bounds.end);
         let pixel = 1. / self.scale.fractional_scale();
         if visible.is_empty()
             || (visible.start - extent.start <= pixel && extent.end - visible.end <= pixel)
