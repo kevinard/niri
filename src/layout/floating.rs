@@ -322,10 +322,13 @@ impl<W: LayoutElement> FloatingSpace<W> {
         })
     }
 
-    pub(super) fn tiles_with_preview_positions<'a>(
-        &'a self,
-        positions: &'a OverviewPositions<W::Id>,
-    ) -> impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>)> + 'a {
+    pub(super) fn tiles_with_preview_positions<'tile, 'positions>(
+        &'tile self,
+        positions: &'positions OverviewPositions<W::Id>,
+    ) -> impl Iterator<Item = (&'tile Tile<W>, Point<f64, Logical>)> + 'positions
+    where
+        'tile: 'positions,
+    {
         self.tiles_with_render_positions()
             .map(move |(tile, current)| {
                 let position = positions
