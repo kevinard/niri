@@ -2160,19 +2160,33 @@ impl<W: LayoutElement> Monitor<W> {
                 .then_some(area.loc.x..area.loc.x + area.size.w)
         })?;
         let active = ws.active_window()?;
-        let positions: HashMap<_, _> = scrolling
-            .columns_with_render_positions()
-            .map(|(column, position)| (column.id(), position))
-            .collect();
-        let cues = self.scroll_cues_for(ws, &bounds);
-        let visible = Self::exclude_narrow_peeks(bounds.clone(), &cues);
+        // Focus and activation target the settled viewport. Keep the labels
+        // consistent with it while the current view is still moving.
+        let target_positions = scrolling
+            .distance_to_stationary_view()
+            .filter(|distance| *distance > 0.)
+            .and_then(|_| scrolling.active_window())
+            .and_then(|tiled| scrolling.columns_after_activating(tiled.id()));
+        let (positions, visible): (HashMap<_, _>, _) = if let Some(target) = target_positions {
+            (
+                target.map(|(column, x)| (column.id(), x)).collect(),
+                bounds.clone(),
+            )
+        } else {
+            let positions = scrolling
+                .columns_with_render_positions()
+                .map(|(column, position)| (column.id(), position.x))
+                .collect();
+            let cues = self.scroll_cues_for(ws, &bounds);
+            (positions, Self::exclude_narrow_peeks(bounds.clone(), &cues))
+        };
         let pixel = 1. / self.scale.fractional_scale();
         let mut windows = scrolling
             .columns()
             .map(|column| {
-                let position = positions[&column.id()];
-                let clipped_left = (visible.start - position.x).max(0.);
-                let clipped_right = (position.x + column.width() - visible.end).max(0.);
+                let x = positions[&column.id()];
+                let clipped_left = (visible.start - x).max(0.);
+                let clipped_right = (x + column.width() - visible.end).max(0.);
                 let fully_visible = clipped_left.max(clipped_right) <= pixel;
                 let direction = (!fully_visible && column.active_window().id() != active.id())
                     .then_some(clipped_left >= clipped_right);
@@ -2258,7 +2272,7 @@ impl<W: LayoutElement> Monitor<W> {
             };
             columns
                 .filter_map(|(column, x)| {
-                    let current = positions[&column.id()].x;
+                    let current = positions[&column.id()];
                     let width = column.width();
                     let neighbor = column.active_window();
                     let in_view = x >= bounds.start - pixel && x + width <= bounds.end + pixel;
