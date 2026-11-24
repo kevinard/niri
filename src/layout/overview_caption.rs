@@ -36,6 +36,20 @@ pub(super) enum GroupStyle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FocusMarker {
+    None,
+    Current,
+    Destination,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProjectionOutline {
+    Hidden,
+    Resting,
+    Highlighted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
     Caption,
     NavigationHint,
@@ -44,14 +58,13 @@ pub(super) enum LabelKind {
     StripTray,
     StripViewport,
     StripProjected {
-        heading_offset: u32,
-        hovered: bool,
+        outline: ProjectionOutline,
     },
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
         direction: Option<bool>,
-        focused: bool,
+        focus: FocusMarker,
         show_arrow: bool,
     },
     LayerAction {
@@ -549,8 +562,16 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport | LabelKind::StripProjected { hovered: true, .. } => 0.65,
-                LabelKind::StripProjected { hovered: false, .. } => 0.35,
+                LabelKind::StripViewport
+                | LabelKind::StripProjected {
+                    outline: ProjectionOutline::Highlighted,
+                } => 0.65,
+                LabelKind::StripProjected {
+                    outline: ProjectionOutline::Resting,
+                } => 0.35,
+                LabelKind::StripProjected {
+                    outline: ProjectionOutline::Hidden,
+                } => 0.,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
@@ -621,10 +642,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if viewport {
             label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
         }
-        if let LabelKind::StripProjected { heading_offset, .. } = key.kind {
-            title_x += f64::from(heading_offset);
-            title_width -= f64::from(heading_offset);
-        }
         if key.kind == LabelKind::OverviewCommand {
             let keycap = layout(&cr, key);
             keycap.set_text("Enter");
@@ -661,15 +678,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 "sans-serif Medium 13px",
             )));
         }
-        let (status, direction, focused, show_arrow) = match key.kind {
+        let (status, direction, focus, show_arrow) = match key.kind {
             LabelKind::StripButton {
                 status,
                 direction,
-                focused,
+                focus,
                 show_arrow,
                 ..
-            } => (status, direction, focused, show_arrow),
-            _ => (None, None, false, false),
+            } => (status, direction, focus, show_arrow),
+            _ => (None, None, FocusMarker::None, false),
         };
         let offscreen = direction.is_some();
         if let Some(left) = direction.filter(|_| show_arrow) {
@@ -694,7 +711,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 title_x += 27.;
             }
         }
-        if focused {
+        if focus != FocusMarker::None {
             label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 13px")));
             title_width -= 14.;
             title_x += 14.;
@@ -786,7 +803,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         } else {
             (height - f64::from(h)) / 2.
         };
-        if focused {
+        if focus != FocusMarker::None {
             cr.arc(
                 x - 9.,
                 y + f64::from(h) / 2.,
@@ -794,7 +811,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 0.,
                 std::f64::consts::TAU,
             );
-            cr.fill()?;
+            if focus == FocusMarker::Current {
+                cr.fill()?;
+            } else {
+                cr.set_line_width(1.5);
+                cr.stroke()?;
+            }
         }
         cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);

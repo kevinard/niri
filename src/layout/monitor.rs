@@ -14,9 +14,10 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
-    caption_background, frame_radius, tint_caption, GroupStyle, LabelKind, PreviewLabel,
-    OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
-    STRIP_TRAY_HEADER_HEIGHT, STRIP_TRAY_PADDING, STRIP_VIEWPORT_BAND_HEIGHT,
+    caption_background, frame_radius, tint_caption, FocusMarker, GroupStyle, LabelKind,
+    PreviewLabel, ProjectionOutline, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT,
+    SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT, STRIP_TRAY_HEADER_HEIGHT, STRIP_TRAY_PADDING,
+    STRIP_VIEWPORT_BAND_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -198,8 +199,7 @@ struct NavigationStrip<'a, W> {
 struct NavigationProjection {
     rect: Rectangle<f64, Logical>,
     caption: String,
-    heading_offset: u32,
-    hovered: bool,
+    outline: ProjectionOutline,
 }
 
 struct NavigationTitle<'a, W> {
@@ -2306,9 +2306,6 @@ impl<W: LayoutElement> Monitor<W> {
         });
         let mut destinations: Vec<(Range<f64>, bool, &[&W::Id])> = Vec::new();
         for (title, left, ids) in &forecasts {
-            if hover.is_some_and(|(_, side, target)| side == left && target == ids) {
-                continue;
-            }
             let start = title.rect.loc.x;
             let end = start + title.rect.size.w;
             if let Some((span, _, _)) = destinations.last_mut().filter(|(span, side, target)| {
@@ -2328,9 +2325,10 @@ impl<W: LayoutElement> Monitor<W> {
         let mut projections: Vec<_> = destinations
             .into_iter()
             .filter_map(|(span, left, ids)| {
+                let hovered = hover.is_some_and(|(target, _, _)| span.contains(&target.rect.loc.x));
                 let rect = projection_rect(span)?;
                 let count = ids.len();
-                let unit = if count == 1 { "tile" } else { "tiles" };
+                let unit = if count == 1 { "column" } else { "columns" };
                 let caption = if left {
                     format!("←  View {count} {unit}")
                 } else {
@@ -2339,32 +2337,24 @@ impl<W: LayoutElement> Monitor<W> {
                 Some(NavigationProjection {
                     rect,
                     caption,
-                    heading_offset: 0,
-                    hovered: false,
+                    outline: if hovered {
+                        ProjectionOutline::Hidden
+                    } else {
+                        ProjectionOutline::Resting
+                    },
                 })
             })
             .collect();
-        if let Some((target, _, ids)) = hover {
-            let target_x = target.rect.loc.x;
+        if let Some((_, _, ids)) = hover {
             projections.extend(
                 groups(&|title| ids.contains(&title.window.id()))
                     .into_iter()
                     .filter_map(|span| {
-                        let rect = projection_rect(span.clone())?;
-                        let caption_here = span.contains(&target_x);
+                        let rect = projection_rect(span)?;
                         Some(NavigationProjection {
                             rect,
-                            caption: if caption_here {
-                                "After switch".into()
-                            } else {
-                                String::new()
-                            },
-                            heading_offset: if caption_here {
-                                (target_x - rect.loc.x).round() as u32
-                            } else {
-                                0
-                            },
-                            hovered: true,
+                            caption: String::new(),
+                            outline: ProjectionOutline::Highlighted,
                         })
                     }),
             );
@@ -2606,10 +2596,15 @@ impl<W: LayoutElement> Monitor<W> {
                     .enumerate()
                     .all(|(other, name)| other == index || window_title_suffix(name) != suffix);
                 let name = if distinct { suffix } else { name };
-                let background = if title.active {
-                    tint_caption(surface, accent)
+                let focus = if title.active {
+                    FocusMarker::Current
                 } else if hovered {
-                    tint_caption(tint_caption(surface, accent), accent)
+                    FocusMarker::Destination
+                } else {
+                    FocusMarker::None
+                };
+                let background = if title.active || hovered {
+                    tint_caption(surface, accent)
                 } else if offscreen {
                     Color { a: 0.65, ..surface }
                 } else if visible_tile && strip.tray.is_some() {
@@ -2626,8 +2621,8 @@ impl<W: LayoutElement> Monitor<W> {
                         outlined: !title.active
                             && (!visible_tile || hovered || strip.tray.is_none()),
                         direction: title.direction,
-                        focused: title.active,
-                        show_arrow: hovered || !grouped,
+                        focus,
+                        show_arrow: !grouped,
                     },
                     title.rect.size.w,
                     scale,
@@ -2673,8 +2668,7 @@ impl<W: LayoutElement> Monitor<W> {
                     projection.caption,
                     Color { a: 0., ..surface },
                     LabelKind::StripProjected {
-                        heading_offset: projection.heading_offset,
-                        hovered: projection.hovered,
+                        outline: projection.outline,
                     },
                     projection.rect.size.w,
                     scale,
