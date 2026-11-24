@@ -3282,6 +3282,9 @@ impl State {
 
         self.niri.layer_shell_on_demand_focus = None;
         self.focus_window(&window);
+        if let Some(workspace) = self.niri.layout.active_workspace_mut() {
+            workspace.reveal_window_from_navigation();
+        }
         self.niri.queue_redraw_all();
         true
     }

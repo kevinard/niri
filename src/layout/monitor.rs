@@ -1621,7 +1621,7 @@ impl<W: LayoutElement> Monitor<W> {
                         return None;
                     }
 
-                    let extent = visible_extent(ws.tiles_with_render_positions())?;
+                    let extent = visible_extent(ws.tiles_with_overview_positions())?;
                     fit_overview_strip(extent, &viewport, zoom, final_zoom)
                 })
                 .collect()
@@ -1732,7 +1732,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
             let zoom = self.overview_zoom();
             let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
-            let (win, hit) = ws.window_under(pos_within_workspace)?;
+            let (win, hit) = ws.window_under_in_overview(pos_within_workspace)?;
             // During the overview animation, we cannot do input hits because we cannot really
             // represent scaled windows properly.
             Some((win, hit.to_activate()))
@@ -2053,10 +2053,11 @@ impl<W: LayoutElement> Monitor<W> {
                         Point::from((x + index as f64 * (width + gap), y)),
                         Size::from((width, SCROLL_BUTTON_HEIGHT)),
                     );
-                    let covered = floating.iter().any(|(tile, position)| {
-                        rect.intersection(Rectangle::new(*position, tile.tile_size()))
-                            .is_some()
-                    });
+                    let covered = ws.is_floating_visible()
+                        && floating.iter().any(|(tile, position)| {
+                            rect.intersection(Rectangle::new(*position, tile.tile_size()))
+                                .is_some()
+                        });
                     (!covered).then_some(NavigationTitle {
                         rect,
                         window,
@@ -2158,12 +2159,6 @@ impl<W: LayoutElement> Monitor<W> {
             let surface = caption_background(accent, ws.options.layout.background_color, false);
             let scale = self.scale.fractional_scale();
             for (title, label) in titles.into_iter().zip(&self.strip_labels) {
-                let name = navigation_title(title.window, target, "Window");
-                let text = match title.direction {
-                    Some(true) => format!("←  {name}"),
-                    Some(false) => format!("{name}  →"),
-                    None => name,
-                };
                 let background = if title.active {
                     accent
                 } else if pointer.is_some_and(|point| title.rect.contains(point)) {
@@ -2173,9 +2168,11 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
-                    text,
+                    navigation_title(title.window, target, "Window"),
                     background,
-                    LabelKind::StripButton,
+                    LabelKind::StripButton {
+                        direction: title.direction,
+                    },
                     title.rect.size.w,
                     scale,
                     title.rect.loc,
@@ -2634,7 +2631,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
             let mut in_front: Vec<Rectangle<f64, Logical>> = Vec::new();
             let focused = active.then(|| ws.active_window()).flatten();
-            for (tile, pos, visible) in ws.tiles_with_render_positions() {
+            for (tile, pos, visible) in ws.tiles_with_overview_positions() {
                 if !visible {
                     continue;
                 }
@@ -2841,6 +2838,7 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::MovingBetweenWorkspaces,
+                            self.overview_progress.is_some(),
                             push!(),
                         );
                     }
@@ -2850,6 +2848,7 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::Normal,
+                            self.overview_progress.is_some(),
                             push!(),
                         );
 

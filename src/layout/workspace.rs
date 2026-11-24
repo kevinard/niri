@@ -193,6 +193,8 @@ enum FloatingActive {
     /// This is necessary for focus-follows-mouse that activates but doesn't raise the window to
     /// avoid being annoying.
     NoButRaised,
+    /// A window navigation control selected an unobstructed tiling view.
+    NoWithFloatingHidden,
     /// The floating space is active.
     Yes,
 }
@@ -1703,12 +1705,23 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn tiles_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
+        self.tile_render_positions(false)
+    }
+
+    pub(super) fn tiles_with_overview_positions(
+        &self,
+    ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
+        self.tile_render_positions(true)
+    }
+
+    fn tile_render_positions(
+        &self,
+        overview: bool,
+    ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
         let scrolling = self.scrolling.tiles_with_render_positions();
-
         let floating = self.floating.tiles_with_render_positions();
-        let visible = self.is_floating_visible();
+        let visible = self.floating_visible_in(overview);
         let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
-
         floating.chain(scrolling)
     }
 
@@ -1773,9 +1786,10 @@ impl<W: LayoutElement> Workspace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        overview: bool,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        if !self.is_floating_visible() && layer.is_normal() {
+        if !self.floating_visible_in(overview) && layer.is_normal() {
             return;
         }
 
@@ -1813,11 +1827,26 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn is_floating_visible(&self) -> bool {
+        self.floating_visible_in(false)
+    }
+
+    fn floating_visible_in(&self, overview: bool) -> bool {
+        if self.floating_is_active == FloatingActive::NoWithFloatingHidden {
+            return overview;
+        }
         // If the focus is on a fullscreen scrolling window, hide the floating windows.
         matches!(
             self.floating_is_active,
             FloatingActive::Yes | FloatingActive::NoButRaised
         ) || self.fullscreen_window_above_top_layer().is_none()
+    }
+
+    /// Reveal the selected tiled window while keeping floating windows in the
+    /// workspace, ready to select again from its navigation strip or overview.
+    pub fn reveal_window_from_navigation(&mut self) {
+        if !self.floating.is_empty() && !self.floating_is_active.get() {
+            self.floating_is_active = FloatingActive::NoWithFloatingHidden;
+        }
     }
 
     pub fn store_unmap_snapshot_if_empty(
@@ -1887,8 +1916,19 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        // This logic is consistent with tiles_with_render_positions().
-        if self.is_floating_visible() {
+        self.window_under_at(pos, false)
+    }
+
+    pub(super) fn window_under_in_overview(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(&W, HitType)> {
+        self.window_under_at(pos, true)
+    }
+
+    fn window_under_at(&self, pos: Point<f64, Logical>, overview: bool) -> Option<(&W, HitType)> {
+        // This ordering matches tile_render_positions().
+        if self.floating_visible_in(overview) {
             if let Some(rv) = self
                 .floating
                 .tiles_with_render_positions()
@@ -1897,7 +1937,6 @@ impl<W: LayoutElement> Workspace<W> {
                 return Some(rv);
             }
         }
-
         self.scrolling.window_under(pos)
     }
 
@@ -1967,7 +2006,9 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating_is_active = FloatingActive::Yes;
             true
         } else if self.scrolling.activate_window(window) {
-            self.floating_is_active = FloatingActive::No;
+            if self.floating_is_active != FloatingActive::NoWithFloatingHidden {
+                self.floating_is_active = FloatingActive::No;
+            }
             true
         } else {
             false
@@ -1982,6 +2023,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating_is_active = match self.floating_is_active {
                 FloatingActive::No => FloatingActive::No,
                 FloatingActive::NoButRaised => FloatingActive::NoButRaised,
+                FloatingActive::NoWithFloatingHidden => FloatingActive::NoWithFloatingHidden,
                 FloatingActive::Yes => FloatingActive::NoButRaised,
             };
             true
