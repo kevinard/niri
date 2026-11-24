@@ -19,7 +19,6 @@ use super::overview_caption::{
     caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
     LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
     STRIP_BUTTON_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
-    STRIP_VIEWPORT_BAND_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -96,10 +95,9 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_element: InsertHintElement,
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_group_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    strip_viewport_marks: [RefCell<SolidColorBuffer>; MAX_NAVIGATION_TITLES],
+    strip_status_label: PreviewLabel,
     strip_edge_labels: [PreviewLabel; 2],
-    strip_viewport_motion: RefCell<SolidColorBuffer>,
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
@@ -195,8 +193,6 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
-    destinations: Vec<(Rectangle<f64, Logical>, bool, usize)>,
-    moving_viewport: Option<Rectangle<f64, Logical>>,
     motion_status: Option<(Rectangle<f64, Logical>, bool)>,
     edge_actions: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
@@ -209,7 +205,6 @@ struct NavigationTitle<'a, W> {
     companions: Vec<&'a W>,
     active: bool,
     direction: Option<bool>,
-    destination_x: Option<f64>,
     fully_visible: bool,
     floating: bool,
 }
@@ -502,10 +497,9 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
-            strip_viewport_labels: Default::default(),
-            strip_group_labels: Default::default(),
+            strip_viewport_marks: Default::default(),
+            strip_status_label: PreviewLabel::default(),
             strip_edge_labels: Default::default(),
-            strip_viewport_motion: RefCell::default(),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
@@ -2274,26 +2268,22 @@ impl<W: LayoutElement> Monitor<W> {
                 Size::from((width, STRIP_BUTTON_HEIGHT)),
             ))
         };
-        let destination = |window: &W| {
-            let mut columns = scrolling.columns_after_activating(window.id())?.peekable();
-            let x = columns.peek()?.1;
-            let companions = if decorate {
-                columns
-                    .filter_map(|(column, x)| {
-                        let width = column.width();
-                        let neighbor = column.active_window();
-                        let current = positions[&column.id()];
-                        let in_view = x >= bounds.start - pixel && x + width <= bounds.end + pixel;
-                        let already_visible = current >= visible.start - pixel
-                            && current + width <= visible.end + pixel;
-                        (in_view && !already_visible && neighbor.id() != window.id())
-                            .then_some(neighbor)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            Some((x, companions))
+        let companions = |window: &W| {
+            scrolling
+                .columns_after_activating(window.id())
+                .into_iter()
+                .flatten()
+                .filter_map(|(column, x)| {
+                    let width = column.width();
+                    let neighbor = column.active_window();
+                    let current = positions[&column.id()];
+                    let in_view = x >= bounds.start - pixel && x + width <= bounds.end + pixel;
+                    let already_visible =
+                        current >= visible.start - pixel && current + width <= visible.end + pixel;
+                    (in_view && !already_visible && neighbor.id() != window.id())
+                        .then_some(neighbor)
+                })
+                .collect()
         };
         let mut next_x = start;
         let mut motion_extent = f64::INFINITY..f64::NEG_INFINITY;
@@ -2305,10 +2295,8 @@ impl<W: LayoutElement> Monitor<W> {
                     let x = next_x;
                     next_x += width + gap;
                     let mut rect = button(x, width)?;
-                    let compact = !floating
-                        && (moving
-                            || direction.is_none()
-                                && (!floating_visible || layer_destination.is_some()));
+                    let compact =
+                        !floating && (!floating_visible || layer_destination.is_some() || moving);
                     if compact {
                         rect.size.h = STRIP_GROUP_BUTTON_HEIGHT;
                     }
@@ -2322,17 +2310,16 @@ impl<W: LayoutElement> Monitor<W> {
                                 motion_extent.end.max(x + width * right / window_width);
                         }
                     }
-                    let (destination_x, companions) = direction
-                        .filter(|_| !moving)
-                        .and_then(|_| destination(window))
-                        .map_or((None, Vec::new()), |(x, companions)| (Some(x), companions));
                     Some(NavigationTitle {
                         rect,
                         window,
-                        companions,
+                        companions: if decorate && !moving && direction.is_some() {
+                            companions(window)
+                        } else {
+                            Vec::new()
+                        },
                         active: window.id() == active.id(),
                         direction,
-                        destination_x,
                         fully_visible,
                         floating,
                     })
@@ -2342,51 +2329,17 @@ impl<W: LayoutElement> Monitor<W> {
         let layer_action = layer_destination.and_then(|window| {
             button(start + tabs_width + action_gap, action_width).map(|rect| (rect, window))
         });
-        let column_band = |span: Range<f64>| {
+        let viewport_mark = |span: Range<f64>| {
             uncovered(Rectangle::new(
-                Point::from((span.start - 2., y - 2.)),
-                Size::from((span.end - span.start + 4., STRIP_VIEWPORT_BAND_HEIGHT)),
+                Point::from((span.start, y + STRIP_BUTTON_HEIGHT)),
+                Size::from((span.end - span.start, 3.)),
             ))
         };
-        // Adjacent choices can focus different windows at the same scroll
-        // offset. Share their direction while keeping separate focus targets.
-        let mut destinations = Vec::new();
-        let mut first = 0;
-        while first < titles.len() {
-            let title = &titles[first];
-            let Some((left, destination_x)) = title.direction.zip(title.destination_x) else {
-                first += 1;
-                continue;
-            };
-            let mut end = first + 1;
-            while end < titles.len() {
-                let next = &titles[end];
-                let previous = titles[end - 1].rect;
-                if next.direction != Some(left)
-                    || !next
-                        .destination_x
-                        .is_some_and(|x| (x - destination_x).abs() < pixel)
-                    || next.rect.loc.x > previous.loc.x + previous.size.w + gap + pixel
-                {
-                    break;
-                }
-                end += 1;
-            }
-            let last = titles[end - 1].rect;
-            let span = title.rect.loc.x..last.loc.x + last.size.w;
-            if let Some(rect) = column_band(span) {
-                destinations.push((rect, left, (end - first).max(1 + title.companions.len())));
-                for title in &mut titles[first..end] {
-                    title.rect.size.h = STRIP_GROUP_BUTTON_HEIGHT;
-                }
-            }
-            first = end;
-        }
         let tray = uncovered(Rectangle::new(
             Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
             Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
         ));
-        let edge_actions = if !moving && floating.is_empty() {
+        let edge_actions = if floating.is_empty() {
             [true, false].map(|left| {
                 let tray = tray?;
                 let mut targets = titles.iter().filter(|title| title.direction == Some(left));
@@ -2405,9 +2358,25 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             [None, None]
         };
-        let groups = |matches: &dyn Fn(&NavigationTitle<'_, W>) -> bool| {
+        for title in &mut titles {
+            if title
+                .direction
+                .is_some_and(|left| edge_actions[usize::from(!left)].is_none())
+            {
+                title.rect.size.h = STRIP_BUTTON_HEIGHT;
+            }
+        }
+        let viewports = if !decorate {
+            Vec::new()
+        } else if moving {
+            (!motion_extent.is_empty())
+                .then(|| viewport_mark(motion_extent))
+                .flatten()
+                .into_iter()
+                .collect()
+        } else {
             let mut spans: Vec<Range<f64>> = Vec::new();
-            for title in titles.iter().filter(|title| matches(title)) {
+            for title in titles.iter().filter(|title| title.fully_visible) {
                 let start = title.rect.loc.x;
                 let end = start + title.rect.size.w;
                 if let Some(span) = spans
@@ -2419,35 +2388,23 @@ impl<W: LayoutElement> Monitor<W> {
                     spans.push(start..end);
                 }
             }
-            spans
+            spans.into_iter().filter_map(viewport_mark).collect()
         };
-        let viewports = if decorate && !moving {
-            groups(&|title| title.fully_visible)
-                .into_iter()
-                .filter_map(column_band)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let moving_viewport = (!motion_extent.is_empty())
-            .then(|| {
-                Rectangle::new(
-                    Point::from((motion_extent.start, y + STRIP_BUTTON_HEIGHT)),
-                    Size::from((motion_extent.end - motion_extent.start, 3.)),
-                )
-            })
-            .and_then(uncovered);
         let motion_status = moving_left.and_then(|left| {
             let first = titles.iter().find(|title| !title.floating)?.rect;
             let last = titles.iter().rfind(|title| !title.floating)?.rect;
-            let bounds = column_band(first.loc.x..last.loc.x + last.size.w)?;
+            let bounds = uncovered(Rectangle::new(
+                Point::from((first.loc.x, y + STRIP_GROUP_BUTTON_HEIGHT)),
+                Size::from((
+                    last.loc.x + last.size.w - first.loc.x,
+                    STRIP_BUTTON_HEIGHT - STRIP_GROUP_BUTTON_HEIGHT,
+                )),
+            ))?;
             Some((bounds, left))
         });
         Some(NavigationStrip {
             tray,
             viewports,
-            destinations,
-            moving_viewport,
             motion_status,
             edge_actions,
             titles,
@@ -2654,8 +2611,8 @@ impl<W: LayoutElement> Monitor<W> {
                     .find(|(rect, _)| rect.contains(point))
                     .map(|(_, window)| window.id())
             });
-            if let Some(rect) = strip.moving_viewport {
-                let mut buffer = self.strip_viewport_motion.borrow_mut();
+            for (rect, buffer) in strip.viewports.iter().zip(&self.strip_viewport_marks) {
+                let mut buffer = buffer.borrow_mut();
                 buffer.update(rect.size, accent);
                 let element =
                     SolidColorRenderElement::from_buffer(&buffer, rect.loc, 1., Kind::Unspecified);
@@ -2703,6 +2660,7 @@ impl<W: LayoutElement> Monitor<W> {
                     titles[index].as_str()
                 }
             };
+            let mut hover_status = None;
             for (index, (title, label)) in strip.titles.iter().zip(&self.strip_labels).enumerate() {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point))
                     || edge_target == Some(title.window.id());
@@ -2752,29 +2710,33 @@ impl<W: LayoutElement> Monitor<W> {
                         compact,
                     }
                 };
-                let text = if fallback.is_some() {
-                    let reveal = match title.companions.as_slice() {
-                        [] => "Moves into view".to_owned(),
+                let companion_hint = if hovered || fallback.is_some() {
+                    match title.companions.as_slice() {
+                        [] => None,
                         [neighbor] => {
                             let name = strip
                                 .titles
                                 .iter()
                                 .position(|title| title.window.id() == neighbor.id())
-                                .map(display_title);
-                            if let Some(name) = name {
-                                format!("Also shows {name}")
-                            } else {
-                                let name = navigation_title(*neighbor, target, "window");
-                                format!("Also shows {name}")
-                            }
+                                .map(|index| display_title(index).to_owned())
+                                .unwrap_or_else(|| navigation_title(*neighbor, target, "window"));
+                            Some(format!("Also reveals {name}"))
                         }
-                        companions => format!("Also shows {} more", companions.len()),
-                    };
+                        companions => Some(format!("Also reveals {} more tiles", companions.len())),
+                    }
+                } else {
+                    None
+                };
+                let text = if fallback.is_some() {
+                    let reveal = companion_hint.as_deref().unwrap_or("Moves into view");
                     format!("Reveal {name}\n{reveal}")
                 } else if offscreen {
+                    if let Some(hint) = companion_hint {
+                        let mut rect = title.rect;
+                        rect.loc.y += STRIP_GROUP_BUTTON_HEIGHT;
+                        hover_status = Some((rect, hint));
+                    }
                     format!("Reveal {name}")
-                } else if !title.active && !title.floating {
-                    format!("Focus {name}")
                 } else {
                     name.to_owned()
                 };
@@ -2845,65 +2807,26 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            let directions = strip.destinations.into_iter().map(|(rect, left, count)| {
-                let tiles = if count == 1 { "tile" } else { "tiles" };
-                let text = format!("{count} {tiles}");
-                let text = if strip.edge_actions[usize::from(!left)].is_some() {
-                    text
-                } else if left {
-                    format!("← {text}")
-                } else {
-                    format!("{text} →")
-                };
-                (rect, Some(text), Some(surface))
-            });
-            let visible = strip.viewports.into_iter().map(|rect| {
-                let text = (!floating_visible || has_layer_action).then(|| "In view".into());
-                (rect, text, Some(tint_caption(surface, accent)))
-            });
-            let motion = strip.motion_status.into_iter().map(|(rect, left)| {
+            let motion = strip.motion_status.map(|(rect, left)| {
                 let text = if left {
                     "← Scrolling"
                 } else {
                     "Scrolling →"
                 };
-                (rect, Some(text.into()), None)
+                (rect, text.into())
             });
-            for ((rect, text, background), (label, backing)) in
-                directions.chain(visible).chain(motion).zip(
-                    self.strip_group_labels
-                        .iter()
-                        .zip(&self.strip_viewport_labels),
-                )
-            {
-                if let Some(text) = text {
-                    let label_y = rect.loc.y + 2. + STRIP_GROUP_BUTTON_HEIGHT;
-                    if let Some(caption) = label.render(
-                        renderer.as_gles_renderer(),
-                        text,
-                        surface,
-                        LabelKind::SharedScroll,
-                        rect.size.w,
-                        scale,
-                        Point::from((rect.loc.x, label_y)),
-                        1.,
-                    ) {
-                        draw(caption);
-                    }
-                }
-                if let Some(background) = background {
-                    if let Some(frame) = backing.render(
-                        renderer.as_gles_renderer(),
-                        String::new(),
-                        background,
-                        LabelKind::StripViewport,
-                        rect.size.w,
-                        scale,
-                        rect.loc,
-                        1.,
-                    ) {
-                        draw(frame);
-                    }
+            if let Some((rect, text)) = motion.or(hover_status) {
+                if let Some(caption) = self.strip_status_label.render(
+                    renderer.as_gles_renderer(),
+                    text,
+                    surface,
+                    LabelKind::SharedScroll,
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(caption);
                 }
             }
             // Put the shared surface behind the window targets.

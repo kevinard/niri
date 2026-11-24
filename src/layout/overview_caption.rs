@@ -21,10 +21,9 @@ const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
-pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 24.;
+pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 28.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 48.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
-pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_TRAY_HEIGHT - 4.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
@@ -50,7 +49,6 @@ pub(super) enum LabelKind {
     GroupTitle,
     OverviewCommand,
     StripTray,
-    StripViewport,
     SharedScroll,
     ScrollWindow {
         left: bool,
@@ -405,10 +403,10 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let font = if matches!(
-        key.kind,
-        LabelKind::StripButton { .. } | LabelKind::SharedScroll
-    ) || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
+    let font = if key.kind == LabelKind::SharedScroll {
+        "sans-serif Medium 11px"
+    } else if matches!(key.kind, LabelKind::StripButton { .. })
+        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
     {
         "sans-serif Medium 13px"
     } else {
@@ -447,7 +445,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
-        LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
         LabelKind::SharedScroll => (max_width, STRIP_BUTTON_HEIGHT - STRIP_GROUP_BUTTON_HEIGHT),
         LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
         LabelKind::StripButton { .. }
@@ -490,7 +487,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint { .. } => 9.,
-        LabelKind::StripViewport => 10.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton { .. } | LabelKind::ScrollWindow { .. } => 9.,
         _ => height / 2.,
@@ -543,7 +539,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripTray
-                | LabelKind::StripViewport
                 | LabelKind::ScrollWindow { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint { .. }
@@ -555,7 +550,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport => 0.49,
                 LabelKind::ScrollWindow { hovered: true, .. }
                 | LabelKind::StripButton { hovered: true, .. } => 1.,
                 LabelKind::ScrollWindow { .. } => 0.54,
@@ -565,7 +559,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.set_line_width(match key.kind {
                 LabelKind::ScrollWindow { hovered: true, .. }
                 | LabelKind::StripButton { hovered: true, .. } => 2.,
-                LabelKind::StripViewport | LabelKind::ScrollWindow { .. } => 1.5,
+                LabelKind::ScrollWindow { .. } => 1.5,
                 _ => 1.,
             });
             cr.stroke()?;
@@ -574,7 +568,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
     }
 
-    if matches!(key.kind, LabelKind::StripTray | LabelKind::StripViewport) {
+    if key.kind == LabelKind::StripTray {
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
@@ -622,24 +616,37 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             x += hint_width + 12.;
         }
     } else if let LabelKind::ScrollWindow { left, .. } = key.kind {
-        let arrow_x = if left { 14. } else { width - 14. };
+        let standalone = key.text.is_empty();
+        let arrow_x = if standalone {
+            width / 2.
+        } else if left {
+            14.
+        } else {
+            width - 14.
+        };
         let arrow_y = height / 2.;
         let sign = if left { -1. } else { 1. };
-        cr.arc(arrow_x, arrow_y, 9., 0., std::f64::consts::TAU);
-        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.94);
-        cr.fill()?;
-        cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
-        cr.set_line_width(1.6);
+        if standalone {
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            cr.set_line_width(2.);
+        } else {
+            cr.arc(arrow_x, arrow_y, 9., 0., std::f64::consts::TAU);
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.94);
+            cr.fill()?;
+            cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
+            cr.set_line_width(1.6);
+        }
         cr.set_line_cap(cairo::LineCap::Round);
         cr.set_line_join(cairo::LineJoin::Round);
-        cr.move_to(arrow_x - 4. * sign, arrow_y);
-        cr.line_to(arrow_x + 4. * sign, arrow_y);
-        cr.move_to(arrow_x, arrow_y - 3.5);
-        cr.line_to(arrow_x + 4. * sign, arrow_y);
-        cr.line_to(arrow_x, arrow_y + 3.5);
+        let span = if standalone { 7. } else { 4. };
+        cr.move_to(arrow_x - span * sign, arrow_y);
+        cr.line_to(arrow_x + span * sign, arrow_y);
+        cr.move_to(arrow_x, arrow_y - span * 0.875);
+        cr.line_to(arrow_x + span * sign, arrow_y);
+        cr.line_to(arrow_x, arrow_y + span * 0.875);
         cr.stroke()?;
 
-        if key.text.is_empty() {
+        if standalone {
             drop(cr);
             return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
         }
