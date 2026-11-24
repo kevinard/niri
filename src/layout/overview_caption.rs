@@ -20,6 +20,7 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
+pub(super) const STRIP_BUTTON_HEIGHT: f64 = 36.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub(super) enum LabelKind {
     GroupHeading,
     StripButton {
         direction: Option<bool>,
-        hidden: bool,
+        status: Option<&'static str>,
     },
     Preview {
         show_action: bool,
@@ -374,9 +375,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let (width, height) = match key.kind {
         LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
-        LabelKind::StripButton { .. } | LabelKind::Button { .. } => {
-            (max_width, SCROLL_BUTTON_HEIGHT)
-        }
+        LabelKind::StripButton { .. } => (max_width, STRIP_BUTTON_HEIGHT),
+        LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
         LabelKind::Caption => (
@@ -540,15 +540,23 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 title_x += slot;
             }
         }
-        if matches!(key.kind, LabelKind::StripButton { hidden: true, .. }) {
-            let status = layout(&cr, key);
-            status.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
-            status.set_text("Hidden");
-            let (w, h) = status.pixel_size();
-            title_width -= f64::from(w) + PADDING;
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.78);
-            cr.move_to(width - PADDING - f64::from(w), (height - f64::from(h)) / 2.);
-            pangocairo::functions::show_layout(&cr, &status);
+        let status = match key.kind {
+            LabelKind::StripButton { status, .. } => status,
+            _ => None,
+        };
+        if let Some(status) = status {
+            let detail = layout(&cr, key);
+            detail.set_font_description(Some(&FontDescription::from_string(
+                "sans-serif Medium 11px",
+            )));
+            detail.set_text(status);
+            let (w, h) = detail.pixel_size();
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.86);
+            cr.move_to(
+                title_x + (title_width - f64::from(w)) / 2.,
+                height - f64::from(h) - 3.,
+            );
+            pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
         if matches!(key.kind, LabelKind::Preview { show_action: true }) {
@@ -591,7 +599,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        cr.move_to(x, (height - f64::from(h)) / 2.);
+        let y = if status.is_some() {
+            3.
+        } else {
+            (height - f64::from(h)) / 2.
+        };
+        cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
     }
     drop(cr);
