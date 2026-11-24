@@ -59,6 +59,7 @@ pub(super) enum LabelKind {
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
+        hovered: bool,
         focus: FocusMarker,
         compact: bool,
     },
@@ -555,13 +556,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
                 LabelKind::StripViewport => 0.49,
-                LabelKind::ScrollWindow { hovered: true, .. } => 1.,
+                LabelKind::ScrollWindow { hovered: true, .. }
+                | LabelKind::StripButton { hovered: true, .. } => 1.,
                 LabelKind::ScrollWindow { .. } => 0.54,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
             cr.set_line_width(match key.kind {
-                LabelKind::ScrollWindow { hovered: true, .. } => 2.,
+                LabelKind::ScrollWindow { hovered: true, .. }
+                | LabelKind::StripButton { hovered: true, .. } => 2.,
                 LabelKind::StripViewport | LabelKind::ScrollWindow { .. } => 1.5,
                 _ => 1.,
             });

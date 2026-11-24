@@ -2666,6 +2666,7 @@ impl<W: LayoutElement> Monitor<W> {
             };
             for (index, (title, label)) in strip.titles.iter().zip(&self.strip_labels).enumerate() {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let offscreen = title.direction.is_some();
                 let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
                 let status = if title.floating {
                     Some(if !floating_visible {
@@ -2690,7 +2691,9 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let background = if title.active {
                     accent
-                } else if hovered {
+                } else if offscreen && hovered {
+                    tint_caption(direction_background, accent)
+                } else if offscreen || hovered {
                     direction_background
                 } else if !title.floating {
                     tint_caption(surface, accent)
@@ -2704,6 +2707,7 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::StripButton {
                         status,
                         outlined: !title.active,
+                        hovered,
                         focus,
                         compact,
                     }
@@ -2726,7 +2730,9 @@ impl<W: LayoutElement> Monitor<W> {
                         }
                         companions => format!("Also shows {} more", companions.len()),
                     };
-                    format!("Focus {name}\n{reveal}")
+                    format!("Reveal {name}\n{reveal}")
+                } else if offscreen {
+                    format!("Reveal {name}")
                 } else if !title.active && !title.floating {
                     format!("Focus {name}")
                 } else {
@@ -2773,7 +2779,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
             let directions = strip.destinations.into_iter().map(|(rect, left, count)| {
                 let tiles = if count == 1 { "tile" } else { "tiles" };
-                let text = format!("Reveals {count} {tiles}");
+                let text = format!("{count} {tiles}");
                 let text = if left {
                     format!("← {text}")
                 } else {
