@@ -46,9 +46,7 @@ pub(super) enum LabelKind {
         show: bool,
     },
     Preview {
-        hovered: bool,
         hidden: bool,
-        selected: bool,
     },
     Button {
         align_right: bool,
@@ -163,14 +161,6 @@ pub(super) fn caption_background(accent: Color, backdrop: Color, active: bool) -
         Color::new_unpremul(0.92, 0.95, 0.93, 1.)
     } else {
         Color::new_unpremul(0.08, 0.14, 0.15, 1.)
-    }
-}
-
-pub(super) fn preview_hover_ink(backdrop: Color) -> Color {
-    if is_light(backdrop) {
-        Color::new_unpremul(0.17, 0.24, 0.29, 1.)
-    } else {
-        Color::new_unpremul(0.84, 0.92, 0.97, 1.)
     }
 }
 
@@ -615,27 +605,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
-        let preview_note = match key.kind {
-            LabelKind::Preview { selected: true, .. } => Some(("Enter", false)),
-            LabelKind::Preview { hovered: true, .. } => Some((
-                if width >= 190. {
-                    "Show window"
-                } else if width >= 135. {
-                    "Show"
-                } else {
-                    "↗"
-                },
-                true,
-            )),
-            LabelKind::Preview { hidden: true, .. } => Some(("Hidden", false)),
-            _ => None,
-        };
-        if let Some((text, hovered)) = preview_note {
+        if matches!(key.kind, LabelKind::Preview { hidden: true }) {
             let action = layout(&cr, key);
             action.set_font_description(Some(&FontDescription::from_string(
                 "sans-serif Medium 12px",
             )));
-            action.set_text(text);
+            action.set_text("Hidden");
             let (w, h) = action.pixel_size();
             let control_width = (f64::from(w) + 14.).max(22.);
             let right = width - 4.;
@@ -656,14 +631,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 1.5 * std::f64::consts::PI,
             );
             cr.close_path();
-            if hovered {
-                cr.fill()?;
-                cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
-            } else {
-                cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.17);
-                cr.fill()?;
-                cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-            }
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.17);
+            cr.fill()?;
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
             cr.move_to(
                 left + (control_width - f64::from(w)) / 2.,
                 (height - f64::from(h)) / 2.,

@@ -14,9 +14,8 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
-    caption_background, frame_radius, preview_hover_ink, tint_caption, GroupStyle, LabelKind,
-    PreviewLabel, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
-    STRIP_TRAY_PADDING,
+    caption_background, frame_radius, tint_caption, GroupStyle, LabelKind, PreviewLabel,
+    SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT, STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -105,6 +104,7 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) overview_open: bool,
     /// Progress of the overview zoom animation, 1 is fully in overview.
     overview_progress: Option<OverviewProgress>,
+    overview_pointer_selection: Option<W::Id>,
     /// Clock for driving animations.
     pub(super) clock: Clock,
     /// Configurable properties of the layout as received from the parent layout.
@@ -474,6 +474,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_render_loc: None,
             overview_open: false,
             overview_progress: None,
+            overview_pointer_selection: None,
             workspace_switch: None,
             clock,
             base_options,
@@ -1509,6 +1510,9 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
+        if !self.overview_open {
+            self.overview_pointer_selection = None;
+        }
         let prev_render_idx = self.workspace_render_idx();
         self.overview_progress = progress.map(OverviewProgress::from);
         let new_render_idx = self.workspace_render_idx();
@@ -2197,6 +2201,37 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
+    pub fn select_overview_preview(&mut self, id: &W::Id) -> bool {
+        if !self.overview_open
+            || !self.has_framed_overview()
+            || self.overview_progress_value().is_none_or(|p| p < 0.82)
+            || self.overview_pointer_selection.as_ref() == Some(id)
+            || !self
+                .active_workspace_ref()
+                .windows()
+                .any(|window| window.id() == id)
+        {
+            return false;
+        }
+        self.overview_pointer_selection = Some(id.clone());
+        true
+    }
+
+    pub(super) fn take_overview_pointer_selection(&mut self) -> Option<&W> {
+        let id = self.overview_pointer_selection.take()?;
+        self.active_workspace_ref()
+            .windows()
+            .find(|window| window.id() == &id)
+    }
+
+    fn overview_selected_window(&self) -> Option<&W> {
+        let ws = self.active_workspace_ref();
+        self.overview_pointer_selection
+            .as_ref()
+            .and_then(|id| ws.windows().find(|window| window.id() == id))
+            .or_else(|| ws.active_window())
+    }
+
     fn overview_command(&self) -> Option<(Rectangle<f64, Logical>, &W)> {
         if !self.overview_open || !self.has_framed_overview() {
             return None;
@@ -2207,7 +2242,7 @@ impl<W: LayoutElement> Monitor<W> {
             return None;
         }
 
-        let window = self.active_workspace_ref().active_window()?;
+        let window = self.overview_selected_window()?;
         let geo = self
             .workspaces_with_render_geo_idx()
             .find_map(|((idx, _), geo)| (idx == self.active_workspace_idx).then_some(geo))?;
@@ -2847,9 +2882,6 @@ impl<W: LayoutElement> Monitor<W> {
         let area = self.overview_content();
         let left = area.loc.x;
         let right = area.loc.x + area.size.w;
-        let hovered = pointer
-            .and_then(|point| self.window_under(point))
-            .map(|(window, _)| window.id());
         let contains_y = |y, height| y >= area.loc.y && y + height <= area.loc.y + area.size.h;
         let mut draw = |element| {
             let element = RescaleRenderElement::from_element(element, Point::default(), 1.);
@@ -2970,7 +3002,7 @@ impl<W: LayoutElement> Monitor<W> {
                 continue;
             }
             let mut in_front: Vec<Rectangle<f64, Logical>> = Vec::new();
-            let focused = active.then(|| ws.active_window()).flatten();
+            let focused = active.then(|| self.overview_selected_window()).flatten();
             let preview_positions = self.floating_overview_positions(ws, progress);
             for (tile, pos, visible) in ws.tiles_with_overview_positions(&preview_positions) {
                 if !visible {
@@ -3003,9 +3035,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
-                let hovered = hovered.is_some_and(|id| id == window.id());
                 let hidden = !ws.is_floating_visible() && ws.is_floating(window.id());
-                let hover_ink = preview_hover_ink(backdrop);
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -3016,20 +3046,11 @@ impl<W: LayoutElement> Monitor<W> {
                         return;
                     }
                     let background = caption_background(accent, backdrop, selected);
-                    let background = if hovered && !selected {
-                        tint_caption(background, hover_ink)
-                    } else {
-                        background
-                    };
                     if let Some(label) = tile.overview_label.render(
                         renderer.as_gles_renderer(),
                         title,
                         background,
-                        LabelKind::Preview {
-                            hovered,
-                            hidden,
-                            selected,
-                        },
+                        LabelKind::Preview { hidden },
                         label.size.w,
                         scale,
                         label.loc,
