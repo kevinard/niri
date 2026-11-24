@@ -98,6 +98,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_group_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    strip_edge_labels: [PreviewLabel; 2],
     strip_viewport_motion: RefCell<SolidColorBuffer>,
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
@@ -197,6 +198,7 @@ struct NavigationStrip<'a, W> {
     destinations: Vec<(Rectangle<f64, Logical>, bool, usize)>,
     moving_viewport: Option<Rectangle<f64, Logical>>,
     motion_status: Option<(Rectangle<f64, Logical>, bool)>,
+    edge_actions: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -502,6 +504,7 @@ impl<W: LayoutElement> Monitor<W> {
             strip_labels: Default::default(),
             strip_viewport_labels: Default::default(),
             strip_group_labels: Default::default(),
+            strip_edge_labels: Default::default(),
             strip_viewport_motion: RefCell::default(),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
@@ -2211,6 +2214,9 @@ impl<W: LayoutElement> Monitor<W> {
                 position.x,
             )
         }));
+        if windows.len() == 1 && floating.is_empty() {
+            return None;
+        }
 
         let active_index = windows
             .iter()
@@ -2380,6 +2386,25 @@ impl<W: LayoutElement> Monitor<W> {
             Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
             Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
         ));
+        let edge_actions = if !moving && floating.is_empty() {
+            [true, false].map(|left| {
+                let tray = tray?;
+                let mut targets = titles.iter().filter(|title| title.direction == Some(left));
+                let target = if left { targets.last() } else { targets.next() }?;
+                let width = 30.;
+                let x = if left {
+                    tray.loc.x - 6. - width
+                } else {
+                    tray.loc.x + tray.size.w + 6.
+                };
+                if x < bounds.start || x + width > bounds.end {
+                    return None;
+                }
+                Some((button(x, width)?, target.window))
+            })
+        } else {
+            [None, None]
+        };
         let groups = |matches: &dyn Fn(&NavigationTitle<'_, W>) -> bool| {
             let mut spans: Vec<Range<f64>> = Vec::new();
             for title in titles.iter().filter(|title| matches(title)) {
@@ -2424,6 +2449,7 @@ impl<W: LayoutElement> Monitor<W> {
             destinations,
             moving_viewport,
             motion_status,
+            edge_actions,
             titles,
             layer_action,
         })
@@ -2523,6 +2549,14 @@ impl<W: LayoutElement> Monitor<W> {
                 .map(|title| title.window)
                 .or_else(|| {
                     strip
+                        .edge_actions
+                        .into_iter()
+                        .flatten()
+                        .find(|(rect, _)| rect.contains(position))
+                        .map(|(_, window)| window)
+                })
+                .or_else(|| {
+                    strip
                         .layer_action
                         .filter(|(rect, _)| rect.contains(position))
                         .map(|(_, window)| window)
@@ -2612,6 +2646,14 @@ impl<W: LayoutElement> Monitor<W> {
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible() && !ws.floating().is_empty();
+            let edge_target = pointer.and_then(|point| {
+                strip
+                    .edge_actions
+                    .iter()
+                    .flatten()
+                    .find(|(rect, _)| rect.contains(point))
+                    .map(|(_, window)| window.id())
+            });
             if let Some(rect) = strip.moving_viewport {
                 let mut buffer = self.strip_viewport_motion.borrow_mut();
                 buffer.update(rect.size, accent);
@@ -2662,7 +2704,8 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             };
             for (index, (title, label)) in strip.titles.iter().zip(&self.strip_labels).enumerate() {
-                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point))
+                    || edge_target == Some(title.window.id());
                 let offscreen = title.direction.is_some();
                 let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
                 let status = if title.floating {
@@ -2748,6 +2791,34 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
+            for (index, (edge, label)) in strip
+                .edge_actions
+                .iter()
+                .zip(&self.strip_edge_labels)
+                .enumerate()
+            {
+                let Some((rect, _)) = edge else { continue };
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                if let Some(arrow) = label.render(
+                    renderer.as_gles_renderer(),
+                    String::new(),
+                    if hovered {
+                        tint_caption(direction_background, accent)
+                    } else {
+                        direction_background
+                    },
+                    LabelKind::ScrollWindow {
+                        left: index == 0,
+                        hovered,
+                    },
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(arrow);
+                }
+            }
             if let Some((rect, _)) = strip.layer_action {
                 let hovered = pointer.is_some_and(|point| rect.contains(point));
                 let text = if floating_visible {
@@ -2777,7 +2848,9 @@ impl<W: LayoutElement> Monitor<W> {
             let directions = strip.destinations.into_iter().map(|(rect, left, count)| {
                 let tiles = if count == 1 { "tile" } else { "tiles" };
                 let text = format!("{count} {tiles}");
-                let text = if left {
+                let text = if strip.edge_actions[usize::from(!left)].is_some() {
+                    text
+                } else if left {
                     format!("← {text}")
                 } else {
                     format!("{text} →")

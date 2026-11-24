@@ -639,6 +639,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         cr.line_to(arrow_x, arrow_y + 3.5);
         cr.stroke()?;
 
+        if key.text.is_empty() {
+            drop(cr);
+            return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
+        }
+
         let label = layout(&cr, key);
         label.set_ellipsize(EllipsizeMode::Middle);
         label.set_width(((width - 29. - PADDING) * f64::from(pango::SCALE)) as i32);
