@@ -2044,13 +2044,22 @@ impl<W: LayoutElement> Monitor<W> {
                     && width >= 144.
                     && self.working_area.size.h >= SCROLL_CARD_HEIGHT
                     && exposed < column.width() * 0.60;
-                // The footer already identifies the destination. Avoid leaving a
-                // sliver with detached titlebar controls when a card cannot fit.
-                let hide_peek = card
-                    || (self.navigation_strip_top().is_some()
-                        && can_clip
-                        && exposed > 0.
-                        && exposed < (column.width() * 0.30).min(168.));
+                // With the strip available, retract the last part of a clipped
+                // column before its titlebar buttons become detached slivers.
+                let peek_width = (column.width() * 0.30).min(168.);
+                let strip_peek = self.navigation_strip_top().is_some()
+                    && unclipped
+                    && exposed > 0.
+                    && exposed < peek_width;
+                let clip_progress = if strip_peek {
+                    ((peek_width - exposed) / (peek_width * 0.36))
+                        .max(card_progress)
+                        .min(1.)
+                } else if card {
+                    card_progress
+                } else {
+                    0.
+                };
                 let compact = !card && width < 102.;
                 let width = if compact && card_progress == 1. {
                     ((bounds.end - bounds.start) / 4.).floor().clamp(36., 182.)
@@ -2108,9 +2117,9 @@ impl<W: LayoutElement> Monitor<W> {
                 ScrollCue {
                     rect,
                     destination: column.active_window(),
-                    clipped_column_edge: hide_peek.then(|| {
+                    clipped_column_edge: (clip_progress > 0.).then(|| {
                         let boundary = if left { bounds.start } else { bounds.end };
-                        boundary + (edge - boundary) * card_progress
+                        boundary + (edge - boundary) * clip_progress
                     }),
                     opacity: if card { card_progress as f32 } else { 1. },
                     offscreen_columns: if left {
