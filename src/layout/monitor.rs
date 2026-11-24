@@ -191,7 +191,7 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
-    projections: Vec<Rectangle<f64, Logical>>,
+    projections: Vec<(Rectangle<f64, Logical>, bool)>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -2294,21 +2294,19 @@ impl<W: LayoutElement> Monitor<W> {
             titles
                 .iter()
                 .find(|title| title.direction.is_some() && title.rect.contains(point))
-                .map(|title| title.window)
         });
         let projections = preview
-            .and_then(destination_columns)
+            .and_then(|title| destination_columns(title.window))
             .map(|ids| groups(&|title| ids.contains(&title.window.id())))
             .unwrap_or_default()
             .into_iter()
             .filter_map(|span| {
-                uncovered(Rectangle::new(
-                    Point::from((
-                        span.start,
-                        top + NAVIGATION_STRIP_HEIGHT - STRIP_RANGE_HEIGHT,
-                    )),
+                let rect = uncovered(Rectangle::new(
+                    Point::from((span.start, y + STRIP_BUTTON_HEIGHT + 1.)),
                     Size::from((span.end - span.start, STRIP_RANGE_HEIGHT)),
-                ))
+                ))?;
+                let labeled = preview.is_some_and(|title| span.contains(&title.rect.loc.x));
+                Some((rect, labeled))
             })
             .collect();
         Some(NavigationStrip {
@@ -2612,7 +2610,7 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            for (rect, label) in strip
+            for ((rect, labeled), label) in strip
                 .projections
                 .into_iter()
                 .zip(&self.strip_projection_labels)
@@ -2620,8 +2618,8 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    accent,
-                    LabelKind::StripRange,
+                    surface,
+                    LabelKind::StripRange { labeled },
                     rect.size.w,
                     scale,
                     rect.loc,

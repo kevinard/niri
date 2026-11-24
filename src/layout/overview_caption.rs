@@ -24,7 +24,7 @@ pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 48.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_TRAY_HEIGHT - 4.;
-pub(super) const STRIP_RANGE_HEIGHT: f64 = 3.;
+pub(super) const STRIP_RANGE_HEIGHT: f64 = 20.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
@@ -50,7 +50,9 @@ pub(super) enum LabelKind {
     OverviewCommand,
     StripTray,
     StripViewport,
-    StripRange,
+    StripRange {
+        labeled: bool,
+    },
     ScrollWindow {
         left: bool,
         hovered: bool,
@@ -439,7 +441,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
         LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
-        LabelKind::StripRange => (max_width, STRIP_RANGE_HEIGHT),
+        LabelKind::StripRange { .. } => (max_width, STRIP_RANGE_HEIGHT),
         LabelKind::StripButton { .. }
         | LabelKind::ScrollWindow { .. }
         | LabelKind::LayerAction { .. } => (max_width, STRIP_BUTTON_HEIGHT),
@@ -477,14 +479,51 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
-    if key.kind == LabelKind::StripRange {
+    if let LabelKind::StripRange { labeled } = key.kind {
         let color = key.background;
-        cr.set_source_rgba(color.r.into(), color.g.into(), color.b.into(), 0.82);
-        cr.set_line_width(2.);
-        cr.set_dash(&[5., 3.], 0.);
-        cr.move_to(0., height / 2.);
-        cr.line_to(width, height / 2.);
+        let ink = key.ink;
+        let mid = height / 2.;
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.88);
+        cr.set_line_width(1.5);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_line_join(cairo::LineJoin::Round);
+        cr.move_to(1., 1.);
+        cr.line_to(1., mid);
+        cr.line_to(width - 1., mid);
+        cr.line_to(width - 1., 1.);
         cr.stroke()?;
+        if labeled {
+            let label = layout(&cr, key);
+            label.set_font_description(Some(&FontDescription::from_string(
+                "sans-serif Medium 12px",
+            )));
+            label.set_text("After scroll");
+            let (text_width, text_height) = label.pixel_size();
+            let text_width = f64::from(text_width);
+            let center = width / 2.;
+            let half = (text_width / 2. + 9.).min(center - 1.);
+            let radius = 8.;
+            cr.arc(
+                center - half + radius,
+                mid,
+                radius,
+                std::f64::consts::FRAC_PI_2,
+                1.5 * std::f64::consts::PI,
+            );
+            cr.arc(
+                center + half - radius,
+                mid,
+                radius,
+                -std::f64::consts::FRAC_PI_2,
+                std::f64::consts::FRAC_PI_2,
+            );
+            cr.close_path();
+            cr.set_source_rgba(color.r.into(), color.g.into(), color.b.into(), 0.98);
+            cr.fill()?;
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            cr.move_to(center - text_width / 2., mid - f64::from(text_height) / 2.);
+            pangocairo::functions::show_layout(&cr, &label);
+        }
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
@@ -609,7 +648,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             "sans-serif Medium 12px",
         )));
         label.set_text(if hovered {
-            "Click to focus"
+            "Scroll & focus"
         } else {
             "Scroll to"
         });
