@@ -20,7 +20,8 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
-pub(super) const STRIP_BUTTON_HEIGHT: f64 = 36.;
+pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
+pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 
 #[derive(Debug, Clone, Copy)]
@@ -34,9 +35,11 @@ pub(super) enum GroupStyle {
 pub(super) enum LabelKind {
     Caption,
     GroupHeading,
+    StripTray,
     StripButton {
         direction: Option<bool>,
         status: Option<&'static str>,
+        outlined: bool,
     },
     LayerAction {
         show: bool,
@@ -406,6 +409,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let (width, height) = match key.kind {
         LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
+        LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
         LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
             (max_width, STRIP_BUTTON_HEIGHT)
         }
@@ -445,7 +449,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
-        LabelKind::WindowNavigation { .. } => 14.,
+        LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
+        LabelKind::StripButton { .. } => 9.,
         _ => height / 2.,
     };
     cr.arc(
@@ -495,7 +500,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         );
         if matches!(
             key.kind,
-            LabelKind::StripButton { .. }
+            LabelKind::StripTray
+                | LabelKind::StripButton { outlined: true, .. }
                 | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
                 | LabelKind::WindowNavigation { .. }
@@ -507,6 +513,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         } else {
             cr.fill()?;
         }
+    }
+
+    if key.kind == LabelKind::StripTray {
+        drop(cr);
+        return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
 
     if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
@@ -576,7 +587,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         {
             let arrow = layout(&cr, key);
             arrow.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 18px",
+                "sans-serif Medium 20px",
             )));
             arrow.set_text(if left { "←" } else { "→" });
             let (w, h) = arrow.pixel_size();
@@ -600,11 +611,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if let Some(status) = status {
             let detail = layout(&cr, key);
             label.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 13px",
+                "sans-serif Medium 14px",
             )));
-            detail.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 12px",
-            )));
+            detail.set_font_description(Some(&FontDescription::from_string("sans-serif 13px")));
             detail.set_text(status);
             detail.set_ellipsize(EllipsizeMode::End);
             detail.set_width((title_width * f64::from(pango::SCALE)) as i32);
@@ -612,40 +621,49 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.93);
             cr.move_to(
                 title_x + (title_width - f64::from(w)) / 2.,
-                height - f64::from(h) - 3.,
+                height - f64::from(h) - 4.,
             );
             pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
-        if matches!(key.kind, LabelKind::Preview { show_action: true }) {
+        if let LabelKind::Preview { show_action } = key.kind {
             let action = layout(&cr, key);
             action.set_font_description(Some(&FontDescription::from_string(
                 "sans-serif Medium 12px",
             )));
-            action.set_text("Show window");
+            action.set_text(if show_action { "Show window" } else { "↗" });
             let (w, h) = action.pixel_size();
-            let radius = 9.;
-            let right = width - 3.;
-            let left = right - f64::from(w) - 14.;
-            title_width -= f64::from(w) + 15.;
+            let control_width = (f64::from(w) + 14.).max(22.);
+            let right = width - 4.;
+            let left = right - control_width;
+            title_width -= control_width;
             cr.arc(
-                right - radius,
+                right - 9.,
                 height / 2.,
-                radius,
+                9.,
                 -std::f64::consts::FRAC_PI_2,
                 std::f64::consts::FRAC_PI_2,
             );
             cr.arc(
-                left + radius,
+                left + 9.,
                 height / 2.,
-                radius,
+                9.,
                 std::f64::consts::FRAC_PI_2,
                 1.5 * std::f64::consts::PI,
             );
             cr.close_path();
-            cr.fill()?;
-            cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
-            cr.move_to(left + 7., (height - f64::from(h)) / 2.);
+            if show_action {
+                cr.fill()?;
+                cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
+            } else {
+                cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.14);
+                cr.fill()?;
+                cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            }
+            cr.move_to(
+                left + (control_width - f64::from(w)) / 2.,
+                (height - f64::from(h)) / 2.,
+            );
             pangocairo::functions::show_layout(&cr, &action);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
@@ -659,7 +677,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             _ => PADDING,
         };
         let y = if status.is_some() {
-            2.
+            3.
         } else {
             (height - f64::from(h)) / 2.
         };

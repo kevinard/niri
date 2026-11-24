@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
-use niri_config::{CornerRadius, LayoutPart};
+use niri_config::{Color, CornerRadius, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
@@ -16,6 +16,7 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, preview_hover_ink, tint_caption, GroupStyle, LabelKind,
     PreviewLabel, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
+    STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -89,6 +90,7 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) insert_hint: Option<InsertHint>,
     /// Insert hint element for rendering.
     insert_hint_element: InsertHintElement,
+    strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     layer_action_label: PreviewLabel,
     overview_action_label: PreviewLabel,
@@ -181,6 +183,7 @@ struct OverviewGroup {
 }
 
 struct NavigationStrip<'a, W> {
+    tray: Option<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -458,6 +461,7 @@ impl<W: LayoutElement> Monitor<W> {
             previous_workspace_id: None,
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
+            strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
             layer_action_label: PreviewLabel::default(),
             overview_action_label: PreviewLabel::default(),
@@ -2145,11 +2149,7 @@ impl<W: LayoutElement> Monitor<W> {
         let strip_width = titles_width + (available - title_space);
         let x = (bounds.start + bounds.end - strip_width) / 2.;
         let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
-        let uncovered_button = |x: f64, width: f64| {
-            let rect = Rectangle::new(
-                Point::from((x, y)),
-                Size::from((width, STRIP_BUTTON_HEIGHT)),
-            );
+        let uncovered = |rect: Rectangle<f64, Logical>| {
             let covered = floating_visible
                 && floating.iter().any(|(tile, position)| {
                     rect.intersection(Rectangle::new(*position, tile.tile_size()))
@@ -2157,11 +2157,17 @@ impl<W: LayoutElement> Monitor<W> {
                 });
             (!covered).then_some(rect)
         };
+        let button = |x, width| {
+            uncovered(Rectangle::new(
+                Point::from((x, y)),
+                Size::from((width, STRIP_BUTTON_HEIGHT)),
+            ))
+        };
         let titles = windows[first..first + count]
             .iter()
             .enumerate()
             .filter_map(|(index, &(window, direction, floating))| {
-                let rect = uncovered_button(x + index as f64 * (width + gap), width)?;
+                let rect = button(x + index as f64 * (width + gap), width)?;
                 Some(NavigationTitle {
                     rect,
                     window,
@@ -2172,9 +2178,17 @@ impl<W: LayoutElement> Monitor<W> {
             })
             .collect();
         let layer_action = layer_destination.and_then(|window| {
-            uncovered_button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
+            button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
         });
+        let tray = uncovered(Rectangle::new(
+            Point::from((x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
+            Size::from((
+                titles_width + 2. * STRIP_TRAY_PADDING,
+                STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
+            )),
+        ));
         Some(NavigationStrip {
+            tray,
             titles,
             layer_action,
         })
@@ -2277,6 +2291,7 @@ impl<W: LayoutElement> Monitor<W> {
             let surface = caption_background(accent, ws.options.layout.background_color, false);
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
+            let has_tray = strip.tray.is_some();
             let floating_visible = ws.is_floating_visible();
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
@@ -2311,6 +2326,8 @@ impl<W: LayoutElement> Monitor<W> {
                     accent
                 } else if hovered {
                     tint_caption(surface, accent)
+                } else if has_tray {
+                    Color { a: 0., ..surface }
                 } else {
                     surface
                 };
@@ -2321,6 +2338,7 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::StripButton {
                         direction: title.direction,
                         status,
+                        outlined: !has_tray,
                     },
                     title.rect.size.w,
                     scale,
@@ -2341,9 +2359,9 @@ impl<W: LayoutElement> Monitor<W> {
                     renderer.as_gles_renderer(),
                     text.into(),
                     if hovered {
-                        tint_caption(surface, accent)
+                        tint_caption(tint_caption(surface, accent), accent)
                     } else {
-                        surface
+                        tint_caption(surface, accent)
                     },
                     LabelKind::LayerAction {
                         show: !floating_visible,
@@ -2354,6 +2372,22 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(label);
+                }
+            }
+            // Put the shared surface behind the window targets.
+            if let Some(rect) = strip.tray {
+                let background = Color { a: 0.95, ..surface };
+                if let Some(tray) = self.strip_tray.render(
+                    renderer.as_gles_renderer(),
+                    String::new(),
+                    background,
+                    LabelKind::StripTray,
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(tray);
                 }
             }
             return;
