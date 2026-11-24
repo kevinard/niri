@@ -1994,7 +1994,7 @@ impl<W: LayoutElement> Monitor<W> {
         let (left, right) = self.overview_horizontal_bounds();
         let zoom = self.overview_zoom();
         let project = |range: Range<f64>| {
-            let x = |x| (geo.loc.x + zoom * x).clamp(left, right);
+            let x = |x: f64| (geo.loc.x + zoom * x).clamp(left, right);
             x(range.start)..x(range.end)
         };
         Some((project(extent), project(visible)))
