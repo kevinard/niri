@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::iter::zip;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -36,6 +37,8 @@ use crate::utils::{
 
 /// Amount of touchpad movement to scroll the height of one workspace.
 const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
+
+const OVERVIEW_INSET: f64 = 20.;
 
 const WORKSPACE_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
     stiffness: 0.5,
@@ -289,6 +292,23 @@ impl From<&super::OverviewProgress> for OverviewProgress {
             super::OverviewProgress::Open => Self::Value(1.),
         }
     }
+}
+
+/// Center the complete strip in the overview when it fits at the configured
+/// zoom. Wider strips keep the scrolling layout's camera position.
+fn fit_overview_strip(
+    extent: Range<f64>,
+    viewport: &Range<f64>,
+    zoom: f64,
+    final_zoom: f64,
+) -> Option<f64> {
+    let width = extent.end - extent.start;
+    let available = viewport.end - viewport.start;
+    if width * final_zoom > available {
+        return None;
+    }
+    let center = (viewport.start + viewport.end) / 2.;
+    Some(center - (extent.start + extent.end) / 2. * zoom)
 }
 
 impl<W: LayoutElement> Monitor<W> {
@@ -1495,10 +1515,47 @@ impl<W: LayoutElement> Monitor<W> {
         let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
+        let progress = self
+            .overview_progress_value()
+            .unwrap_or_default()
+            .clamp(0., 1.);
+        let overview_origins: Vec<_> = if self.options.overview.framed_workspaces && progress > 0. {
+            let final_zoom = self.options.overview.zoom.clamp(0.0001, 0.75);
+            let (left, right) = self.overview_horizontal_bounds();
+            let viewport = left + OVERVIEW_INSET..right - OVERVIEW_INSET;
+            self.workspaces
+                .iter()
+                .enumerate()
+                .map(|(idx, ws)| {
+                    let top = static_offset.y + first_ws_y + idx as f64 * ws_height_with_gap;
+                    if top + ws_size.h < 0. || top > self.view_size.h {
+                        return None;
+                    }
+
+                    let extent = ws
+                        .tiles_with_render_positions()
+                        .filter(|(_, _, visible)| *visible)
+                        .fold(None::<Range<f64>>, |extent, (tile, pos, _)| {
+                            let left = pos.x;
+                            let right = pos.x + tile.tile_size().w;
+                            Some(extent.map_or(left..right, |extent| {
+                                extent.start.min(left)..extent.end.max(right)
+                            }))
+                        })?;
+                    fit_overview_strip(extent, &viewport, zoom, final_zoom)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Return position for one-past-last workspace too.
         (0..=self.workspaces.len()).map(move |idx| {
             let y = first_ws_y + idx as f64 * ws_height_with_gap;
-            let loc = Point::from((0., y)) + static_offset;
+            let mut loc = Point::from((0., y)) + static_offset;
+            if let Some(Some(origin)) = overview_origins.get(idx) {
+                loc.x += (origin - loc.x) * progress;
+            }
 
             // Even though all components that go into loc are rounded to physical pixels, the
             // floating point addition may lose precision. This can result for example in the
@@ -1739,8 +1796,8 @@ impl<W: LayoutElement> Monitor<W> {
         for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
             let top = geo.loc.y - 36.;
             let (left, right) = self.overview_horizontal_bounds();
-            let x = geo.loc.x.max(left) + 2.;
-            let width = (right.min(geo.loc.x + geo.size.w) - x).min(260.);
+            let x = left + OVERVIEW_INSET;
+            let width = (right - x - OVERVIEW_INSET).min(260.);
             if top < 0. || alpha == 0. || width < 36. {
                 continue;
             }
