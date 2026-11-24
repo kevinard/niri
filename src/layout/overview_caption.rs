@@ -21,7 +21,6 @@ const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 62.;
-pub(super) const VIEWPORT_TRACK_HEIGHT: f64 = 14.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
@@ -29,15 +28,14 @@ pub(super) enum LabelKind {
     Preview,
     Button { align_right: bool },
     WindowNavigation { left: bool },
-    Viewport { start: u32, end: u32 },
     EdgeFade { height: u32, from_left: bool },
 }
 
 #[derive(Debug)]
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
-    pub(super) desktop_view: PreviewLabel,
-    pub(super) desktop_track: PreviewLabel,
+    pub(super) desktop_labels: [PreviewLabel; 3],
+    desktop_outline: RefCell<BorderRenderElement>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
@@ -47,8 +45,8 @@ impl Default for OverviewCaption {
     fn default() -> Self {
         Self {
             title: PreviewLabel::default(),
-            desktop_view: PreviewLabel::default(),
-            desktop_track: PreviewLabel::default(),
+            desktop_labels: Default::default(),
+            desktop_outline: RefCell::new(BorderRenderElement::empty()),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
@@ -159,6 +157,42 @@ impl OverviewCaption {
         )
     }
 
+    pub(super) fn render_desktop_outline(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        rect: Rectangle<f64, Logical>,
+        backdrop: Color,
+        alpha: f32,
+        scale: f64,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        if rect.size.w < 12.
+            || rect.size.h < 12.
+            || alpha == 0.
+            || !BorderRenderElement::has_shader(renderer)
+        {
+            return;
+        }
+        let ink = if is_light(backdrop) { 0.16 } else { 0.91 };
+        let color = Color::new_unpremul(ink, ink, ink, alpha * 0.72);
+        let geometry = Rectangle::from_size(rect.size);
+        let mut outline = self.desktop_outline.borrow_mut();
+        outline.update(
+            rect.size,
+            geometry,
+            Default::default(),
+            color,
+            color,
+            0.,
+            geometry,
+            (1.5 / scale) as f32,
+            frame_radius(rect, 1.),
+            scale as f32,
+            1.,
+        );
+        push(outline.clone().with_location(rect.loc).into());
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_frame(
         &self,
@@ -267,7 +301,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview => (max_width.min(4096.), 22.),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
-        LabelKind::Viewport { .. } => (max_width, VIEWPORT_TRACK_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
         LabelKind::Caption => (
             (f64::from(label.pixel_size().0) + 2. * PADDING)
@@ -341,31 +374,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     cr.close_path();
     let color = key.background;
     let ink = key.ink;
-    let track = matches!(key.kind, LabelKind::Viewport { .. });
-    if track {
-        cr.clip();
-        cr.rectangle(0., 0., width, height);
-    }
-    let mix = |base: f32, text: f32| {
-        f64::from(if track {
-            base * 0.23 + text * 0.77
-        } else {
-            base
-        })
-    };
     cr.set_source_rgba(
-        mix(color.r, ink.r),
-        mix(color.g, ink.g),
-        mix(color.b, ink.b),
-        if track { 0.88 } else { color.a.into() },
+        color.r.into(),
+        color.g.into(),
+        color.b.into(),
+        color.a.into(),
     );
     cr.fill()?;
 
-    if let LabelKind::Viewport { start, end } = key.kind {
-        cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
-        cr.rectangle(f64::from(start), 2., f64::from(end - start), height - 4.);
-        cr.fill()?;
-    } else if let LabelKind::WindowNavigation { left } = key.kind {
+    if let LabelKind::WindowNavigation { left } = key.kind {
         let title = layout(&cr, key);
         title.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         let align = |w: i32| {

@@ -14,7 +14,7 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
-    SCROLL_CARD_HEIGHT, VIEWPORT_TRACK_HEIGHT,
+    SCROLL_CARD_HEIGHT,
 };
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -315,13 +315,6 @@ fn visible_extent<'a, W: LayoutElement + 'a>(
         .filter(|(_, _, shown)| *shown)
         .map(|(tile, pos, _)| pos.x..pos.x + tile.tile_size().w)
         .reduce(|extent, next| extent.start.min(next.start)..extent.end.max(next.end))
-}
-
-fn desktop_track(strip: &Range<f64>, geo: Rectangle<f64, Logical>) -> Rectangle<f64, Logical> {
-    Rectangle::new(
-        Point::from((strip.start, geo.loc.y - VIEWPORT_TRACK_HEIGHT - 3.)),
-        Size::from(((strip.end - strip.start).floor(), VIEWPORT_TRACK_HEIGHT)),
-    )
 }
 
 /// Center the complete strip in the overview when it fits at the configured
@@ -1835,9 +1828,11 @@ impl<W: LayoutElement> Monitor<W> {
                 .floor()
                 .clamp(32., width)
         });
-        let card_progress = scrolling.distance_to_stationary_view().map_or(0., |distance| {
-            (1. - distance / SCROLL_CARD_HEIGHT).clamp(0., 1.).powi(2)
-        });
+        let card_progress = scrolling
+            .distance_to_stationary_view()
+            .map_or(0., |distance| {
+                (1. - distance / SCROLL_CARD_HEIGHT).clamp(0., 1.).powi(2)
+            });
         let make_cue =
             |(column, pos): (&'a Column<W>, Point<f64, Logical>), x, width: f64, left| {
                 let edge = if left { pos.x + column.width() } else { pos.x };
@@ -1870,7 +1865,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let available = self.working_area.size.h - height;
                 let y = self.working_area.loc.y
                     + if card {
-                        available * 0.72
+                        available * 0.30
                     } else if space < 36. {
                         (available - inset).max(0.)
                     } else {
@@ -1896,36 +1891,6 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
-        if self.has_framed_overview() && self.overview_open {
-            let ((_, ws), geo) = self
-                .workspaces_with_render_geo_idx()
-                .find(|((index, _), _)| *index == self.active_workspace_idx)?;
-            let (strip, _) = self.desktop_viewport(ws, geo)?;
-            let track = desktop_track(&strip, geo);
-            let area = self.overview_content();
-            let progress = self.overview_progress_value().unwrap_or_default();
-            if !track.contains(position)
-                || !area.contains(position)
-                || track.loc.y < area.loc.y
-                || track.loc.y + track.size.h > area.loc.y + area.size.h
-                || track.size.w < VIEWPORT_TRACK_HEIGHT
-                || progress <= 0.82
-            {
-                return None;
-            }
-            let x = (position.x - geo.loc.x) / self.overview_zoom();
-            let distance = |column: &Column<W>, start: f64| {
-                let end = start + column.width();
-                (start - x).max(x - end).max(0.)
-            };
-            return ws
-                .scrolling()
-                .columns_with_render_positions()
-                .min_by(|(a, a_pos), (b, b_pos)| {
-                    distance(a, a_pos.x).total_cmp(&distance(b, b_pos.x))
-                })
-                .map(|(column, _)| column.active_window());
-        }
         self.scroll_cues()
             .into_iter()
             .flatten()
@@ -2205,12 +2170,13 @@ impl<W: LayoutElement> Monitor<W> {
         )
     }
 
-    fn desktop_viewport(
+    fn desktop_window_groups(
         &self,
         ws: &Workspace<W>,
         geo: Rectangle<f64, Logical>,
     ) -> Option<(Range<f64>, Range<f64>)> {
-        let extent = visible_extent(ws.scrolling().tiles_with_render_positions())?;
+        let tiles = || ws.scrolling().tiles_with_render_positions();
+        let extent = visible_extent(tiles())?;
         let view = ws.working_area();
         let bounds = view.loc.x..view.loc.x + view.size.w;
         let bounds = if ws.options.layout.clip_scroll_to_work_area {
@@ -2218,11 +2184,11 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             bounds
         };
-        let visible = extent.start.max(bounds.start)..extent.end.min(bounds.end);
         let pixel = 1. / self.scale.fractional_scale();
-        if visible.is_empty()
-            || (visible.start - extent.start <= pixel && extent.end - visible.end <= pixel)
-        {
+        let visible = visible_extent(tiles().filter(|(tile, pos, _)| {
+            pos.x < bounds.end - pixel && pos.x + tile.tile_size().w > bounds.start + pixel
+        }))?;
+        if visible == extent {
             return None;
         }
         let area = self.overview_content();
@@ -2274,7 +2240,7 @@ impl<W: LayoutElement> Monitor<W> {
             let top = if empty && !active {
                 geo.loc.y + 11.
             } else {
-                geo.loc.y - 48.
+                geo.loc.y - 67.
             };
             let x = left + OVERVIEW_INSET;
             let width = (right - x - OVERVIEW_INSET).min(235.);
@@ -2294,46 +2260,37 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            if let Some((strip, visible)) = active.then(|| self.desktop_viewport(ws, geo)).flatten()
+            if let Some((strip, visible)) = active
+                .then(|| self.desktop_window_groups(ws, geo))
+                .flatten()
             {
-                let track_geometry = desktop_track(&strip, geo);
-                let track_width = track_geometry.size.w;
-                let surface = caption_background(accent, backdrop, false);
-                let start = (visible.start - strip.start).round().clamp(0., track_width) as u32;
-                let end = (visible.end - strip.start).round().clamp(0., track_width) as u32;
-                if contains_y(track_geometry.loc.y, VIEWPORT_TRACK_HEIGHT)
-                    && track_width >= VIEWPORT_TRACK_HEIGHT
-                    && start < end
-                {
-                    if let Some(track) = ws.overview_caption.desktop_track.render(
-                        renderer.as_gles_renderer(),
-                        String::new(),
-                        caption_background(accent, backdrop, true),
-                        LabelKind::Viewport { start, end },
-                        track_width,
-                        scale,
-                        track_geometry.loc,
-                        label_alpha,
-                    ) {
-                        draw(MonitorInnerRenderElement::Caption(track));
-                    }
-                }
-                let caption_end = x + if ws.name().is_some() { width } else { 116. };
-                let caption_width = 264.;
-                let centered = (visible.start + visible.end - caption_width) / 2.;
-                let label_x = centered.max(caption_end).min(right - caption_width);
-                if contains_y(top, 28.) && label_x >= caption_end {
-                    if let Some(caption) = ws.overview_caption.desktop_view.render(
-                        renderer.as_gles_renderer(),
-                        "Desktop viewport · Click to scroll".into(),
-                        surface,
-                        LabelKind::Caption,
-                        caption_width,
-                        scale,
-                        Point::from((label_x, top)),
-                        label_alpha,
-                    ) {
-                        draw(MonitorInnerRenderElement::Caption(caption));
+                let y = geo.loc.y - 33.;
+                if contains_y(y, 28.) {
+                    let groups = [
+                        (strip.start..visible.start, "Offscreen to the left", 154.),
+                        (visible.clone(), "On desktop", 100.),
+                        (visible.end..strip.end, "Offscreen to the right", 163.),
+                    ];
+                    let surface = caption_background(accent, backdrop, false);
+                    for ((range, title, min_width), label) in
+                        groups.into_iter().zip(&ws.overview_caption.desktop_labels)
+                    {
+                        let width = range.end - range.start;
+                        if width < min_width {
+                            continue;
+                        }
+                        if let Some(caption) = label.render(
+                            renderer.as_gles_renderer(),
+                            title.into(),
+                            surface,
+                            LabelKind::Caption,
+                            width.min(184.),
+                            scale,
+                            Point::from((range.start, y)),
+                            label_alpha,
+                        ) {
+                            draw(MonitorInnerRenderElement::Caption(caption));
+                        }
                     }
                 }
             }
@@ -2576,7 +2533,9 @@ impl<W: LayoutElement> Monitor<W> {
         let margin = OVERVIEW_FRAME_MARGIN.min(self.working_area.size.w / 2.);
         let left = self.working_area.loc.x + margin;
         let width = self.working_area.size.w - 2. * margin;
-        let height = if index != self.active_workspace_idx && !ws.has_windows_or_name() {
+        let empty = index != self.active_workspace_idx && !ws.has_windows_or_name();
+        let width = if empty { width.min(280.) } else { width };
+        let height = if empty {
             geo.size.h.min(50.)
         } else {
             geo.size.h
@@ -2610,6 +2569,33 @@ impl<W: LayoutElement> Monitor<W> {
             let Some(rect) = self.overview_frame_geometry(ws, index, geo) else {
                 continue;
             };
+            if index == self.active_workspace_idx {
+                if let Some((_, visible)) = self.desktop_window_groups(ws, geo) {
+                    let left = (visible.start - 4.).max(rect.loc.x);
+                    let right = (visible.end + 4.).min(rect.loc.x + rect.size.w);
+                    let group = Rectangle::new(
+                        Point::from((left, rect.loc.y + 3.)),
+                        Size::from(((right - left).max(0.), (rect.size.h - 6.).max(0.))),
+                    );
+                    ws.overview_caption.render_desktop_outline(
+                        renderer,
+                        group,
+                        ws.options.layout.background_color,
+                        ((progress - 0.80) / 0.20).clamp(0., 1.) as f32,
+                        scale,
+                        &mut |elem| {
+                            let elem = MonitorInnerRenderElement::Decoration(elem);
+                            let elem =
+                                RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                            push(RelocateRenderElement::from_element(
+                                elem,
+                                Point::default(),
+                                Relocate::Relative,
+                            ));
+                        },
+                    );
+                }
+            }
             ws.overview_caption.render_frame(
                 renderer,
                 rect,
