@@ -491,11 +491,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub(super) fn distance_to_stationary_view(&self) -> Option<f64> {
+        self.remaining_view_movement().map(f64::abs)
+    }
+
+    pub(super) fn remaining_view_movement(&self) -> Option<f64> {
         match &self.view_offset {
             ViewOffset::Static(_) if !self.are_transitions_ongoing() => Some(0.),
-            ViewOffset::Animation(animation) => {
-                Some((animation.to() - animation.clamped_value()).abs())
-            }
+            ViewOffset::Animation(animation) => Some(animation.to() - animation.clamped_value()),
             _ => None,
         }
     }

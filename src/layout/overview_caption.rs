@@ -39,7 +39,6 @@ pub(super) enum GroupStyle {
 pub(super) enum FocusMarker {
     None,
     Current,
-    Destination,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,10 +404,10 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let font = if key.kind == LabelKind::SharedScroll {
-        "sans-serif Medium 12px"
-    } else if matches!(key.kind, LabelKind::StripButton { .. })
-        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
+    let font = if matches!(
+        key.kind,
+        LabelKind::StripButton { .. } | LabelKind::SharedScroll
+    ) || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
     {
         "sans-serif Medium 13px"
     } else {
@@ -833,12 +832,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 0.,
                 std::f64::consts::TAU,
             );
-            if focus == FocusMarker::Current {
-                cr.fill()?;
-            } else {
-                cr.set_line_width(1.5);
-                cr.stroke()?;
-            }
+            cr.fill()?;
         }
         cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
