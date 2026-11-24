@@ -15,12 +15,9 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, tint_caption, GroupStyle, LabelKind, PreviewLabel,
-    SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, SCROLL_HANDLE_HEIGHT, STRIP_BUTTON_HEIGHT,
-    STRIP_TRAY_PADDING,
+    SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT, STRIP_TRAY_PADDING,
 };
-use super::scrolling::{
-    navigation_strip_fits, scroll_handle_inset, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT,
-};
+use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
 use super::workspace::{
     compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
@@ -190,14 +187,8 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
-    scroll_actions: [Option<ScrollAction<'a, W>>; 2],
+    scroll_actions: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
-}
-
-struct ScrollAction<'a, W> {
-    rect: Rectangle<f64, Logical>,
-    destination: &'a W,
-    count: usize,
 }
 
 struct NavigationTitle<'a, W> {
@@ -1632,7 +1623,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let extent = visible_extent(ws.scrolling().tiles_with_render_positions());
         let gap = ws.options.layout.gaps.max(22.);
-        let y = ws.working_area().loc.y + ws.options.layout.gaps;
+        let y = ws.working_area().loc.y + ws.options.layout.gaps + self.overview_strip_offset(ws);
         let left = extent.as_ref().map_or(0., |range| range.start);
         let mut x = extent
             .as_ref()
@@ -1665,6 +1656,17 @@ impl<W: LayoutElement> Monitor<W> {
                 (tile.window().id().clone(), position)
             })
             .collect()
+    }
+
+    fn overview_strip_offset(&self, ws: &Workspace<W>) -> f64 {
+        if ws.options.layout.clip_scroll_to_work_area
+            && !ws.scrolling().is_empty()
+            && self.navigation_strip_top().is_some()
+        {
+            NAVIGATION_STRIP_HEIGHT
+        } else {
+            0.
+        }
     }
 
     pub(super) fn floating_overview_position(
@@ -1878,8 +1880,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn scroll_view_bounds(&self) -> Range<f64> {
         let area = self.working_area;
-        let inset = scroll_handle_inset(area);
-        (area.loc.x + inset)..(area.loc.x + area.size.w - inset)
+        area.loc.x..(area.loc.x + area.size.w)
     }
 
     fn scrolling_visible_span(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
@@ -1892,7 +1893,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn navigation_strip_top(&self) -> Option<f64> {
         let area = self.working_area;
-        navigation_strip_fits(area).then_some(area.loc.y + area.size.h - NAVIGATION_STRIP_HEIGHT)
+        navigation_strip_fits(area).then_some(area.loc.y)
     }
 
     fn scrolling_clip_excludes(
@@ -1903,9 +1904,9 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> bool {
         self.scrolling_visible_span(ws).is_some_and(|bounds| {
             !bounds.contains(&location.x)
-                || self
-                    .navigation_strip_top()
-                    .is_some_and(|top| location.y - workspace_origin.y >= top)
+                || self.navigation_strip_top().is_some_and(|top| {
+                    location.y - workspace_origin.y < top + NAVIGATION_STRIP_HEIGHT
+                })
         })
     }
 
@@ -2100,7 +2101,7 @@ impl<W: LayoutElement> Monitor<W> {
         ]
     }
 
-    /// Normal tiled windows leave a footer for the strip, so the same controls
+    /// Normal tiled windows leave a row for the strip, so the same controls
     /// remain available in each position without painting over a client surface.
     fn navigation_strip(&self) -> Option<NavigationStrip<'_, W>> {
         let ws = self.active_workspace_ref();
@@ -2151,8 +2152,17 @@ impl<W: LayoutElement> Monitor<W> {
             .iter()
             .position(|(window, _, _)| window.id() == active.id())?;
         let gap = 8.;
-        let available = self.working_area.size.w - 24.;
-        let capacity = ((available + gap) / 184.).floor() as usize;
+        let area = self.working_area;
+        let inset = 12.;
+        let scroll_width = 184.;
+        let reserve_scroll = area.size.w >= 840. && floating.is_empty() && windows.len() > 1;
+        let scroll_space = if reserve_scroll {
+            2. * (scroll_width + 16.)
+        } else {
+            0.
+        };
+        let available = area.size.w - 2. * inset - scroll_space;
+        let capacity = ((available + gap) / 164.).floor() as usize;
         let count = windows
             .len()
             .min(capacity.max(1))
@@ -2220,23 +2230,12 @@ impl<W: LayoutElement> Monitor<W> {
             button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
         });
         let [left, right] = cues;
-        let area = self.working_area;
-        let inset = scroll_handle_inset(area);
-        let scroll_actions = if inset > 0. {
-            let y = (area.loc.y + top - SCROLL_HANDLE_HEIGHT) / 2.;
-            let positions = [(area.loc.x + 8., left), (bounds.end + 8., right)];
-            positions.map(|(x, cue)| {
-                let cue = cue?;
-                let rect = Rectangle::new(
-                    Point::from((x, y)),
-                    Size::from((inset - 16., SCROLL_HANDLE_HEIGHT)),
-                );
-                uncovered(rect).map(|rect| ScrollAction {
-                    rect,
-                    destination: cue.destination,
-                    count: cue.offscreen_columns,
-                })
-            })
+        let scroll_actions = if reserve_scroll {
+            let positions = [
+                (bounds.start + inset, left),
+                (bounds.end - inset - scroll_width, right),
+            ];
+            positions.map(|(x, cue)| button(x, scroll_width).zip(cue.map(|cue| cue.destination)))
         } else {
             [None, None]
         };
@@ -2358,8 +2357,8 @@ impl<W: LayoutElement> Monitor<W> {
                         .scroll_actions
                         .into_iter()
                         .flatten()
-                        .find(|action| action.rect.contains(position))
-                        .map(|action| action.destination)
+                        .find(|(rect, _)| rect.contains(position))
+                        .map(|(_, window)| window)
                 });
         }
         self.scroll_cues()
@@ -2552,12 +2551,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             for (index, action) in strip.scroll_actions.into_iter().enumerate() {
-                let Some(ScrollAction {
-                    rect,
-                    count,
-                    destination,
-                }) = action
-                else {
+                let Some((rect, destination)) = action else {
                     continue;
                 };
                 let left = index == 0;
@@ -2570,40 +2564,19 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(label) = self.scroll_cue_labels[index].render(
                     renderer.as_gles_renderer(),
-                    format!("{count} {}", if left { "left" } else { "right" }),
+                    navigation_title(destination, target, "Window"),
                     background,
-                    LabelKind::ScrollHandle { left },
+                    LabelKind::StripButton {
+                        direction: Some(left),
+                        status: Some(if left { "Scroll left" } else { "Scroll right" }),
+                        outlined: true,
+                    },
                     rect.size.w,
                     scale,
                     rect.loc,
                     1.,
                 ) {
                     draw(label);
-                }
-                if hovered {
-                    let width = 228.;
-                    let x = if left {
-                        rect.loc.x + rect.size.w + 8.
-                    } else {
-                        rect.loc.x - width - 8.
-                    };
-                    let y = rect.loc.y + (rect.size.h - STRIP_BUTTON_HEIGHT) / 2.;
-                    if let Some(label) = self.additional_scroll_cue_labels[index].render(
-                        renderer.as_gles_renderer(),
-                        navigation_title(destination, target, "Window"),
-                        surface,
-                        LabelKind::StripButton {
-                            direction: None,
-                            status: Some("Click to show window"),
-                            outlined: true,
-                        },
-                        width,
-                        scale,
-                        Point::from((x, y)),
-                        1.,
-                    ) {
-                        draw(label);
-                    }
                 }
             }
             return;
@@ -3130,7 +3103,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .then(|| self.overview_groups(ws, geo, progress))
                 .flatten()
             {
-                let y = geo.loc.y - 36.;
+                let y = geo.loc.y + self.overview_strip_offset(ws) * zoom - 36.;
                 if contains_y(y, 28.) {
                     let surface = caption_background(accent, backdrop, false);
                     for (group, label) in
@@ -3341,11 +3314,12 @@ impl<W: LayoutElement> Monitor<W> {
                     crop_bounds.loc.x = left;
                     crop_bounds.size.w = right.saturating_sub(left).max(0);
                     if let Some(top) = self.navigation_strip_top() {
-                        let bottom = (top * scale).floor() as i32;
-                        crop_bounds.size.h = crop_bounds
-                            .size
-                            .h
-                            .min(bottom.saturating_sub(crop_bounds.loc.y).max(0));
+                        let boundary = ((top + NAVIGATION_STRIP_HEIGHT) * scale).ceil() as i32;
+                        for crop in [&mut crop_bounds, &mut shadow_crop] {
+                            let bottom = crop.loc.y.saturating_add(crop.size.h);
+                            crop.loc.y = crop.loc.y.max(boundary);
+                            crop.size.h = bottom.saturating_sub(crop.loc.y).max(0);
+                        }
                     }
                     // A visible tile's soft shadow can extend into the gap
                     // next to its window. Clip it only at the panel bounds.
@@ -3481,7 +3455,7 @@ impl<W: LayoutElement> Monitor<W> {
         let height = if empty {
             geo.size.h.min(28.)
         } else {
-            geo.size.h
+            geo.size.h + self.overview_strip_offset(ws) * self.overview_zoom()
         };
         let y = if empty {
             geo.loc.y + 11. * progress
@@ -3522,6 +3496,7 @@ impl<W: LayoutElement> Monitor<W> {
             let groups = active
                 .then(|| self.overview_groups(ws, geo, progress))
                 .flatten();
+            let strip_offset = self.overview_strip_offset(ws) * self.overview_zoom();
             let mut draw = |elem| {
                 let elem = MonitorInnerRenderElement::Decoration(elem);
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
@@ -3539,7 +3514,7 @@ impl<W: LayoutElement> Monitor<W> {
                         return None;
                     }
                     Rectangle::new(
-                        Point::from((range.start, geo.loc.y - 7.)),
+                        Point::from((range.start, geo.loc.y + strip_offset - 7.)),
                         Size::from((range.end - range.start, 2.)),
                     )
                     .intersection(self.overview_content())
@@ -3575,7 +3550,7 @@ impl<W: LayoutElement> Monitor<W> {
                             .map(|(tile, pos)| geo.loc.y + (pos.y + tile.tile_size().h) * zoom)
                             .reduce(f64::max)
                             .unwrap_or(geo.loc.y + geo.size.h);
-                        let top = geo.loc.y - 37.;
+                        let top = geo.loc.y + strip_offset - 37.;
                         let backing = Rectangle::new(
                             Point::from((group.loc.x - 6., top)),
                             Size::from((group.size.w + 12., bottom - top + 10.)),

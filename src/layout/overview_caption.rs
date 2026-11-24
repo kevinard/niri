@@ -23,7 +23,6 @@ pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
-pub(super) const SCROLL_HANDLE_HEIGHT: f64 = 58.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GroupStyle {
@@ -39,9 +38,6 @@ pub(super) enum LabelKind {
     GroupTitle,
     OverviewCommand,
     StripTray,
-    ScrollHandle {
-        left: bool,
-    },
     StripButton {
         direction: Option<bool>,
         status: Option<&'static str>,
@@ -414,7 +410,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
-        LabelKind::ScrollHandle { .. } => (max_width, SCROLL_HANDLE_HEIGHT),
         LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
             (max_width, STRIP_BUTTON_HEIGHT)
         }
@@ -457,7 +452,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::OverviewCommand => 9.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton { .. } => 9.,
-        LabelKind::ScrollHandle { .. } => 12.,
         _ => height / 2.,
     };
     cr.arc(
@@ -509,7 +503,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             key.kind,
             LabelKind::StripTray
                 | LabelKind::OverviewCommand
-                | LabelKind::ScrollHandle { .. }
                 | LabelKind::StripButton { outlined: true, .. }
                 | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
@@ -525,29 +518,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
 
     if key.kind == LabelKind::StripTray {
-        drop(cr);
-        return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
-    }
-
-    if let LabelKind::ScrollHandle { left } = key.kind {
-        let arrow = layout(&cr, key);
-        arrow.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 24px",
-        )));
-        arrow.set_text(if left { "←" } else { "→" });
-        let w = f64::from(arrow.pixel_size().0);
-        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-        cr.move_to((width - w) / 2., 8.);
-        pangocairo::functions::show_layout(&cr, &arrow);
-
-        let detail = layout(&cr, key);
-        detail.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 12px",
-        )));
-        detail.set_width(((width - 2.) * f64::from(pango::SCALE)) as i32);
-        detail.set_alignment(pango::Alignment::Center);
-        cr.move_to(1., 34.);
-        pangocairo::functions::show_layout(&cr, &detail);
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }

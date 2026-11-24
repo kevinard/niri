@@ -6460,18 +6460,9 @@ fn pinned_view_x(area: Rectangle<f64, Logical>, gaps: f64, side: PinSide, width:
 }
 
 pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 64.;
-pub(super) const SCROLL_HANDLE_LANE: f64 = 58.;
 
 pub(super) fn navigation_strip_fits(area: Rectangle<f64, Logical>) -> bool {
     area.size.w >= 420. && area.size.h >= 400.
-}
-
-pub(super) fn scroll_handle_inset(area: Rectangle<f64, Logical>) -> f64 {
-    if navigation_strip_fits(area) && area.size.w >= 720. {
-        SCROLL_HANDLE_LANE
-    } else {
-        0.
-    }
 }
 
 fn compute_scrolling_area(
@@ -6481,10 +6472,7 @@ fn compute_scrolling_area(
 ) -> Rectangle<f64, Logical> {
     let mut struts = options.layout.struts;
     if options.layout.clip_scroll_to_work_area && navigation_strip_fits(parent_area) {
-        struts.bottom.0 = struts.bottom.0.max(NAVIGATION_STRIP_HEIGHT);
-        let inset = scroll_handle_inset(parent_area);
-        struts.left.0 += inset;
-        struts.right.0 += inset;
+        struts.top.0 = struts.top.0.max(NAVIGATION_STRIP_HEIGHT);
     }
     compute_working_area(parent_area, scale, struts)
 }
