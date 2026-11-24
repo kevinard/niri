@@ -18,6 +18,7 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
+use super::overview_caption::OverviewCaption;
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
@@ -91,6 +92,8 @@ pub struct Workspace<W: LayoutElement> {
 
     /// This workspace's shadow in the overview.
     shadow: Shadow,
+
+    pub(super) overview_caption: OverviewCaption,
 
     /// This workspace's background.
     background_buffer: SolidColorBuffer,
@@ -268,6 +271,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
+            overview_caption: OverviewCaption::default(),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             output: Some(output),
             clock,
@@ -331,6 +335,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
+            overview_caption: OverviewCaption::default(),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             clock,
             base_options,

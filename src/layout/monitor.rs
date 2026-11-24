@@ -8,7 +8,7 @@ use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
@@ -22,6 +22,7 @@ use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
 use crate::niri_render_elements;
+use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::SolidColorRenderElement;
@@ -191,6 +192,7 @@ niri_render_elements! {
         UncroppedInsertHint = InsertHintRenderElement,
         Shadow = ShadowRenderElement,
         SolidColor = SolidColorRenderElement,
+        Caption = PrimaryGpuTextureRenderElement,
     }
 }
 
@@ -1480,7 +1482,13 @@ impl<W: LayoutElement> Monitor<W> {
         let gap = self.workspace_gap(zoom);
         let ws_height_with_gap = ws_size.h + gap;
 
-        let static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
+        let mut static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
+        if self.options.overview.framed_workspaces {
+            // Zoom toward the center of the usable area when a panel occupies an edge.
+            let offset = self.working_area.loc
+                + (self.working_area.size.to_point() - self.view_size.to_point()).downscale(2.);
+            static_offset += offset.upscale(1. - zoom);
+        }
         let static_offset = static_offset
             .to_physical_precise_round(scale)
             .to_logical(scale);
@@ -1571,6 +1579,11 @@ impl<W: LayoutElement> Monitor<W> {
         let (ws, geo) = self.workspace_under(pos_within_output)?;
 
         if self.overview_progress.is_some() {
+            if self.options.overview.framed_workspaces
+                && !self.overview_content_contains(pos_within_output.x)
+            {
+                return None;
+            }
             let zoom = self.overview_zoom();
             let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
             let (win, hit) = ws.window_under(pos_within_workspace)?;
@@ -1680,6 +1693,82 @@ impl<W: LayoutElement> Monitor<W> {
             });
     }
 
+    /// Keep the overview strip clear of exclusive layer-shell surfaces.
+    fn overview_horizontal_bounds(&self) -> (f64, f64) {
+        let progress = self
+            .overview_progress_value()
+            .unwrap_or_default()
+            .clamp(0., 1.);
+        let left = self.working_area.loc.x * progress;
+        let right = self.view_size.w
+            + (self.working_area.loc.x + self.working_area.size.w - self.view_size.w) * progress;
+        (left, right)
+    }
+
+    fn overview_content_contains(&self, x: f64) -> bool {
+        let (left, right) = self.overview_horizontal_bounds();
+        (left..right).contains(&x)
+    }
+
+    fn overview_crop(
+        &self,
+        geo: Rectangle<f64, Logical>,
+        scale: f64,
+        zoom: f64,
+        height: i32,
+    ) -> Rectangle<i32, Physical> {
+        let (left, right) = self.overview_horizontal_bounds();
+        let left = ((left - geo.loc.x) / zoom * scale).ceil() as i32;
+        let right = ((right - geo.loc.x) / zoom * scale).floor() as i32;
+        Rectangle::new(
+            Point::from((left, 0)),
+            Size::from((right.saturating_sub(left).max(0), height)),
+        )
+    }
+
+    fn render_overview_captions<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let Some(progress) = self.overview_progress_value() else {
+            return;
+        };
+        // Labels appear once there is space above the card and recede early on closing.
+        let alpha = ((progress - 0.35) / 0.65).clamp(0., 1.) as f32;
+        let scale = self.scale.fractional_scale();
+        for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
+            let top = geo.loc.y - 36.;
+            let (left, right) = self.overview_horizontal_bounds();
+            let x = geo.loc.x.max(left) + 2.;
+            let width = (right.min(geo.loc.x + geo.size.w) - x).min(260.);
+            if top < 0. || alpha == 0. || width < 36. {
+                continue;
+            }
+
+            let active = index == self.active_workspace_idx;
+            let Some(caption) = ws.overview_caption.render(
+                renderer.as_gles_renderer(),
+                index + 1,
+                ws.name().map(String::as_str),
+                active,
+                width,
+                scale,
+                Point::from((x, top)),
+                alpha,
+            ) else {
+                continue;
+            };
+            let elem = MonitorInnerRenderElement::Caption(caption);
+            let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+            push(RelocateRenderElement::from_element(
+                elem,
+                Point::default(),
+                Relocate::Relative,
+            ));
+        }
+    }
+
     pub fn render_workspaces<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
@@ -1693,6 +1782,10 @@ impl<W: LayoutElement> Monitor<W> {
         let height = (self.view_size.h * scale).ceil() as i32;
 
         let zoom = self.overview_zoom();
+
+        if self.options.overview.framed_workspaces {
+            self.render_overview_captions(ctx.renderer, push);
+        }
 
         let insert_hint_render_loc = self
             .insert_hint_render_loc
@@ -1750,6 +1843,14 @@ impl<W: LayoutElement> Monitor<W> {
                 };
 
             for (ws, geo) in self.workspaces_with_render_geo_cull(cull) {
+                let crop_bounds = if cull
+                    && self.options.overview.framed_workspaces
+                    && self.overview_progress.is_some()
+                {
+                    self.overview_crop(geo, scale, zoom, height)
+                } else {
+                    crop_bounds
+                };
                 // Macro instead of closure because ws and insert hint have different elem types.
                 macro_rules! push {
                     () => {{
