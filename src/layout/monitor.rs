@@ -1936,10 +1936,12 @@ impl<W: LayoutElement> Monitor<W> {
                         return None;
                     }
                     let end = location.x + size.w;
-                    Some(if end <= view.start + 1. || location.x >= view.end - 1. {
-                        "Offscreen"
+                    Some(if end <= view.start + 1. {
+                        "Beyond left edge"
+                    } else if location.x >= view.end - 1. {
+                        "Beyond right edge"
                     } else if location.x < view.start - 1. || end > view.end + 1. {
-                        "Partly visible"
+                        "Partly on desktop"
                     } else {
                         "On desktop"
                     })

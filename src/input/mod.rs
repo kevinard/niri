@@ -1114,6 +1114,7 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.focus_window(&window);
+                    self.niri.layer_shell_on_demand_focus = None;
                 }
             }
             Action::FocusWindowInColumn(index) => {
