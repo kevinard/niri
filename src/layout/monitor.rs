@@ -1804,7 +1804,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .clamp(32., width)
         });
         let stationary = !scrolling.are_transitions_ongoing();
-        let make_cue = |(column, pos): (&Column<W>, Point<f64, Logical>), x, width, left| {
+        let make_cue = |(column, pos): (&'a Column<W>, Point<f64, Logical>), x, width, left| {
             let edge = if left { pos.x + column.width() } else { pos.x };
             let exposed = if left {
                 edge - bounds.start
