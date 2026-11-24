@@ -194,7 +194,7 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
-    motion_status: Option<(Rectangle<f64, Logical>, bool)>,
+    motion_left: Option<bool>,
     edge_actions: [Option<NavigationArrow<'a, W>>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
@@ -2421,22 +2421,10 @@ impl<W: LayoutElement> Monitor<W> {
             }
             spans.into_iter().filter_map(viewport_mark).collect()
         };
-        let motion_status = moving_left.and_then(|left| {
-            let tray = tray?;
-            let width = tray.size.w.min(254.);
-            let rect = Rectangle::new(
-                Point::from((
-                    tray.loc.x + (tray.size.w - width) / 2.,
-                    y + STRIP_BUTTON_HEIGHT + 4.,
-                )),
-                Size::from((width, STRIP_STATUS_HEIGHT)),
-            );
-            Some((uncovered(rect)?, left))
-        });
         Some(NavigationStrip {
             tray,
             viewports,
-            motion_status,
+            motion_left: moving_left,
             edge_actions,
             titles,
             layer_action,
@@ -2634,6 +2622,7 @@ impl<W: LayoutElement> Monitor<W> {
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible() && !ws.floating().is_empty();
+            let moving = strip.motion_left.is_some();
             let edge_target = pointer.and_then(|point| {
                 strip
                     .edge_actions
@@ -2714,15 +2703,15 @@ impl<W: LayoutElement> Monitor<W> {
                     None
                 };
                 let name = display_title(index);
-                let focus = if title.active {
+                let motion = strip
+                    .motion_left
+                    .filter(|_| title.active && !title.floating);
+                let focus = if title.active && motion.is_none() {
                     FocusMarker::Current
                 } else {
                     FocusMarker::None
                 };
-                let background = if title.active && strip.motion_status.is_some() && !title.floating
-                {
-                    direction_background
-                } else if title.active {
+                let background = if title.active {
                     accent
                 } else if offscreen && hovered {
                     tint_caption(direction_background, accent)
@@ -2735,12 +2724,15 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let fallback = title.direction.filter(|_| !compact);
                 let kind = if let Some(left) = fallback {
-                    LabelKind::ScrollWindow { left, hovered }
+                    LabelKind::ScrollWindow {
+                        left,
+                        hovered: hovered && !moving,
+                    }
                 } else {
                     LabelKind::StripButton {
                         status,
                         outlined: !title.active,
-                        hovered,
+                        hovered: hovered && !moving,
                         focus,
                         compact,
                     }
@@ -2767,7 +2759,13 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     "Reveal"
                 };
-                let text = if fallback.is_some() {
+                let text = if let Some(left) = motion {
+                    if left {
+                        format!("← Moving to {name}")
+                    } else {
+                        format!("Moving to {name} →")
+                    }
+                } else if fallback.is_some() {
                     let reveal = companion_hint.as_deref().unwrap_or("Moves into view");
                     format!("{verb} {name}\n{reveal}")
                 } else if offscreen {
@@ -2816,7 +2814,7 @@ impl<W: LayoutElement> Monitor<W> {
                     },
                     LabelKind::ScrollWindow {
                         left: index == 0,
-                        hovered,
+                        hovered: hovered && !moving,
                     },
                     rect.size.w,
                     scale,
@@ -2852,24 +2850,7 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            let motion = strip.motion_status.map(|(rect, left)| {
-                let name = strip
-                    .titles
-                    .iter()
-                    .position(|title| title.active && !title.floating)
-                    .map(display_title);
-                let text = name.map_or_else(
-                    || "Scrolling tiles".to_owned(),
-                    |name| format!("Scrolling to {name}"),
-                );
-                let text = if left {
-                    format!("← {text}")
-                } else {
-                    format!("{text} →")
-                };
-                (rect, text)
-            });
-            if let Some((rect, text)) = motion.or(hover_status) {
+            if let Some((rect, text)) = hover_status {
                 if let Some(caption) = self.strip_status_label.render(
                     renderer.as_gles_renderer(),
                     text,
