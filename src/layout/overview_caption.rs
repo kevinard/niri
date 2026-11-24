@@ -22,6 +22,7 @@ const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
+pub(super) const STRIP_VIEWPORT_HEIGHT: f64 = 14.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
@@ -39,11 +40,11 @@ pub(super) enum LabelKind {
     GroupTitle,
     OverviewCommand,
     StripTray,
+    StripViewport,
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
-        offscreen: bool,
-        visible_tile: bool,
+        direction: Option<bool>,
     },
     LayerAction {
         show: bool,
@@ -422,9 +423,13 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             (max_width.min(4096.), OVERVIEW_CONTROL_HEIGHT)
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
-        LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
+        LabelKind::StripTray => (
+            max_width,
+            STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_VIEWPORT_HEIGHT,
+        ),
+        LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_HEIGHT),
         LabelKind::StripButton {
-            offscreen: true, ..
+            direction: Some(_), ..
         } => (max_width, STRIP_BUTTON_HEIGHT - 6.),
         LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
             (max_width, STRIP_BUTTON_HEIGHT)
@@ -445,6 +450,31 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let surface = ImageSurface::create(cairo::Format::ARgb32, pixel_width, pixel_height)?;
     let cr = cairo::Context::new(&surface)?;
     cr.scale(key.scale, key.scale);
+    if key.kind == LabelKind::StripViewport {
+        let label = layout(&cr, key);
+        label.set_font_description(Some(&FontDescription::from_string(
+            "sans-serif Medium 11px",
+        )));
+        let (w, h) = label.pixel_size();
+        let center = width / 2.;
+        let gap = f64::from(w) / 2. + 6.;
+        let ink = key.ink;
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.54);
+        cr.set_line_width(1.25);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.move_to(1., 1.);
+        cr.line_to(1., 6.);
+        cr.line_to(center - gap, 6.);
+        cr.move_to(center + gap, 6.);
+        cr.line_to(width - 1., 6.);
+        cr.line_to(width - 1., 1.);
+        cr.stroke()?;
+        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+        cr.move_to(center - f64::from(w) / 2., (height - f64::from(h)) / 2.);
+        pangocairo::functions::show_layout(&cr, &label);
+        drop(cr);
+        return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
+    }
     if let LabelKind::EdgeFade { from_left, .. } = key.kind {
         let (from, to) = if from_left { (0., width) } else { (width, 0.) };
         let gradient = cairo::LinearGradient::new(from, 0., to, 0.);
@@ -468,7 +498,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton {
-            offscreen: true, ..
+            direction: Some(_), ..
         } => 17.,
         LabelKind::StripButton { .. } => 9.,
         _ => height / 2.,
@@ -624,17 +654,35 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 "sans-serif Medium 13px",
             )));
         }
-        let status = match key.kind {
-            LabelKind::StripButton { status, .. } => status,
-            _ => None,
-        };
-        let offscreen = matches!(
-            key.kind,
+        let (status, direction) = match key.kind {
             LabelKind::StripButton {
-                offscreen: true,
-                ..
+                status, direction, ..
+            } => (status, direction),
+            _ => (None, None),
+        };
+        let offscreen = direction.is_some();
+        if let Some(left) = direction {
+            let x = if left { 19. } else { width - 19. };
+            let y = height / 2.;
+            let sign = if left { -1. } else { 1. };
+            cr.arc(x, y, 11., 0., std::f64::consts::TAU);
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.15);
+            cr.fill()?;
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            cr.set_line_width(1.5);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.set_line_join(cairo::LineJoin::Round);
+            cr.move_to(x - 4.5 * sign, y);
+            cr.line_to(x + 4.5 * sign, y);
+            cr.move_to(x + sign, y - 3.5);
+            cr.line_to(x + 4.5 * sign, y);
+            cr.line_to(x + sign, y + 3.5);
+            cr.stroke()?;
+            title_width -= 27.;
+            if left {
+                title_x += 27.;
             }
-        );
+        }
         if let Some(status) = status {
             let detail = layout(&cr, key);
             let font = if offscreen {
@@ -711,29 +759,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        let y = if offscreen {
-            1.
-        } else if status.is_some() {
-            3.
+        let y = if status.is_some() {
+            if offscreen {
+                1.
+            } else {
+                3.
+            }
         } else {
             (height - f64::from(h)) / 2.
         };
         cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
-        if matches!(
-            key.kind,
-            LabelKind::StripButton {
-                visible_tile: true,
-                ..
-            }
-        ) {
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.58);
-            cr.set_line_width(2.);
-            cr.set_line_cap(cairo::LineCap::Round);
-            cr.move_to(width / 2. - 11., height - 5.);
-            cr.line_to(width / 2. + 11., height - 5.);
-            cr.stroke()?;
-        }
     }
     drop(cr);
 

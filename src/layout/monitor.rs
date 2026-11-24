@@ -16,7 +16,7 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, tint_caption, GroupStyle, LabelKind, PreviewLabel,
     OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
-    STRIP_TRAY_PADDING,
+    STRIP_TRAY_PADDING, STRIP_VIEWPORT_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -93,6 +93,7 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_element: InsertHintElement,
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
@@ -187,6 +188,7 @@ struct OverviewGroup {
 
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
+    viewports: Vec<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -474,6 +476,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
+            strip_viewport_labels: Default::default(),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
@@ -2190,7 +2193,7 @@ impl<W: LayoutElement> Monitor<W> {
         let tabs_width = width * count as f64 + gaps;
         let tray_width = tabs_width + action_space;
         let start = (bounds.start + bounds.end - tray_width) / 2.;
-        let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
+        let y = top + NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT - STRIP_VIEWPORT_HEIGHT;
         let uncovered = |rect: Rectangle<f64, Logical>| {
             let covered = floating_visible
                 && floating.iter().any(|(tile, position)| {
@@ -2226,11 +2229,37 @@ impl<W: LayoutElement> Monitor<W> {
             Point::from((start - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
             Size::from((
                 tray_width + 2. * STRIP_TRAY_PADDING,
-                STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
+                STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_VIEWPORT_HEIGHT,
             )),
         ));
+        let mut spans: Vec<Range<f64>> = Vec::new();
+        for title in titles
+            .iter()
+            .filter(|title| !title.floating && title.direction.is_none())
+        {
+            let start = title.rect.loc.x;
+            let end = start + title.rect.size.w;
+            if let Some(span) = spans
+                .last_mut()
+                .filter(|span| start <= span.end + gap + 0.001)
+            {
+                span.end = end;
+            } else {
+                spans.push(start..end);
+            }
+        }
+        let viewports = spans
+            .into_iter()
+            .filter_map(|span| {
+                uncovered(Rectangle::new(
+                    Point::from((span.start + 5., y + STRIP_BUTTON_HEIGHT)),
+                    Size::from((span.end - span.start - 10., STRIP_VIEWPORT_HEIGHT)),
+                ))
+            })
+            .collect();
         Some(NavigationStrip {
             tray,
+            viewports,
             titles,
             layer_action,
         })
@@ -2445,15 +2474,10 @@ impl<W: LayoutElement> Monitor<W> {
                     })
                 } else if !has_layer_action && !ws.floating().is_empty() && floating_visible {
                     Some("Hides floating windows")
+                } else if hovered && !offscreen && has_layer_action && floating_visible {
+                    Some("Reveal tiled windows")
                 } else {
-                    match title.direction {
-                        Some(true) => Some("←  Scroll to window"),
-                        Some(false) => Some("Scroll to window  →"),
-                        None if hovered && has_layer_action && floating_visible => {
-                            Some("Reveal tiled windows")
-                        }
-                        _ => None,
-                    }
+                    None
                 };
                 let name = &titles[index];
                 let suffix = window_title_suffix(name);
@@ -2478,8 +2502,7 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::StripButton {
                         status,
                         outlined: !title.active,
-                        offscreen,
-                        visible_tile: !title.floating && !offscreen,
+                        direction: title.direction,
                     },
                     title.rect.size.w,
                     scale,
@@ -2513,6 +2536,20 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(label);
+                }
+            }
+            for (rect, label) in strip.viewports.into_iter().zip(&self.strip_viewport_labels) {
+                if let Some(viewport) = label.render(
+                    renderer.as_gles_renderer(),
+                    "On desktop".into(),
+                    surface,
+                    LabelKind::StripViewport,
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(viewport);
                 }
             }
             // Put the shared surface behind the window targets.
