@@ -674,11 +674,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_font_description(Some(&FontDescription::from_string(
             "sans-serif Medium 12px",
         )));
-        label.set_text(if hovered {
-            "Scroll & focus"
-        } else {
-            "Scroll to"
-        });
+        label.set_text("Scroll & focus");
         let instruction_alpha = if hovered { 1. } else { 0.83 };
         cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), instruction_alpha);
         cr.move_to(x, 3.);

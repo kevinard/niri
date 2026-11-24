@@ -2297,6 +2297,7 @@ impl<W: LayoutElement> Monitor<W> {
         });
         let projections = preview
             .and_then(|title| destination_columns(title.window))
+            .filter(|ids| ids.len() > 1)
             .map(|ids| groups(&|title| ids.contains(&title.window.id())))
             .unwrap_or_default()
             .into_iter()
@@ -3175,7 +3176,15 @@ impl<W: LayoutElement> Monitor<W> {
                 let surface = caption_background(accent, backdrop, false);
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
-                    ("← →  Select     Tab  Choose tiled or floating", 326.)
+                    let selected_is_floating = self
+                        .overview_selected_window()
+                        .is_some_and(|window| ws.is_floating(window.id()));
+                    let shortcuts = if selected_is_floating {
+                        "← →  Select     Tab  Select a tiled window"
+                    } else {
+                        "← →  Select     Tab  Select a floating window"
+                    };
+                    (shortcuts, 326.)
                 } else {
                     ("← →  Select window", 154.)
                 };
@@ -3284,7 +3293,7 @@ impl<W: LayoutElement> Monitor<W> {
                     Some(if label.size.w < 220. {
                         "Current"
                     } else {
-                        "Desktop focus"
+                        "Current focus"
                     })
                 } else {
                     None
