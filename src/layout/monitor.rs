@@ -2615,7 +2615,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
             if let Some((rect, neighbors)) = strip.hint {
                 let text = if neighbors.is_empty() {
-                    "Scroll & focus".into()
+                    "Click to focus".into()
                 } else {
                     let names = neighbors
                         .iter()
@@ -2623,7 +2623,7 @@ impl<W: LayoutElement> Monitor<W> {
                         .map(|name| window_title_suffix(&name).to_owned())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("Scroll & focus · Also shows {names}")
+                    format!("Click to focus · Also shows {names}")
                 };
                 if let Some(hint) = self.strip_hint_label.render(
                     renderer.as_gles_renderer(),
@@ -3318,7 +3318,13 @@ impl<W: LayoutElement> Monitor<W> {
                     if title.trim().is_empty() {
                         return;
                     }
-                    let background = if selected { selection_color } else { surface };
+                    let background = if desktop_focus {
+                        accent
+                    } else if selected {
+                        selection_color
+                    } else {
+                        surface
+                    };
                     if let Some(label) = tile.overview_label.render(
                         renderer.as_gles_renderer(),
                         title,
