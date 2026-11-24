@@ -2302,8 +2302,8 @@ impl<W: LayoutElement> Monitor<W> {
             .into_iter()
             .filter_map(|span| {
                 let rect = uncovered(Rectangle::new(
-                    Point::from((span.start, y + STRIP_BUTTON_HEIGHT + 1.)),
-                    Size::from((span.end - span.start, STRIP_RANGE_HEIGHT)),
+                    Point::from((span.start - 2., y - 2.)),
+                    Size::from((span.end - span.start + 4., STRIP_RANGE_HEIGHT)),
                 ))?;
                 let labeled = preview.is_some_and(|title| span.contains(&title.rect.loc.x));
                 Some((rect, labeled))
@@ -2520,6 +2520,9 @@ impl<W: LayoutElement> Monitor<W> {
             {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
+                let projected = strip.projections.iter().any(|(rect, _)| {
+                    rect.contains(title.rect.loc + Point::from((title.rect.size.w / 2., 0.)))
+                });
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2552,8 +2555,13 @@ impl<W: LayoutElement> Monitor<W> {
                 } else if offscreen {
                     if hovered {
                         tint_caption(direction_background, accent)
+                    } else if projected {
+                        Color {
+                            a: 0.,
+                            ..direction_background
+                        }
                     } else {
-                        direction_background
+                        tint_caption(surface, accent)
                     }
                 } else if hovered {
                     tint_caption(surface, accent)
@@ -2563,7 +2571,11 @@ impl<W: LayoutElement> Monitor<W> {
                     surface
                 };
                 let kind = if let Some(left) = title.direction {
-                    LabelKind::ScrollWindow { left, hovered }
+                    LabelKind::ScrollWindow {
+                        left,
+                        hovered,
+                        projected,
+                    }
                 } else {
                     LabelKind::StripButton {
                         status,
@@ -2618,7 +2630,7 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    surface,
+                    direction_background,
                     LabelKind::StripRange { labeled },
                     rect.size.w,
                     scale,
@@ -2632,7 +2644,7 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    direction_background,
+                    tint_caption(surface, accent),
                     LabelKind::StripViewport,
                     rect.size.w,
                     scale,

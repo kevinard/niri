@@ -24,7 +24,7 @@ pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 48.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_TRAY_HEIGHT - 4.;
-pub(super) const STRIP_RANGE_HEIGHT: f64 = 20.;
+pub(super) const STRIP_RANGE_HEIGHT: f64 = 63.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
@@ -56,6 +56,7 @@ pub(super) enum LabelKind {
     ScrollWindow {
         left: bool,
         hovered: bool,
+        projected: bool,
     },
     StripButton {
         status: Option<&'static str>,
@@ -482,15 +483,41 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     if let LabelKind::StripRange { labeled } = key.kind {
         let color = key.background;
         let ink = key.ink;
-        let mid = height / 2.;
-        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.88);
-        cr.set_line_width(1.5);
-        cr.set_line_cap(cairo::LineCap::Round);
-        cr.set_line_join(cairo::LineJoin::Round);
-        cr.move_to(1., 1.);
-        cr.line_to(1., mid);
-        cr.line_to(width - 1., mid);
-        cr.line_to(width - 1., 1.);
+        let mid = height - 10.;
+        let radius = 9.;
+        cr.arc(
+            radius + 1.,
+            radius + 1.,
+            radius,
+            std::f64::consts::PI,
+            1.5 * std::f64::consts::PI,
+        );
+        cr.arc(
+            width - radius - 1.,
+            radius + 1.,
+            radius,
+            -std::f64::consts::FRAC_PI_2,
+            0.,
+        );
+        cr.arc(
+            width - radius - 1.,
+            mid - radius,
+            radius,
+            0.,
+            std::f64::consts::FRAC_PI_2,
+        );
+        cr.arc(
+            radius + 1.,
+            mid - radius,
+            radius,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+        );
+        cr.close_path();
+        cr.set_source_rgba(color.r.into(), color.g.into(), color.b.into(), 0.81);
+        cr.fill_preserve()?;
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.9);
+        cr.set_line_width(2.);
         cr.stroke()?;
         if labeled {
             let label = layout(&cr, key);
@@ -597,7 +624,10 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 LabelKind::StripTray => 0.14,
                 LabelKind::StripViewport => 0.49,
                 LabelKind::ScrollWindow { hovered: true, .. } => 1.,
-                LabelKind::ScrollWindow { hovered: false, .. } => 0.54,
+                LabelKind::ScrollWindow {
+                    projected: true, ..
+                } => 0.29,
+                LabelKind::ScrollWindow { .. } => 0.54,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
@@ -617,7 +647,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
 
-    if let LabelKind::ScrollWindow { left, hovered } = key.kind {
+    if let LabelKind::ScrollWindow { left, hovered, .. } = key.kind {
         let arrow_x = if left { 14. } else { width - 14. };
         let arrow_y = height / 2.;
         let sign = if left { -1. } else { 1. };
