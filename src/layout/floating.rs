@@ -1065,17 +1065,26 @@ impl<W: LayoutElement> FloatingSpace<W> {
             // grows in response to a size action. Pointer resizing still anchors the
             // opposite edge, and deliberately off-screen windows retain their position.
             let area = data.working_area;
-            let mut next = Rectangle::new(data.logical_pos, data.size);
+            let mut position = data.logical_pos;
             let previous_end = previous.loc + previous.size.to_point();
             let area_end = area.loc + area.size.to_point();
             let was_visible = previous.loc.x >= area.loc.x
                 && previous.loc.y >= area.loc.y
                 && previous_end.x <= area_end.x
                 && previous_end.y <= area_end.y;
-            if was_visible && next.size.w <= area.size.w && next.size.h <= area.size.h {
-                clamp_preferring_top_left_in_area(area, &mut next);
-                if next.loc != data.logical_pos {
-                    data.set_logical_pos(next.loc);
+            if was_visible && data.size.w <= area.size.w && data.size.h <= area.size.h {
+                let gaps = self.options.layout.gaps.max(0.);
+                let next_end = position + data.size.to_point();
+                if next_end.x > area_end.x {
+                    let inset = gaps.min((area.size.w - data.size.w) / 2.);
+                    position.x = area_end.x - data.size.w - inset;
+                }
+                if next_end.y > area_end.y {
+                    let inset = gaps.min((area.size.h - data.size.h) / 2.);
+                    position.y = area_end.y - data.size.h - inset;
+                }
+                if position != data.logical_pos {
+                    data.set_logical_pos(position);
                 }
             }
         }

@@ -23,7 +23,7 @@ const PADDING: f64 = 10.;
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
     viewport_label: PreviewLabel,
-    viewport_rules: RefCell<[SolidColorBuffer; 7]>,
+    viewport_rules: RefCell<[SolidColorBuffer; 5]>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
 }
@@ -164,25 +164,32 @@ impl OverviewCaption {
         push: &mut dyn FnMut(ViewportDecoration),
     ) {
         let width = visible.end - visible.start;
-        if width <= 0. || bottom <= top {
+        if width < 2. || bottom <= top {
             return;
         }
 
         let mut lines = self.viewport_rules.borrow_mut();
-        let track = Color::new_unpremul(accent.r, accent.g, accent.b, 0.27 * alpha);
-        let edge = Color::new_unpremul(accent.r, accent.g, accent.b, 0.55 * alpha);
+        let shade = Color::new_unpremul(0., 0.035, 0.025, 0.17 * alpha);
         let highlight = Color::new_unpremul(accent.r, accent.g, accent.b, alpha);
-        let end = visible.end - 2.;
         let bars = [
             ((visible.start, top), (width, 2.), highlight),
             ((visible.start, top), (2., 10.), highlight),
-            ((end, top), (2., 10.), highlight),
-            ((visible.start, top), (1., bottom - top), edge),
-            ((end + 1., top), (1., bottom - top), edge),
-            ((visible.start, bottom), (width, 1.), edge),
-            ((strip.start, top), (strip.end - strip.start, 2.), track),
+            ((visible.end - 2., top), (2., 10.), highlight),
+            (
+                (strip.start, top + 11.),
+                (visible.start - strip.start, bottom - top - 15.),
+                shade,
+            ),
+            (
+                (visible.end, top + 11.),
+                (strip.end - visible.end, bottom - top - 15.),
+                shade,
+            ),
         ];
         for (buffer, (location, size, color)) in lines.iter_mut().zip(bars) {
+            if size.0 <= 0. || size.1 <= 0. {
+                continue;
+            }
             buffer.update(size, color);
             push(ViewportDecoration::Rule(
                 SolidColorRenderElement::from_buffer(buffer, location, 1., Kind::Unspecified),

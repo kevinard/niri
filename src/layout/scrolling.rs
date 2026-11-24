@@ -700,7 +700,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 } + self.options.layout.gaps * 2.;
 
                 // If it fits together, do a normal animation, otherwise center the new column.
-                if total_width <= self.working_area.size.w {
+                if columns_fit(total_width, self.working_area.size.w, self.scale) {
                     self.compute_new_view_offset_for_column_fit(target_x, idx)
                 } else {
                     self.compute_new_view_offset_for_column_centered(target_x, idx)
@@ -3339,8 +3339,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                                         // NOTE: This logic won't work entirely correctly with small
                                         // fixed-size maximized windows (they have a different area
                                         // and padding).
-                                        center_on_overflow
-                                            && adj_col_w + 3.0 * gaps + col_w > area.size.w
+                                        !columns_fit(
+                                            adj_col_w + 3.0 * gaps + col_w,
+                                            area.size.w,
+                                            self.scale,
+                                        )
                                     })
                                     .is_some()
                         };
@@ -5603,6 +5606,12 @@ impl<W: LayoutElement> Column<W> {
     }
 }
 
+/// Adjacent half-width columns can round up by one physical pixel in total.
+/// Keep their normal edge alignment when that pixel is the only overflow.
+fn columns_fit(width: f64, available: f64, scale: f64) -> bool {
+    width <= available + 1. / scale
+}
+
 fn compute_new_view_offset(
     cur_x: f64,
     view_width: f64,
@@ -5720,6 +5729,12 @@ mod tests {
 
     use super::*;
     use crate::utils::round_logical_in_physical;
+
+    #[test]
+    fn fractional_rounding_keeps_neighboring_columns_in_view() {
+        assert!(columns_fit(936., 935.2, 1.25));
+        assert!(!columns_fit(937.6, 935.2, 1.25));
+    }
 
     #[test]
     fn working_area_starts_at_physical_pixel() {
