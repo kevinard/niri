@@ -1,4 +1,5 @@
 use std::cmp::max;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
 use super::shadow::Shadow;
-use super::tile::{Tile, TileRenderSnapshot};
+use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
 use super::{
     ActivateWindow, HitType, InsertPosition, InteractiveResizeData, LayoutElement, Options,
     RemovedTile, SizeFrac,
@@ -150,6 +151,17 @@ niri_render_elements! {
     WorkspaceRenderElement<R> => {
         Scrolling = ScrollingSpaceRenderElement<R>,
         Floating = FloatingSpaceRenderElement<R>,
+    }
+}
+
+impl<R: NiriRenderer> WorkspaceRenderElement<R> {
+    pub(super) fn is_window_shadow(&self) -> bool {
+        matches!(
+            self,
+            Self::Scrolling(ScrollingSpaceRenderElement::Tile(
+                TileRenderElement::Shadow(_)
+            ))
+        )
     }
 }
 
@@ -1670,13 +1682,18 @@ impl<W: LayoutElement> Workspace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        visible_x: Option<&Range<f64>>,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
         let scrolling_focus_ring = focus_ring && !self.floating_is_active();
-        self.scrolling
-            .render(ctx, xray_pos, scrolling_focus_ring, layer, &mut |elem| {
-                push(elem.into())
-            });
+        self.scrolling.render(
+            ctx,
+            xray_pos,
+            scrolling_focus_ring,
+            layer,
+            visible_x,
+            &mut |elem| push(elem.into()),
+        );
     }
 
     pub fn render_floating<R: NiriRenderer>(
