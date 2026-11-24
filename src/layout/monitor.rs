@@ -16,7 +16,7 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, tint_caption, GroupStyle, LabelKind, PreviewLabel,
     OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
-    STRIP_TRAY_PADDING, STRIP_VIEWPORT_HEIGHT,
+    STRIP_TRAY_PADDING, STRIP_VIEWPORT_BAND_HEIGHT, STRIP_VIEWPORT_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -2252,8 +2252,8 @@ impl<W: LayoutElement> Monitor<W> {
             .into_iter()
             .filter_map(|span| {
                 uncovered(Rectangle::new(
-                    Point::from((span.start + 5., y + STRIP_BUTTON_HEIGHT)),
-                    Size::from((span.end - span.start - 10., STRIP_VIEWPORT_HEIGHT)),
+                    Point::from((span.start - 3., y - 3.)),
+                    Size::from((span.end - span.start + 6., STRIP_VIEWPORT_BAND_HEIGHT)),
                 ))
             })
             .collect();
@@ -2466,6 +2466,7 @@ impl<W: LayoutElement> Monitor<W> {
             {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
+                let visible_tile = !offscreen && !title.floating;
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2492,6 +2493,8 @@ impl<W: LayoutElement> Monitor<W> {
                     tint_caption(tint_caption(surface, accent), accent)
                 } else if offscreen {
                     Color { a: 0.65, ..surface }
+                } else if visible_tile && strip.tray.is_some() {
+                    Color { a: 0., ..surface }
                 } else {
                     surface
                 };
@@ -2501,7 +2504,8 @@ impl<W: LayoutElement> Monitor<W> {
                     background,
                     LabelKind::StripButton {
                         status,
-                        outlined: !title.active,
+                        outlined: !title.active
+                            && (!visible_tile || hovered || strip.tray.is_none()),
                         direction: title.direction,
                     },
                     title.rect.size.w,
@@ -2542,7 +2546,7 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
                     "On desktop".into(),
-                    surface,
+                    tint_caption(surface, accent),
                     LabelKind::StripViewport,
                     rect.size.w,
                     scale,
