@@ -2239,13 +2239,15 @@ impl<W: LayoutElement> Monitor<W> {
             for (title, label) in titles.into_iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let status = if title.floating {
-                    Some(if ws.is_floating_visible() {
+                    Some(if !ws.is_floating_visible() {
+                        "Hidden · Select to show"
+                    } else if ws.scrolling().is_empty() {
                         "Floating"
                     } else {
-                        "Floating · Hidden"
+                        "Floating · Above tiles"
                     })
-                } else if hovered && !ws.floating().is_empty() && ws.is_floating_visible() {
-                    Some("Show tiled windows")
+                } else if !ws.floating().is_empty() && ws.is_floating_visible() {
+                    Some("Hides floating windows")
                 } else {
                     match title.direction {
                         Some(true) => Some("Offscreen left"),
@@ -2641,10 +2643,18 @@ impl<W: LayoutElement> Monitor<W> {
             x(range.start)..x(range.end)
         };
         let tiled = visible_extent(ws.scrolling().tiles_with_render_positions()).map(|extent| {
+            let view = ws.working_area();
+            let tolerance = 1. / self.scale.fractional_scale();
+            let on_desktop = extent.start >= view.loc.x - tolerance
+                && extent.end <= view.loc.x + view.size.w + tolerance;
             OverviewGroup {
                 range: project(extent),
-                title: "Tiled windows",
-                minimum_width: 125.,
+                title: if on_desktop {
+                    "On desktop · Tiled"
+                } else {
+                    "Some offscreen · Tiled"
+                },
+                minimum_width: 168.,
                 emphasized: !ws.floating_is_active(),
             }
         });
@@ -2653,9 +2663,9 @@ impl<W: LayoutElement> Monitor<W> {
                 .filter(|(tile, _, _)| ws.is_floating(tile.window().id())),
         )?;
         let (title, minimum_width) = if ws.is_floating_visible() {
-            ("Floating windows", 145.)
+            ("On desktop · Floating", 172.)
         } else {
-            ("Floating windows · Hidden on desktop", 285.)
+            ("Hidden on desktop · Floating", 228.)
         };
         Some([
             tiled,
@@ -3237,7 +3247,7 @@ impl<W: LayoutElement> Monitor<W> {
             if let Some(groups) = groups {
                 for (rect, shadow) in groups.into_iter().zip(&ws.overview_caption.group_shadows) {
                     if let Some((rect, _)) = rect {
-                        draw_shadow(shadow, rect, group_alpha);
+                        draw_shadow(shadow, rect, group_alpha * 0.52);
                     }
                 }
             }
