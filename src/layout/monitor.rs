@@ -15,7 +15,7 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, tint_caption, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
-    SCROLL_CARD_HEIGHT,
+    SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -184,7 +184,7 @@ struct NavigationTitle<'a, W> {
     window: &'a W,
     active: bool,
     direction: Option<bool>,
-    hidden: bool,
+    floating: bool,
 }
 
 struct ScrollCue<'a, W> {
@@ -1601,7 +1601,9 @@ impl<W: LayoutElement> Monitor<W> {
         let gap = ws.options.layout.gaps.max(22.);
         let y = ws.working_area().loc.y + ws.options.layout.gaps;
         let left = extent.as_ref().map_or(0., |range| range.start);
-        let mut x = extent.as_ref().map_or(left, |range| range.end + gap);
+        let mut x = extent
+            .as_ref()
+            .map_or(left, |range| range.end + gap.max(42.));
         let mut floating = ws
             .floating()
             .tiles_with_render_positions()
@@ -2098,12 +2100,7 @@ impl<W: LayoutElement> Monitor<W> {
             .tiles_with_render_positions()
             .collect::<Vec<_>>();
         floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-        let floating_hidden = !ws.is_floating_visible();
-        windows.extend(
-            floating
-                .iter()
-                .map(|(tile, _)| (tile.window(), None, floating_hidden)),
-        );
+        windows.extend(floating.iter().map(|(tile, _)| (tile.window(), None, true)));
 
         let active_index = windows
             .iter()
@@ -2123,15 +2120,15 @@ impl<W: LayoutElement> Monitor<W> {
             .min(236.);
         let strip_width = count as f64 * (width + gap) - gap;
         let x = (bounds.start + bounds.end - strip_width) / 2.;
-        let y = top + (NAVIGATION_STRIP_HEIGHT - SCROLL_BUTTON_HEIGHT) / 2.;
+        let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
         Some(
             windows[first..first + count]
                 .iter()
                 .enumerate()
-                .filter_map(|(index, &(window, direction, hidden))| {
+                .filter_map(|(index, &(window, direction, floating_window))| {
                     let rect = Rectangle::new(
                         Point::from((x + index as f64 * (width + gap), y)),
-                        Size::from((width, SCROLL_BUTTON_HEIGHT)),
+                        Size::from((width, STRIP_BUTTON_HEIGHT)),
                     );
                     let covered = ws.is_floating_visible()
                         && floating.iter().any(|(tile, position)| {
@@ -2143,7 +2140,7 @@ impl<W: LayoutElement> Monitor<W> {
                         window,
                         active: window.id() == active.id(),
                         direction,
-                        hidden,
+                        floating: floating_window,
                     })
                 })
                 .collect(),
@@ -2240,9 +2237,26 @@ impl<W: LayoutElement> Monitor<W> {
             let surface = caption_background(accent, ws.options.layout.background_color, false);
             let scale = self.scale.fractional_scale();
             for (title, label) in titles.into_iter().zip(&self.strip_labels) {
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let status = if title.floating {
+                    Some(if ws.is_floating_visible() {
+                        "Floating"
+                    } else {
+                        "Floating · Hidden"
+                    })
+                } else if hovered && !ws.floating().is_empty() && ws.is_floating_visible() {
+                    Some("Show tiled windows")
+                } else {
+                    match title.direction {
+                        Some(true) => Some("Offscreen left"),
+                        Some(false) => Some("Offscreen right"),
+                        None if !ws.floating().is_empty() => Some("Tiled"),
+                        None => None,
+                    }
+                };
                 let background = if title.active {
                     accent
-                } else if pointer.is_some_and(|point| title.rect.contains(point)) {
+                } else if hovered {
                     tint_caption(surface, accent)
                 } else {
                     surface
@@ -2253,7 +2267,7 @@ impl<W: LayoutElement> Monitor<W> {
                     background,
                     LabelKind::StripButton {
                         direction: title.direction,
-                        hidden: title.hidden,
+                        status,
                     },
                     title.rect.size.w,
                     scale,
@@ -3123,14 +3137,33 @@ impl<W: LayoutElement> Monitor<W> {
                 ));
             };
             let groups = groups.filter(|_| group_alpha > 0.).map(|groups| {
-                groups.map(|group| {
-                    let group = group?;
-                    if group.range.is_empty() {
+                std::array::from_fn::<_, 3, _>(|index| {
+                    let group = groups[index].as_ref()?;
+                    let range = &group.range;
+                    if range.is_empty() {
                         return None;
                     }
+                    let leading = groups[..index]
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .next()
+                        .map_or(8., |previous| {
+                            ((range.start - previous.range.end) / 2. - 2.).clamp(2., 8.)
+                        });
+                    let trailing = groups[index + 1..]
+                        .iter()
+                        .flatten()
+                        .next()
+                        .map_or(8., |next| {
+                            ((next.range.start - range.end) / 2. - 2.).clamp(2., 8.)
+                        });
                     Rectangle::new(
-                        Point::from((group.range.start - 2., geo.loc.y - 37.)),
-                        Size::from((group.range.end - group.range.start + 4., geo.size.h + 37.)),
+                        Point::from((range.start - leading, geo.loc.y - 37.)),
+                        Size::from((
+                            range.end - range.start + leading + trailing,
+                            geo.size.h + 37.,
+                        )),
                     )
                     .intersection(self.overview_content())
                     .map(|rect| {
