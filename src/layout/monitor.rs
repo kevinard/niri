@@ -187,8 +187,13 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
-    scroll_actions: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
+    scroll_actions: [Option<ScrollAction<'a, W>>; 2],
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
+}
+
+struct ScrollAction<'a, W> {
+    rect: Rectangle<f64, Logical>,
+    destination: Option<&'a W>,
 }
 
 struct NavigationTitle<'a, W> {
@@ -1872,7 +1877,7 @@ impl<W: LayoutElement> Monitor<W> {
     fn scrolling_visible_span(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
         let bounds = self.scroll_clip(ws)?;
         if ws.id() == self.active_workspace_ref().id() {
-            return Some(Self::exclude_narrow_peeks(bounds, self.scroll_cues()));
+            return Some(Self::exclude_narrow_peeks(bounds, &self.scroll_cues()));
         }
         Some(bounds)
     }
@@ -1898,12 +1903,12 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn exclude_narrow_peeks(
         mut bounds: Range<f64>,
-        [left, right]: [Option<ScrollCue<'_, W>>; 2],
+        [left, right]: &[Option<ScrollCue<'_, W>>; 2],
     ) -> Range<f64> {
-        if let Some(edge) = left.and_then(|cue| cue.clipped_column_edge) {
+        if let Some(edge) = left.as_ref().and_then(|cue| cue.clipped_column_edge) {
             bounds.start = bounds.start.max(edge);
         }
-        if let Some(edge) = right.and_then(|cue| cue.clipped_column_edge) {
+        if let Some(edge) = right.as_ref().and_then(|cue| cue.clipped_column_edge) {
             bounds.end = bounds.end.min(edge);
         }
         bounds
@@ -1999,11 +2004,18 @@ impl<W: LayoutElement> Monitor<W> {
                 let width = width.min(space.floor().max(36.));
                 // Keep the live strip during a gesture. Reveal the resting control
                 // as the camera approaches its final position.
-                let card = card_progress > 0.
-                    && unclipped
+                let can_clip = card_progress > 0. && unclipped;
+                let card = can_clip
                     && width >= 144.
                     && self.working_area.size.h >= SCROLL_CARD_HEIGHT
                     && exposed < column.width() * 0.60;
+                // The footer already identifies the destination. Avoid leaving a
+                // sliver with detached titlebar controls when a card cannot fit.
+                let hide_peek = card
+                    || (self.navigation_strip_top().is_some()
+                        && can_clip
+                        && exposed > 0.
+                        && exposed < (column.width() * 0.30).min(168.));
                 let compact = !card && width < 102.;
                 let width = if compact && card_progress == 1. {
                     ((bounds.end - bounds.start) / 4.).floor().clamp(36., 182.)
@@ -2061,7 +2073,7 @@ impl<W: LayoutElement> Monitor<W> {
                 ScrollCue {
                     rect,
                     destination: column.active_window(),
-                    clipped_column_edge: card.then(|| {
+                    clipped_column_edge: hide_peek.then(|| {
                         let boundary = if left { bounds.start } else { bounds.end };
                         boundary + (edge - boundary) * card_progress
                     }),
@@ -2103,7 +2115,8 @@ impl<W: LayoutElement> Monitor<W> {
             .columns_with_render_positions()
             .map(|(column, position)| (column.id(), position))
             .collect();
-        let visible = Self::exclude_narrow_peeks(bounds.clone(), self.scroll_cues_for(ws, &bounds));
+        let cues = self.scroll_cues_for(ws, &bounds);
+        let visible = Self::exclude_narrow_peeks(bounds.clone(), &cues);
         let pixel = 1. / self.scale.fractional_scale();
         let mut windows = scrolling
             .columns()
@@ -2203,11 +2216,13 @@ impl<W: LayoutElement> Monitor<W> {
         let layer_action = layer_destination.and_then(|window| {
             button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
         });
-        let scroll_actions = if reserve_scroll {
-            let [left, right] = self.scroll_cues_for(ws, &bounds);
+        let [left, right] = cues;
+        let scroll_actions = if reserve_scroll && (left.is_some() || right.is_some()) {
             [(x - scroll_slot, left), (x + strip_width + gap, right)].map(|(x, cue)| {
-                let cue = cue?;
-                button(x, scroll_width).map(|rect| (rect, cue.destination))
+                button(x, scroll_width).map(|rect| ScrollAction {
+                    rect,
+                    destination: cue.map(|cue| cue.destination),
+                })
             })
         } else {
             [None, None]
@@ -2284,18 +2299,15 @@ impl<W: LayoutElement> Monitor<W> {
                 })
         };
         let (_, preview) = previews().find(|(id, _)| *id == window.id())?;
-        let width = preview.size.w.min(216.);
-        if width < 174. {
-            return None;
-        }
+        let area = self.overview_content();
+        let bottom = previews()
+            .map(|(_, preview)| preview.loc.y + preview.size.h)
+            .reduce(f64::max)?;
+        let width = 216.;
         let rect = Rectangle::new(
-            Point::from((
-                preview.loc.x + (preview.size.w - width) / 2.,
-                preview.loc.y + preview.size.h + 7.,
-            )),
+            Point::from((area.loc.x + (area.size.w - width) / 2., bottom + 7.)),
             Size::from((width, 28.)),
         );
-        let area = self.overview_content();
         let fits = |part: Rectangle<f64, Logical>| {
             part.loc.x >= area.loc.x
                 && part.loc.y >= area.loc.y
@@ -2333,8 +2345,8 @@ impl<W: LayoutElement> Monitor<W> {
                         .scroll_actions
                         .into_iter()
                         .flatten()
-                        .find(|(rect, _)| rect.contains(position))
-                        .map(|(_, window)| window)
+                        .find(|action| action.rect.contains(position))
+                        .and_then(|action| action.destination)
                 });
         }
         self.scroll_cues()
@@ -2522,9 +2534,12 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             for (index, action) in strip.scroll_actions.into_iter().enumerate() {
-                let Some((rect, _)) = action else { continue };
+                let Some(ScrollAction { rect, destination }) = action else {
+                    continue;
+                };
                 let left = index == 0;
-                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let hovered =
+                    destination.is_some() && pointer.is_some_and(|point| rect.contains(point));
                 let background = if hovered {
                     tint_caption(surface, accent)
                 } else {
@@ -2542,7 +2557,7 @@ impl<W: LayoutElement> Monitor<W> {
                     rect.size.w,
                     scale,
                     rect.loc,
-                    1.,
+                    if destination.is_some() { 1. } else { 0.48 },
                 ) {
                     draw(label);
                 }
@@ -2837,7 +2852,7 @@ impl<W: LayoutElement> Monitor<W> {
         let view = ws.working_area();
         let bounds = view.loc.x..view.loc.x + view.size.w;
         let bounds = if ws.options.layout.clip_scroll_to_work_area {
-            Self::exclude_narrow_peeks(bounds.clone(), self.scroll_cues_for(ws, &bounds))
+            Self::exclude_narrow_peeks(bounds.clone(), &self.scroll_cues_for(ws, &bounds))
         } else {
             bounds
         };
@@ -3489,12 +3504,6 @@ impl<W: LayoutElement> Monitor<W> {
                             .map(|(tile, pos)| geo.loc.y + (pos.y + tile.tile_size().h) * zoom)
                             .reduce(f64::max)
                             .unwrap_or(geo.loc.y + geo.size.h);
-                        let bottom = self
-                            .overview_command()
-                            .filter(|(_, window)| ws.is_floating(window.id()))
-                            .map_or(bottom, |(command, _)| {
-                                bottom.max(command.loc.y + command.size.h)
-                            });
                         let top = geo.loc.y - 37.;
                         let backing = Rectangle::new(
                             Point::from((group.loc.x - 6., top)),
@@ -3516,7 +3525,7 @@ impl<W: LayoutElement> Monitor<W> {
             let fade = if !active && !ws.has_windows_or_name() {
                 group_alpha
             } else if groups.is_some() {
-                0.75 * group_alpha
+                0.45 * group_alpha
             } else {
                 0.
             };
