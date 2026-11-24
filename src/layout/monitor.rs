@@ -2086,7 +2086,7 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     crop_bounds
                 };
-                if pass == 3 && let Some(bounds) = self.scroll_clip(ws) {
+                if let Some(bounds) = (pass == 3).then(|| self.scroll_clip(ws)).flatten() {
                     let left = ((bounds.start - geo.loc.x) * scale).ceil() as i32;
                     let right = ((bounds.end - geo.loc.x) * scale).floor() as i32;
                     crop_bounds.loc.x = left;
