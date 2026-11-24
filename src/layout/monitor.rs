@@ -2552,7 +2552,12 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             for (index, action) in strip.scroll_actions.into_iter().enumerate() {
-                let Some(ScrollAction { rect, count, .. }) = action else {
+                let Some(ScrollAction {
+                    rect,
+                    count,
+                    destination,
+                }) = action
+                else {
                     continue;
                 };
                 let left = index == 0;
@@ -2574,6 +2579,31 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(label);
+                }
+                if hovered {
+                    let width = 228.;
+                    let x = if left {
+                        rect.loc.x + rect.size.w + 8.
+                    } else {
+                        rect.loc.x - width - 8.
+                    };
+                    let y = rect.loc.y + (rect.size.h - STRIP_BUTTON_HEIGHT) / 2.;
+                    if let Some(label) = self.additional_scroll_cue_labels[index].render(
+                        renderer.as_gles_renderer(),
+                        navigation_title(destination, target, "Window"),
+                        surface,
+                        LabelKind::StripButton {
+                            direction: None,
+                            status: Some("Click to show window"),
+                            outlined: true,
+                        },
+                        width,
+                        scale,
+                        Point::from((x, y)),
+                        1.,
+                    ) {
+                        draw(label);
+                    }
                 }
             }
             return;
@@ -3070,7 +3100,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let surface = caption_background(accent, backdrop, false);
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
-                    ("← →  Select     Tab  Switch layer", 251.)
+                    ("← →  Select     Tab  Tiled / floating", 273.)
                 } else {
                     ("← →  Select", 103.)
                 };
