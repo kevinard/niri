@@ -42,12 +42,14 @@ pub(super) enum LabelKind {
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
+        offscreen: bool,
     },
     LayerAction {
         show: bool,
     },
     Preview {
         badge: Option<&'static str>,
+        current: bool,
     },
     Button {
         align_right: bool,
@@ -420,6 +422,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
+        LabelKind::StripButton {
+            offscreen: true, ..
+        } => (max_width, STRIP_BUTTON_HEIGHT - 6.),
         LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
             (max_width, STRIP_BUTTON_HEIGHT)
         }
@@ -520,7 +525,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 | LabelKind::WindowNavigation { .. }
         ) {
             cr.fill_preserve()?;
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.28);
+            let stroke_alpha = if key.kind == LabelKind::StripTray {
+                0.14
+            } else {
+                0.28
+            };
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
             cr.set_line_width(1.);
             cr.stroke()?;
         } else {
@@ -614,9 +624,21 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             LabelKind::StripButton { status, .. } => status,
             _ => None,
         };
+        let offscreen = matches!(
+            key.kind,
+            LabelKind::StripButton {
+                offscreen: true,
+                ..
+            }
+        );
         if let Some(status) = status {
             let detail = layout(&cr, key);
-            detail.set_font_description(Some(&FontDescription::from_string("sans-serif 13px")));
+            let font = if offscreen {
+                "sans-serif 12px"
+            } else {
+                "sans-serif 13px"
+            };
+            detail.set_font_description(Some(&FontDescription::from_string(font)));
             detail.set_text(status);
             detail.set_ellipsize(EllipsizeMode::End);
             detail.set_width((title_width * f64::from(pango::SCALE)) as i32);
@@ -624,18 +646,23 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.93);
             cr.move_to(
                 title_x + (title_width - f64::from(w)) / 2.,
-                height - f64::from(h) - 4.,
+                height - f64::from(h) - if offscreen { 2. } else { 4. },
             );
             pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
-        if let LabelKind::Preview { badge: Some(badge) } = key.kind {
+        if let LabelKind::Preview {
+            badge: Some(badge),
+            current,
+        } = key.kind
+        {
             let action = layout(&cr, key);
             action
                 .set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
             action.set_text(badge);
             let (w, h) = action.pixel_size();
-            let control_width = (f64::from(w) + 14.).max(22.);
+            let dot_space = if current { 11. } else { 0. };
+            let control_width = (f64::from(w) + 14. + dot_space).max(22.);
             let right = width - 4.;
             let left = right - control_width;
             title_width -= control_width;
@@ -660,8 +687,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.set_line_width(1.);
             cr.stroke()?;
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            if current {
+                cr.arc(left + 9., height / 2., 3., 0., std::f64::consts::TAU);
+                cr.fill()?;
+            }
             cr.move_to(
-                left + (control_width - f64::from(w)) / 2.,
+                left + (control_width - f64::from(w) + dot_space) / 2.,
                 (height - f64::from(h)) / 2.,
             );
             pangocairo::functions::show_layout(&cr, &action);
@@ -676,7 +707,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        let y = if status.is_some() {
+        let y = if offscreen {
+            1.
+        } else if status.is_some() {
             3.
         } else {
             (height - f64::from(h)) / 2.

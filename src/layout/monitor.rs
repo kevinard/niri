@@ -364,6 +364,14 @@ fn navigation_title<W: LayoutElement>(window: &W, target: RenderTarget, fallback
     })
 }
 
+fn window_title_suffix(title: &str) -> &str {
+    title
+        .rsplit_once(" — ")
+        .map(|(_, suffix)| suffix.trim())
+        .filter(|suffix| !suffix.is_empty())
+        .unwrap_or(title)
+}
+
 fn visible_extent<'a, W: LayoutElement + 'a>(
     tiles: impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)>,
 ) -> Option<Range<f64>> {
@@ -2252,17 +2260,18 @@ impl<W: LayoutElement> Monitor<W> {
             )
             .map(|rect| (rect, window))
         });
-        let tray = if on_desktop > 0 {
-            uncovered(Rectangle::new(
-                Point::from((center_x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
-                Size::from((
-                    group_width(on_desktop) + 2. * STRIP_TRAY_PADDING,
-                    STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
-                )),
-            ))
+        let (tray_x, tray_width) = if left > 0 || right > 0 {
+            (left_x, available)
         } else {
-            None
+            (center_x, center_width)
         };
+        let tray = uncovered(Rectangle::new(
+            Point::from((tray_x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
+            Size::from((
+                tray_width + 2. * STRIP_TRAY_PADDING,
+                STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
+            )),
+        ));
         Some(NavigationStrip {
             tray,
             titles,
@@ -2461,8 +2470,16 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
-            for (title, label) in strip.titles.into_iter().zip(&self.strip_labels) {
+            let titles: Vec<_> = strip
+                .titles
+                .iter()
+                .map(|title| navigation_title(title.window, target, "Window"))
+                .collect();
+            for (index, (title, label)) in
+                strip.titles.into_iter().zip(&self.strip_labels).enumerate()
+            {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let offscreen = title.direction.is_some();
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2473,14 +2490,21 @@ impl<W: LayoutElement> Monitor<W> {
                     Some("Hides floating windows")
                 } else {
                     match title.direction {
-                        Some(true) => Some("←  Show"),
-                        Some(false) => Some("Show  →"),
+                        Some(true) => Some("←  Scroll to window"),
+                        Some(false) => Some("Scroll to window  →"),
                         None if hovered && has_layer_action && floating_visible => {
                             Some("Reveal tiled windows")
                         }
                         _ => None,
                     }
                 };
+                let name = &titles[index];
+                let suffix = window_title_suffix(name);
+                let distinct = titles
+                    .iter()
+                    .enumerate()
+                    .all(|(other, name)| other == index || window_title_suffix(name) != suffix);
+                let name = if !offscreen && distinct { suffix } else { name };
                 let background = if title.active {
                     accent
                 } else if hovered {
@@ -2490,15 +2514,16 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
-                    navigation_title(title.window, target, "Window"),
+                    name.to_owned(),
                     background,
                     LabelKind::StripButton {
                         status,
                         outlined: !title.active,
+                        offscreen,
                     },
                     title.rect.size.w,
                     scale,
-                    title.rect.loc,
+                    title.rect.loc + Point::from((0., if offscreen { 3. } else { 0. })),
                     1.,
                 ) {
                     draw(label);
@@ -2532,7 +2557,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
             // Put the shared surface behind the window targets.
             if let Some(rect) = strip.tray {
-                let background = Color { a: 0.95, ..surface };
+                let background = Color { a: 0.73, ..surface };
                 if let Some(tray) = self.strip_tray.render(
                     renderer.as_gles_renderer(),
                     String::new(),
@@ -3189,7 +3214,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         title,
                         background,
-                        LabelKind::Preview { badge },
+                        LabelKind::Preview { badge, current },
                         label.size.w,
                         scale,
                         label.loc,
