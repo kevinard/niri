@@ -1,4 +1,5 @@
 use std::cmp::min;
+use std::collections::HashMap;
 use std::iter::zip;
 use std::ops::Range;
 use std::rc::Rc;
@@ -1983,12 +1984,12 @@ impl<W: LayoutElement> Monitor<W> {
         let bounds = self.scroll_clip(ws)?;
         let scrolling = ws.scrolling();
         let active = scrolling.active_column()?.id();
-        let columns = scrolling
+        let columns = scrolling.columns().collect::<Vec<_>>();
+        let active_index = columns.iter().position(|column| column.id() == active)?;
+        let positions: HashMap<_, _> = scrolling
             .columns_with_render_positions()
-            .collect::<Vec<_>>();
-        let active_index = columns
-            .iter()
-            .position(|(column, _)| column.id() == active)?;
+            .map(|(column, position)| (column.id(), position))
+            .collect();
         let gap = 8.;
         let available = bounds.end - bounds.start - 24.;
         let capacity = ((available + gap) / 184.).floor() as usize;
@@ -2012,7 +2013,8 @@ impl<W: LayoutElement> Monitor<W> {
             columns[first..first + count]
                 .iter()
                 .enumerate()
-                .map(|(index, (column, position))| {
+                .map(|(index, column)| {
+                    let position = positions[&column.id()];
                     let direction = if position.x + column.width() <= visible.start + pixel {
                         Some(true)
                     } else if position.x >= visible.end - pixel {
