@@ -452,3 +452,16 @@ blur {
     saturation 1.5
 }
 ```
+
+### Framed overview workspaces
+
+```kdl
+overview {
+    framed-workspaces
+}
+```
+
+Centers the overview in the usable area and keeps scrolling window previews
+clear of reserved side panels. Each visible workspace has a full-size caption
+with its number and configured name. The scrolling layout stays available
+through the overview's usual gestures and shortcuts.
