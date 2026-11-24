@@ -18,7 +18,8 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
     LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
+    STRIP_BUTTON_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_STATUS_HEIGHT, STRIP_TRAY_HEIGHT,
+    STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -194,9 +195,14 @@ struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
     motion_status: Option<(Rectangle<f64, Logical>, bool)>,
-    edge_actions: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
+    edge_actions: [Option<NavigationArrow<'a, W>>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
+}
+
+struct NavigationArrow<'a, W> {
+    rect: Rectangle<f64, Logical>,
+    target: Option<&'a W>,
 }
 
 struct NavigationTitle<'a, W> {
@@ -206,6 +212,7 @@ struct NavigationTitle<'a, W> {
     active: bool,
     direction: Option<bool>,
     fully_visible: bool,
+    partly_visible: bool,
     floating: bool,
 }
 
@@ -2188,9 +2195,19 @@ impl<W: LayoutElement> Monitor<W> {
                 let clipped_left = (visible.start - x).max(0.);
                 let clipped_right = (x + column.width() - visible.end).max(0.);
                 let fully_visible = clipped_left.max(clipped_right) <= pixel;
+                let partly_visible =
+                    !fully_visible && clipped_left + clipped_right < column.width() - pixel;
                 let direction = (!fully_visible && window.id() != active.id())
                     .then_some(clipped_left >= clipped_right);
-                (window, direction, fully_visible, false, column.width(), x)
+                (
+                    window,
+                    direction,
+                    fully_visible,
+                    partly_visible,
+                    false,
+                    column.width(),
+                    x,
+                )
             })
             .collect::<Vec<_>>();
         let mut floating = ws
@@ -2203,6 +2220,7 @@ impl<W: LayoutElement> Monitor<W> {
                 tile.window(),
                 None,
                 false,
+                false,
                 true,
                 tile.tile_size().w,
                 position.x,
@@ -2211,6 +2229,7 @@ impl<W: LayoutElement> Monitor<W> {
         if windows.len() == 1 && floating.is_empty() {
             return None;
         }
+        let has_offscreen_windows = windows.iter().any(|(_, direction, ..)| direction.is_some());
 
         let active_index = windows
             .iter()
@@ -2243,12 +2262,12 @@ impl<W: LayoutElement> Monitor<W> {
         let button_space = (available - action_space - gaps).min(194. * count as f64);
         let widest_window = windows
             .iter()
-            .map(|(_, _, _, _, width, _)| *width)
+            .map(|(_, _, _, _, _, width, _)| *width)
             .fold(1., f64::max);
         let weight = |width: f64| width.max(widest_window * 0.55);
         let total_weight: f64 = windows
             .iter()
-            .map(|(_, _, _, _, width, _)| weight(*width))
+            .map(|(_, _, _, _, _, width, _)| weight(*width))
             .sum();
         let tabs_width = button_space + gaps;
         let tray_width = tabs_width + action_space;
@@ -2290,7 +2309,15 @@ impl<W: LayoutElement> Monitor<W> {
         let mut titles: Vec<_> = windows
             .iter()
             .filter_map(
-                |&(window, direction, fully_visible, floating, window_width, column_x)| {
+                |&(
+                    window,
+                    direction,
+                    fully_visible,
+                    partly_visible,
+                    floating,
+                    window_width,
+                    column_x,
+                )| {
                     let width = button_space * weight(window_width) / total_weight;
                     let x = next_x;
                     next_x += width + gap;
@@ -2321,6 +2348,7 @@ impl<W: LayoutElement> Monitor<W> {
                         active: window.id() == active.id(),
                         direction,
                         fully_visible,
+                        partly_visible,
                         floating,
                     })
                 },
@@ -2339,11 +2367,11 @@ impl<W: LayoutElement> Monitor<W> {
             Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
             Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
         ));
-        let edge_actions = if floating.is_empty() {
+        let edge_actions = if floating.is_empty() && has_offscreen_windows {
             [true, false].map(|left| {
                 let tray = tray?;
                 let mut targets = titles.iter().filter(|title| title.direction == Some(left));
-                let target = if left { targets.last() } else { targets.next() }?;
+                let target = if left { targets.last() } else { targets.next() };
                 let width = 30.;
                 let x = if left {
                     tray.loc.x - 6. - width
@@ -2353,7 +2381,10 @@ impl<W: LayoutElement> Monitor<W> {
                 if x < bounds.start || x + width > bounds.end {
                     return None;
                 }
-                Some((button(x, width)?, target.window))
+                Some(NavigationArrow {
+                    rect: button(x, width)?,
+                    target: target.map(|title| title.window),
+                })
             })
         } else {
             [None, None]
@@ -2391,16 +2422,16 @@ impl<W: LayoutElement> Monitor<W> {
             spans.into_iter().filter_map(viewport_mark).collect()
         };
         let motion_status = moving_left.and_then(|left| {
-            let first = titles.iter().find(|title| !title.floating)?.rect;
-            let last = titles.iter().rfind(|title| !title.floating)?.rect;
-            let bounds = uncovered(Rectangle::new(
-                Point::from((first.loc.x, y + STRIP_GROUP_BUTTON_HEIGHT)),
-                Size::from((
-                    last.loc.x + last.size.w - first.loc.x,
-                    STRIP_BUTTON_HEIGHT - STRIP_GROUP_BUTTON_HEIGHT,
+            let tray = tray?;
+            let width = tray.size.w.min(254.);
+            let rect = Rectangle::new(
+                Point::from((
+                    tray.loc.x + (tray.size.w - width) / 2.,
+                    y + STRIP_BUTTON_HEIGHT + 4.,
                 )),
-            ))?;
-            Some((bounds, left))
+                Size::from((width, STRIP_STATUS_HEIGHT)),
+            );
+            Some((uncovered(rect)?, left))
         });
         Some(NavigationStrip {
             tray,
@@ -2509,8 +2540,8 @@ impl<W: LayoutElement> Monitor<W> {
                         .edge_actions
                         .into_iter()
                         .flatten()
-                        .find(|(rect, _)| rect.contains(position))
-                        .map(|(_, window)| window)
+                        .find(|arrow| arrow.rect.contains(position))
+                        .and_then(|arrow| arrow.target)
                 })
                 .or_else(|| {
                     strip
@@ -2608,8 +2639,9 @@ impl<W: LayoutElement> Monitor<W> {
                     .edge_actions
                     .iter()
                     .flatten()
-                    .find(|(rect, _)| rect.contains(point))
-                    .map(|(_, window)| window.id())
+                    .find(|arrow| arrow.rect.contains(point))
+                    .and_then(|arrow| arrow.target)
+                    .map(|window| window.id())
             });
             for (rect, buffer) in strip.viewports.iter().zip(&self.strip_viewport_marks) {
                 let mut buffer = buffer.borrow_mut();
@@ -2687,7 +2719,10 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     FocusMarker::None
                 };
-                let background = if title.active {
+                let background = if title.active && strip.motion_status.is_some() && !title.floating
+                {
+                    direction_background
+                } else if title.active {
                     accent
                 } else if offscreen && hovered {
                     tint_caption(direction_background, accent)
@@ -2727,16 +2762,22 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     None
                 };
+                let verb = if title.partly_visible {
+                    "Scroll to"
+                } else {
+                    "Reveal"
+                };
                 let text = if fallback.is_some() {
                     let reveal = companion_hint.as_deref().unwrap_or("Moves into view");
-                    format!("Reveal {name}\n{reveal}")
+                    format!("{verb} {name}\n{reveal}")
                 } else if offscreen {
                     if let Some(hint) = companion_hint {
                         let mut rect = title.rect;
-                        rect.loc.y += STRIP_GROUP_BUTTON_HEIGHT;
+                        rect.loc.y += STRIP_BUTTON_HEIGHT + 4.;
+                        rect.size.h = STRIP_STATUS_HEIGHT;
                         hover_status = Some((rect, hint));
                     }
-                    format!("Reveal {name}")
+                    format!("{verb} {name}")
                 } else {
                     name.to_owned()
                 };
@@ -2759,12 +2800,16 @@ impl<W: LayoutElement> Monitor<W> {
                 .zip(&self.strip_edge_labels)
                 .enumerate()
             {
-                let Some((rect, _)) = edge else { continue };
-                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let Some(arrow) = edge else { continue };
+                let enabled = arrow.target.is_some();
+                let rect = arrow.rect;
+                let hovered = enabled && pointer.is_some_and(|point| rect.contains(point));
                 if let Some(arrow) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    if hovered {
+                    if !enabled {
+                        surface
+                    } else if hovered {
                         tint_caption(direction_background, accent)
                     } else {
                         direction_background
@@ -2776,7 +2821,7 @@ impl<W: LayoutElement> Monitor<W> {
                     rect.size.w,
                     scale,
                     rect.loc,
-                    1.,
+                    if enabled { 1. } else { 0.55 },
                 ) {
                     draw(arrow);
                 }
@@ -2808,19 +2853,28 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             let motion = strip.motion_status.map(|(rect, left)| {
+                let name = strip
+                    .titles
+                    .iter()
+                    .position(|title| title.active && !title.floating)
+                    .map(display_title);
+                let text = name.map_or_else(
+                    || "Scrolling tiles".to_owned(),
+                    |name| format!("Scrolling to {name}"),
+                );
                 let text = if left {
-                    "← Scrolling"
+                    format!("← {text}")
                 } else {
-                    "Scrolling →"
+                    format!("{text} →")
                 };
-                (rect, text.into())
+                (rect, text)
             });
             if let Some((rect, text)) = motion.or(hover_status) {
                 if let Some(caption) = self.strip_status_label.render(
                     renderer.as_gles_renderer(),
                     text,
                     surface,
-                    LabelKind::SharedScroll,
+                    LabelKind::StripStatus,
                     rect.size.w,
                     scale,
                     rect.loc,
@@ -3503,7 +3557,9 @@ impl<W: LayoutElement> Monitor<W> {
                     if title.trim().is_empty() {
                         return;
                     }
-                    let background = if desktop_focus {
+                    let background = if current {
+                        tint_caption(surface, accent)
+                    } else if desktop_focus {
                         accent
                     } else if selected {
                         tint_caption(surface, selection_color)
