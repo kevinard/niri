@@ -13,7 +13,7 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
-    caption_background, frame_radius, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
+    caption_background, frame_radius, tint_caption, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
     SCROLL_CARD_HEIGHT,
 };
 use super::scrolling::{Column, ColumnWidth};
@@ -1884,12 +1884,18 @@ impl<W: LayoutElement> Monitor<W> {
                     && width >= 144.
                     && self.working_area.size.h >= SCROLL_CARD_HEIGHT
                     && exposed < column.width() * 0.60;
+                let compact = !card && width < 102.;
+                let width = if compact && card_progress == 1. {
+                    ((bounds.end - bounds.start) / 4.).floor().clamp(36., 182.)
+                } else {
+                    width
+                };
                 let height = if card { SCROLL_CARD_HEIGHT } else { height };
                 let available = self.working_area.size.h - height;
                 let y = self.working_area.loc.y
                     + if card {
                         available * 0.30
-                    } else if space < 36. {
+                    } else if compact {
                         (available - inset).max(0.)
                     } else {
                         available.min(72.)
@@ -2026,18 +2032,13 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         renderer: &mut R,
         target: RenderTarget,
+        pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let ws = self.active_workspace_ref();
         let accent = ws.options.layout.border.active_color;
         let surface = caption_background(accent, ws.options.layout.background_color, false);
-        let mix = |base, highlight| base * 0.76 + highlight * 0.24;
-        let color = niri_config::Color::new_unpremul(
-            mix(surface.r, accent.r),
-            mix(surface.g, accent.g),
-            mix(surface.b, accent.b),
-            1.,
-        );
+        let color = tint_caption(surface, accent);
         let Some(bounds) = self.scroll_clip(ws) else {
             return;
         };
@@ -2086,7 +2087,11 @@ impl<W: LayoutElement> Monitor<W> {
             if let Some(label) = label.render(
                 renderer.as_gles_renderer(),
                 text,
-                color,
+                if pointer.is_some_and(|point| cue.rect.contains(point)) {
+                    accent
+                } else {
+                    color
+                },
                 if card {
                     LabelKind::WindowNavigation {
                         left,
@@ -2111,7 +2116,11 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(label) = self.additional_scroll_cue_labels[index].render(
                     renderer.as_gles_renderer(),
                     navigation_title(window, target, "Another window"),
-                    color,
+                    if pointer.is_some_and(|point| rect.contains(point)) {
+                        accent
+                    } else {
+                        color
+                    },
                     LabelKind::WindowNavigation {
                         left,
                         offset: 2,
@@ -2349,6 +2358,7 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         renderer: &mut R,
         target: RenderTarget,
+        pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let Some(progress) = self.overview_progress_value() else {
@@ -2364,6 +2374,9 @@ impl<W: LayoutElement> Monitor<W> {
         let area = self.overview_content();
         let left = area.loc.x;
         let right = area.loc.x + area.size.w;
+        let hovered = pointer
+            .and_then(|point| self.window_under(point))
+            .map(|(window, _)| window.id());
         let contains_y = |y, height| y >= area.loc.y && y + height <= area.loc.y + area.size.h;
         let mut draw = |element| {
             let element = RescaleRenderElement::from_element(element, Point::default(), 1.);
@@ -2475,6 +2488,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
+                let hovered = hovered.is_some_and(|id| id == window.id());
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -2484,11 +2498,19 @@ impl<W: LayoutElement> Monitor<W> {
                     if title.trim().is_empty() {
                         return;
                     }
+                    let background = caption_background(accent, backdrop, selected);
+                    let background = if hovered && !selected {
+                        tint_caption(background, accent)
+                    } else {
+                        background
+                    };
                     if let Some(label) = tile.overview_label.render(
                         renderer.as_gles_renderer(),
                         title,
-                        caption_background(accent, backdrop, selected),
-                        LabelKind::Preview,
+                        background,
+                        LabelKind::Preview {
+                            show_action: hovered && label.size.w >= 160.,
+                        },
                         label.size.w,
                         scale,
                         label.loc,
@@ -2505,6 +2527,7 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         mut ctx: RenderCtx<R>,
         focus_ring: bool,
+        pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Monitor::render_workspaces");
@@ -2516,9 +2539,9 @@ impl<W: LayoutElement> Monitor<W> {
         let zoom = self.overview_zoom();
 
         if self.options.overview.framed_workspaces {
-            self.render_overview_captions(ctx.renderer, ctx.target, push);
+            self.render_overview_captions(ctx.renderer, ctx.target, pointer, push);
         }
-        self.render_scroll_cues(ctx.renderer, ctx.target, push);
+        self.render_scroll_cues(ctx.renderer, ctx.target, pointer, push);
 
         let insert_hint_render_loc = self
             .insert_hint_render_loc
