@@ -2565,7 +2565,7 @@ impl<W: LayoutElement> Monitor<W> {
                     surface
                 };
                 let kind = if let Some(left) = title.direction {
-                    LabelKind::ScrollWindow { left }
+                    LabelKind::ScrollWindow { left, hovered }
                 } else {
                     LabelKind::StripButton {
                         status,
