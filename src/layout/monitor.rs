@@ -187,8 +187,14 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
-    scroll_actions: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
+    scroll_actions: [Option<ScrollAction<'a, W>>; 2],
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
+}
+
+struct ScrollAction<'a, W> {
+    rect: Rectangle<f64, Logical>,
+    window: &'a W,
+    count: usize,
 }
 
 struct NavigationTitle<'a, W> {
@@ -2154,13 +2160,10 @@ impl<W: LayoutElement> Monitor<W> {
         let gap = 8.;
         let area = self.working_area;
         let inset = 12.;
-        let scroll_width = 184.;
+        let scroll_width = 118.;
+        let scroll_slot = scroll_width + gap;
         let reserve_scroll = area.size.w >= 840. && floating.is_empty() && windows.len() > 1;
-        let scroll_space = if reserve_scroll {
-            2. * (scroll_width + 16.)
-        } else {
-            0.
-        };
+        let scroll_space = if reserve_scroll { 2. * scroll_slot } else { 0. };
         let available = area.size.w - 2. * inset - scroll_space;
         let capacity = ((available + gap) / 164.).floor() as usize;
         let count = windows
@@ -2231,18 +2234,32 @@ impl<W: LayoutElement> Monitor<W> {
         });
         let [left, right] = cues;
         let scroll_actions = if reserve_scroll {
-            let positions = [
-                (bounds.start + inset, left),
-                (bounds.end - inset - scroll_width, right),
-            ];
-            positions.map(|(x, cue)| button(x, scroll_width).zip(cue.map(|cue| cue.destination)))
+            let positions = [(x - scroll_slot, left), (x + strip_width + gap, right)];
+            positions.map(|(x, cue)| {
+                let cue = cue?;
+                button(x, scroll_width).map(|rect| ScrollAction {
+                    rect,
+                    window: cue.destination,
+                    count: cue.offscreen_columns,
+                })
+            })
         } else {
             [None, None]
         };
+        let (tray_left, tray_right) =
+            scroll_actions
+                .iter()
+                .flatten()
+                .fold((x, x + titles_width), |(left, right), action| {
+                    (
+                        left.min(action.rect.loc.x),
+                        right.max(action.rect.loc.x + action.rect.size.w),
+                    )
+                });
         let tray = uncovered(Rectangle::new(
-            Point::from((x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
+            Point::from((tray_left - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
             Size::from((
-                titles_width + 2. * STRIP_TRAY_PADDING,
+                tray_right - tray_left + 2. * STRIP_TRAY_PADDING,
                 STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
             )),
         ));
@@ -2357,8 +2374,8 @@ impl<W: LayoutElement> Monitor<W> {
                         .scroll_actions
                         .into_iter()
                         .flatten()
-                        .find(|(rect, _)| rect.contains(position))
-                        .map(|(_, window)| window)
+                        .find(|action| action.rect.contains(position))
+                        .map(|action| action.window)
                 });
         }
         self.scroll_cues()
@@ -2446,6 +2463,12 @@ impl<W: LayoutElement> Monitor<W> {
             let has_layer_action = strip.layer_action.is_some();
             let has_tray = strip.tray.is_some();
             let floating_visible = ws.is_floating_visible();
+            let scroll_destination = strip
+                .scroll_actions
+                .iter()
+                .flatten()
+                .find(|action| pointer.is_some_and(|point| action.rect.contains(point)))
+                .map(|action| action.window.id());
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
@@ -2457,7 +2480,13 @@ impl<W: LayoutElement> Monitor<W> {
             };
             for (title, label) in strip.titles.into_iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
-                let status = if title.floating {
+                let next = scroll_destination.is_some_and(|id| id == title.window.id());
+                let has_scroll = title
+                    .direction
+                    .is_some_and(|left| strip.scroll_actions[usize::from(!left)].is_some());
+                let status = if next {
+                    Some("Next window")
+                } else if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
                     } else {
@@ -2467,22 +2496,17 @@ impl<W: LayoutElement> Monitor<W> {
                     Some("Hides floating windows")
                 } else {
                     match title.direction {
-                        Some(left) => Some(if strip.scroll_actions[usize::from(!left)].is_some() {
-                            "Offscreen"
-                        } else if left {
-                            "Offscreen left"
-                        } else {
-                            "Offscreen right"
-                        }),
+                        Some(true) if !has_scroll => Some("Offscreen left"),
+                        Some(false) if !has_scroll => Some("Offscreen right"),
                         None if hovered && has_layer_action && floating_visible => {
                             Some("Reveal tiled windows")
                         }
-                        None => None,
+                        _ => None,
                     }
                 };
                 let background = if title.active {
                     accent
-                } else if hovered {
+                } else if hovered || next {
                     tint_caption(surface, accent)
                 } else if has_tray {
                     Color { a: 0., ..surface }
@@ -2494,9 +2518,7 @@ impl<W: LayoutElement> Monitor<W> {
                     navigation_title(title.window, target, "Window"),
                     background,
                     LabelKind::StripButton {
-                        direction: title
-                            .direction
-                            .filter(|&left| strip.scroll_actions[usize::from(!left)].is_none()),
+                        direction: title.direction.filter(|_| !has_scroll),
                         status,
                         outlined: !has_tray,
                     },
@@ -2534,6 +2556,39 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
+            for (index, action) in strip.scroll_actions.into_iter().enumerate() {
+                let Some(ScrollAction { rect, count, .. }) = action else {
+                    continue;
+                };
+                let left = index == 0;
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let base = tint_caption(surface, accent);
+                let background = if hovered {
+                    tint_caption(base, accent)
+                } else {
+                    base
+                };
+                if let Some(label) = self.scroll_cue_labels[index].render(
+                    renderer.as_gles_renderer(),
+                    if count == 1 {
+                        "1 window".into()
+                    } else {
+                        format!("{count} windows")
+                    },
+                    background,
+                    LabelKind::StripButton {
+                        direction: Some(left),
+                        status: Some(if left { "Scroll left" } else { "Scroll right" }),
+                        outlined: true,
+                    },
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(label);
+                }
+            }
             // Put the shared surface behind the window targets.
             if let Some(rect) = strip.tray {
                 let background = Color { a: 0.95, ..surface };
@@ -2548,35 +2603,6 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(tray);
-                }
-            }
-            for (index, action) in strip.scroll_actions.into_iter().enumerate() {
-                let Some((rect, destination)) = action else {
-                    continue;
-                };
-                let left = index == 0;
-                let hovered = pointer.is_some_and(|point| rect.contains(point));
-                let base = tint_caption(surface, accent);
-                let background = if hovered {
-                    tint_caption(base, accent)
-                } else {
-                    base
-                };
-                if let Some(label) = self.scroll_cue_labels[index].render(
-                    renderer.as_gles_renderer(),
-                    navigation_title(destination, target, "Window"),
-                    background,
-                    LabelKind::StripButton {
-                        direction: Some(left),
-                        status: Some(if left { "Scroll left" } else { "Scroll right" }),
-                        outlined: true,
-                    },
-                    rect.size.w,
-                    scale,
-                    rect.loc,
-                    1.,
-                ) {
-                    draw(label);
                 }
             }
             return;
@@ -3073,7 +3099,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let surface = caption_background(accent, backdrop, false);
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
-                    ("← →  Select     Tab  Tiled / floating", 273.)
+                    ("← →  Select     Tab  Choose tiled or floating", 312.)
                 } else {
                     ("← →  Select", 103.)
                 };
