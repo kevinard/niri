@@ -196,7 +196,7 @@ struct NavigationStrip<'a, W> {
 
 struct ScrollAction<'a, W> {
     rect: Rectangle<f64, Logical>,
-    destination: Option<&'a W>,
+    destination: &'a W,
     count: usize,
 }
 
@@ -2222,18 +2222,19 @@ impl<W: LayoutElement> Monitor<W> {
         let [left, right] = cues;
         let area = self.working_area;
         let inset = scroll_handle_inset(area);
-        let scroll_actions = if inset > 0. && (left.is_some() || right.is_some()) {
+        let scroll_actions = if inset > 0. {
             let y = (area.loc.y + top - SCROLL_HANDLE_HEIGHT) / 2.;
-            let positions = [(area.loc.x + 2., left), (bounds.end + 2., right)];
+            let positions = [(area.loc.x + 4., left), (bounds.end + 4., right)];
             positions.map(|(x, cue)| {
+                let cue = cue?;
                 let rect = Rectangle::new(
                     Point::from((x, y)),
-                    Size::from((inset - 4., SCROLL_HANDLE_HEIGHT)),
+                    Size::from((inset - 8., SCROLL_HANDLE_HEIGHT)),
                 );
                 uncovered(rect).map(|rect| ScrollAction {
                     rect,
-                    destination: cue.as_ref().map(|cue| cue.destination),
-                    count: cue.map_or(0, |cue| cue.offscreen_columns),
+                    destination: cue.destination,
+                    count: cue.offscreen_columns,
                 })
             })
         } else {
@@ -2358,7 +2359,7 @@ impl<W: LayoutElement> Monitor<W> {
                         .into_iter()
                         .flatten()
                         .find(|action| action.rect.contains(position))
-                        .and_then(|action| action.destination)
+                        .map(|action| action.destination)
                 });
         }
         self.scroll_cues()
@@ -2551,17 +2552,11 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             for (index, action) in strip.scroll_actions.into_iter().enumerate() {
-                let Some(ScrollAction {
-                    rect,
-                    destination,
-                    count,
-                }) = action
-                else {
+                let Some(ScrollAction { rect, count, .. }) = action else {
                     continue;
                 };
                 let left = index == 0;
-                let hovered =
-                    destination.is_some() && pointer.is_some_and(|point| rect.contains(point));
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
                 let background = if hovered {
                     tint_caption(surface, accent)
                 } else {
@@ -2569,17 +2564,13 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(label) = self.scroll_cue_labels[index].render(
                     renderer.as_gles_renderer(),
-                    if count > 0 {
-                        count.to_string()
-                    } else {
-                        String::new()
-                    },
+                    format!("{count} {}", if left { "left" } else { "right" }),
                     background,
                     LabelKind::ScrollHandle { left },
                     rect.size.w,
                     scale,
                     rect.loc,
-                    if destination.is_some() { 1. } else { 0.48 },
+                    1.,
                 ) {
                     draw(label);
                 }
@@ -3044,7 +3035,8 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            if let Some((rect, window)) = active.then(|| self.overview_command()).flatten() {
+            let command = active.then(|| self.overview_command()).flatten();
+            if let Some((rect, window)) = command {
                 let surface = caption_background(accent, backdrop, false);
                 let hovered = pointer.is_some_and(|point| rect.contains(point));
                 let background = if hovered {
@@ -3081,8 +3073,12 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     ("← →  Select", 103.)
                 };
-                let hint_x = right - OVERVIEW_INSET - width;
-                if hint_x >= x + 235. {
+                let header = Point::from((right - OVERVIEW_INSET - width, top));
+                let position = command
+                    .map(|(rect, _)| Point::from((rect.loc.x - 12. - width, rect.loc.y)))
+                    .filter(|point| point.x >= x)
+                    .or_else(|| (header.x >= x + 235.).then_some(header));
+                if let Some(position) = position {
                     if let Some(label) = self.overview_shortcuts_label.render(
                         renderer.as_gles_renderer(),
                         shortcuts.into(),
@@ -3090,7 +3086,7 @@ impl<W: LayoutElement> Monitor<W> {
                         LabelKind::GroupHeading,
                         width,
                         scale,
-                        Point::from((hint_x, top)),
+                        position,
                         label_alpha,
                     ) {
                         draw(MonitorInnerRenderElement::Caption(label));
@@ -3103,7 +3099,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .then(|| self.overview_groups(ws, geo, progress))
                 .flatten()
             {
-                let y = geo.loc.y - 33.;
+                let y = geo.loc.y - 36.;
                 if contains_y(y, 28.) {
                     let surface = caption_background(accent, backdrop, false);
                     for (group, label) in
@@ -3118,7 +3114,7 @@ impl<W: LayoutElement> Monitor<W> {
                             renderer.as_gles_renderer(),
                             group.title.into(),
                             surface,
-                            LabelKind::GroupHeading,
+                            LabelKind::GroupTitle,
                             group.minimum_width,
                             scale,
                             Point::from((group.range.start, y)),
