@@ -1803,7 +1803,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let (left, right) = self.overview_horizontal_bounds();
         let zoom = self.overview_zoom();
-        let x = |x| (geo.loc.x + zoom * x).clamp(left, right);
+        let x = |x: f64| (geo.loc.x + zoom * x).clamp(left, right);
         Some((x(extent.start)..x(extent.end), x(start)..x(end)))
     }
 
