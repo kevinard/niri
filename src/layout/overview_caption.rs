@@ -1,14 +1,16 @@
 use std::cell::RefCell;
 
+use niri_config::Color;
 use pango::{EllipsizeMode, FontDescription};
 use pangocairo::cairo::{self, ImageSurface};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{ContextId, Renderer};
-use smithay::utils::{Logical, Point, Transform};
+use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
 
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
+use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 
 const HEIGHT: f64 = 28.;
@@ -17,6 +19,7 @@ const PADDING: f64 = 10.;
 #[derive(Debug, Default)]
 pub(super) struct OverviewCaption {
     texture: RefCell<Option<(Key, Option<TextureBuffer<GlesTexture>>)>>,
+    frame: RefCell<[SolidColorBuffer; 5]>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -35,6 +38,7 @@ impl OverviewCaption {
         renderer: &mut GlesRenderer,
         index: usize,
         name: Option<&str>,
+        empty: bool,
         active: bool,
         width: f64,
         scale: f64,
@@ -45,7 +49,7 @@ impl OverviewCaption {
         // rasterize the same short caption.
         let key = Key {
             renderer: renderer.context_id(),
-            text: caption(index, name),
+            text: caption(index, name, empty),
             active,
             width: (width as u32 / 8) * 8,
             scale,
@@ -69,9 +73,64 @@ impl OverviewCaption {
         );
         Some(PrimaryGpuTextureRenderElement(element))
     }
+    pub(super) fn render_frame(
+        &self,
+        rect: Rectangle<f64, Logical>,
+        background: Color,
+        active: bool,
+        progress: f32,
+        scale: f64,
+        push: &mut dyn FnMut(SolidColorRenderElement),
+    ) {
+        let pixel = 1. / scale;
+        let Rectangle { loc, size } = rect;
+        let opacity = background.a + (1. - background.a) * progress * 0.24;
+        let fill = Color::new_unpremul(background.r, background.g, background.b, opacity);
+        let ink = if background.r + background.g + background.b > 1.5 {
+            0.08
+        } else {
+            0.94
+        };
+        let outline_alpha = if active { 0.44 } else { 0.31 };
+        let outline = Color::new_unpremul(ink, ink, ink, outline_alpha * progress);
+        let mut frame = self.frame.borrow_mut();
+        if size.w > 2. * pixel && size.h > 2. * pixel {
+            let edges = [
+                (loc, Size::from((size.w, pixel))),
+                (
+                    loc + Point::from((0., size.h - pixel)),
+                    Size::from((size.w, pixel)),
+                ),
+                (
+                    loc + Point::from((0., pixel)),
+                    Size::from((pixel, size.h - 2. * pixel)),
+                ),
+                (
+                    loc + Point::from((size.w - pixel, pixel)),
+                    Size::from((pixel, size.h - 2. * pixel)),
+                ),
+            ];
+            for (buffer, (position, size)) in frame[1..].iter_mut().zip(edges) {
+                buffer.update(size, outline);
+                push(SolidColorRenderElement::from_buffer(
+                    buffer,
+                    position,
+                    1.,
+                    Kind::Unspecified,
+                ));
+            }
+        }
+        frame[0].update(size, fill);
+        push(SolidColorRenderElement::from_buffer(
+            &frame[0],
+            loc,
+            1.,
+            Kind::Unspecified,
+        ));
+    }
 }
 
-fn caption(index: usize, name: Option<&str>) -> String {
+fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
     let name: String = name
         .unwrap_or_default()
         .chars()
@@ -79,10 +138,10 @@ fn caption(index: usize, name: Option<&str>) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let name = name.trim();
-    if name.is_empty() {
-        format!("{index}")
-    } else {
-        format!("{index}   {name}")
+    match (name.is_empty(), empty) {
+        (true, true) => format!("{index}   Empty workspace"),
+        (true, false) => format!("{index}"),
+        (false, _) => format!("{index}   {name}"),
     }
 }
 
@@ -167,9 +226,9 @@ mod tests {
 
     #[test]
     fn captions_use_the_workspace_index_and_plain_names() {
-        assert_eq!(caption(2, None), "2");
-        assert_eq!(caption(3, Some("  ")), "3");
-        assert_eq!(caption(4, Some("Field\nnotes")), "4   Field notes");
-        assert_eq!(caption(1, Some(&"x".repeat(160))).len(), 132);
+        assert_eq!(caption(2, None, false), "2");
+        assert_eq!(caption(3, Some("  "), false), "3");
+        assert_eq!(caption(4, Some("Field\nnotes"), false), "4   Field notes");
+        assert_eq!(caption(1, Some(&"x".repeat(160)), false).len(), 132);
     }
 }
