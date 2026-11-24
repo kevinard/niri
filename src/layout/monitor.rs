@@ -200,7 +200,12 @@ struct NavigationGutter<'a, W> {
     previews: Vec<(Rectangle<f64, Logical>, &'a W)>,
 }
 
-impl<'a, W> NavigationGutter<'a, W> {
+impl<'a, W: LayoutElement> NavigationGutter<'a, W> {
+    fn contains(&self, id: &W::Id) -> bool {
+        self.heading_target.is_some_and(|window| window.id() == id)
+            || self.previews.iter().any(|(_, window)| window.id() == id)
+    }
+
     fn window_under(&self, point: Point<f64, Logical>) -> Option<&'a W> {
         self.previews
             .iter()
@@ -381,6 +386,13 @@ fn navigation_title<W: LayoutElement>(window: &W, target: RenderTarget, fallback
             title
         }
     })
+}
+
+fn short_navigation_title(title: &str) -> &str {
+    title
+        .rsplit_once(" — ")
+        .filter(|(_, name)| !name.is_empty())
+        .map_or(title, |(_, name)| name)
 }
 
 fn visible_extent<'a, W: LayoutElement + 'a>(
@@ -2218,30 +2230,6 @@ impl<W: LayoutElement> Monitor<W> {
                 Size::from((width, STRIP_BUTTON_HEIGHT)),
             ))
         };
-        let titles = windows[first..first + count]
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &(window, direction, floating))| {
-                let rect = button(x + index as f64 * (width + gap), width)?;
-                Some(NavigationTitle {
-                    rect,
-                    window,
-                    active: window.id() == active.id(),
-                    direction,
-                    floating,
-                })
-            })
-            .collect::<Vec<_>>();
-        let layer_action = layer_destination.and_then(|window| {
-            button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
-        });
-        let tray = uncovered(Rectangle::new(
-            Point::from((x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
-            Size::from((
-                titles_width + 2. * STRIP_TRAY_PADDING,
-                STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
-            )),
-        ));
         let visible_tiles =
             scrolling
                 .tiles_with_render_positions()
@@ -2280,23 +2268,21 @@ impl<W: LayoutElement> Monitor<W> {
             if space < width + 2. * margin {
                 // The strip starts on the left. Its trailing space can still
                 // anchor a rightward continuation when the tiles fill the view.
-                let heading = uncovered(Rectangle::new(
-                    Point::from((
-                        x,
-                        top + (NAVIGATION_STRIP_HEIGHT - OVERVIEW_CONTROL_HEIGHT) / 2.,
-                    )),
-                    Size::from((width, OVERVIEW_CONTROL_HEIGHT)),
-                ))?;
-                let overlaps_strip = [tray, layer_action.map(|(rect, _)| rect)]
-                    .into_iter()
-                    .flatten()
-                    .chain(titles.iter().map(|title| title.rect))
-                    .any(|rect| rect.intersection(heading).is_some());
-                if left || overlaps_strip || x < bounds.start + margin {
+                let width = 194.;
+                let end_of_strip = bounds.start
+                    + leading_margin
+                    + titles_width
+                    + if layer_destination.is_some() {
+                        action_gap + action_width
+                    } else {
+                        0.
+                    };
+                let x = bounds.end - width - margin;
+                if left || x <= end_of_strip + 8. {
                     return None;
                 }
                 return Some(NavigationGutter {
-                    heading,
+                    heading: button(x, width)?,
                     count,
                     heading_target: Some(destinations[0]),
                     previews: Vec::new(),
@@ -2337,6 +2323,44 @@ impl<W: LayoutElement> Monitor<W> {
                 previews,
             })
         });
+        let remaining = windows[first..first + count]
+            .iter()
+            .filter(|(window, _, _)| {
+                !gutters
+                    .iter()
+                    .flatten()
+                    .any(|gutter| gutter.contains(window.id()))
+            })
+            .collect::<Vec<_>>();
+        let titles_width = (remaining.len() as f64 * (width + gap) - gap).max(0.);
+        let titles = remaining
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, &(window, direction, floating))| {
+                let rect = button(x + index as f64 * (width + gap), width)?;
+                Some(NavigationTitle {
+                    rect,
+                    window,
+                    active: window.id() == active.id(),
+                    direction,
+                    floating,
+                })
+            })
+            .collect();
+        let layer_action = layer_destination.and_then(|window| {
+            button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
+        });
+        let tray = if titles_width > 0. {
+            uncovered(Rectangle::new(
+                Point::from((x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
+                Size::from((
+                    titles_width + 2. * STRIP_TRAY_PADDING,
+                    STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
+                )),
+            ))
+        } else {
+            None
+        };
         Some(NavigationStrip {
             tray,
             titles,
@@ -2474,8 +2498,7 @@ impl<W: LayoutElement> Monitor<W> {
                         .gutters
                         .iter()
                         .flatten()
-                        .flat_map(|gutter| &gutter.previews)
-                        .any(|(_, window)| window.id() == id)
+                        .any(|gutter| gutter.contains(id))
             })
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
@@ -2540,20 +2563,6 @@ impl<W: LayoutElement> Monitor<W> {
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible();
-            let hovered_window = pointer.and_then(|point| {
-                strip
-                    .titles
-                    .iter()
-                    .find(|title| title.rect.contains(point))
-                    .map(|title| title.window)
-                    .or_else(|| {
-                        strip
-                            .gutters
-                            .iter()
-                            .flatten()
-                            .find_map(|gutter| gutter.window_under(point))
-                    })
-            });
             for gutter in strip.gutters.iter().flatten() {
                 for (rect, window) in &gutter.previews {
                     let thumbnail = Rectangle::new(
@@ -2574,19 +2583,25 @@ impl<W: LayoutElement> Monitor<W> {
             };
             for (index, gutter) in strip.gutters.into_iter().enumerate() {
                 let Some(gutter) = gutter else { continue };
-                let unit = if gutter.count == 1 {
-                    "window"
+                let (heading, kind) = if let Some(window) = gutter.heading_target {
+                    (
+                        navigation_title(window, target, "Window"),
+                        LabelKind::StripButton {
+                            status: Some("Show  →"),
+                            outlined: true,
+                        },
+                    )
                 } else {
-                    "windows"
+                    let heading = if index == 0 {
+                        format!("←  {} offscreen", gutter.count)
+                    } else {
+                        format!("{} offscreen  →", gutter.count)
+                    };
+                    (heading, LabelKind::GroupTitle)
                 };
-                let heading = if index == 0 {
-                    format!("←  {} {unit}", gutter.count)
-                } else {
-                    format!("{} {unit}  →", gutter.count)
-                };
-                let heading_background = if gutter.heading_target.is_some_and(|window| {
-                    hovered_window.is_some_and(|hovered| hovered.id() == window.id())
-                }) {
+                let heading_background = if gutter.heading_target.is_some()
+                    && pointer.is_some_and(|point| gutter.heading.contains(point))
+                {
                     tint_caption(tint_caption(surface, accent), accent)
                 } else {
                     surface
@@ -2595,7 +2610,7 @@ impl<W: LayoutElement> Monitor<W> {
                     renderer.as_gles_renderer(),
                     heading,
                     heading_background,
-                    LabelKind::NavigationHint,
+                    kind,
                     gutter.heading.size.w,
                     scale,
                     gutter.heading.loc,
@@ -2603,21 +2618,28 @@ impl<W: LayoutElement> Monitor<W> {
                 ) {
                     draw(label);
                 }
-                for ((rect, window), cache) in gutter.previews.into_iter().zip([
+                let titles = gutter
+                    .previews
+                    .iter()
+                    .map(|(_, window)| navigation_title(*window, target, "Window"))
+                    .collect::<Vec<_>>();
+                for (((rect, _), title), cache) in gutter.previews.into_iter().zip(&titles).zip([
                     &self.scroll_cue_labels[index],
                     &self.additional_scroll_cue_labels[index],
                 ]) {
-                    let hovered = hovered_window.is_some_and(|hovered| hovered.id() == window.id());
+                    let hovered = pointer.is_some_and(|point| rect.contains(point));
                     let background = if hovered {
                         tint_caption(tint_caption(surface, accent), accent)
                     } else {
                         surface
                     };
-                    let title = navigation_title(window, target, "Window");
-                    let caption = title
-                        .rsplit_once(" — ")
-                        .filter(|(_, name)| !name.is_empty())
-                        .map_or(title.as_str(), |(_, name)| name);
+                    let name = short_navigation_title(title);
+                    let duplicate = titles
+                        .iter()
+                        .filter(|title| short_navigation_title(title) == name)
+                        .count()
+                        > 1;
+                    let caption = if duplicate { title.as_str() } else { name };
                     if let Some(label) = cache.render(
                         renderer.as_gles_renderer(),
                         caption.to_owned(),
@@ -2633,8 +2655,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             for (title, label) in strip.titles.into_iter().zip(&self.strip_labels) {
-                let hovered =
-                    hovered_window.is_some_and(|hovered| hovered.id() == title.window.id());
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
