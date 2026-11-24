@@ -2203,7 +2203,7 @@ impl<W: LayoutElement> Monitor<W> {
             _ => None,
         };
         let action_space = layer_destination.map_or(0., |_| action_width + action_gap);
-        let direction_width = 114.;
+        let direction_width = 136.;
         let direction_gap = 8.;
         let direction_space = 2. * (direction_width + direction_gap);
         let separate_scroll_actions =
@@ -2651,8 +2651,8 @@ impl<W: LayoutElement> Monitor<W> {
             for (index, (title, label)) in
                 strip.titles.into_iter().zip(&self.strip_labels).enumerate()
             {
-                let hovered = pointer.is_some_and(|point| title.rect.contains(point))
-                    || pending_focus == Some(title.window.id());
+                let will_focus = pending_focus == Some(title.window.id());
+                let hovered = will_focus || pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
                 let visible_tile = !offscreen && !title.floating;
                 let status = if title.floating {
@@ -2661,6 +2661,8 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         "Floating"
                     })
+                } else if will_focus {
+                    Some("Focus on switch")
                 } else if !has_layer_action && !ws.floating().is_empty() && floating_visible {
                     Some("Hides floating windows")
                 } else if hovered && !offscreen && has_layer_action && floating_visible {
@@ -2684,6 +2686,8 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let background = if title.active {
                     accent
+                } else if will_focus {
+                    direction_background
                 } else if hovered {
                     tint_caption(surface, accent)
                 } else if title.grouped {
@@ -2729,15 +2733,15 @@ impl<W: LayoutElement> Monitor<W> {
             {
                 let Some(action) = action else { continue };
                 let left = side == 0;
-                let columns = match action.columns {
-                    0 => "View windows".into(),
-                    1 => "1 column".into(),
-                    count => format!("{count} columns"),
+                let caption = match action.columns {
+                    0 => "Show windows".into(),
+                    1 => "Show 1 column".into(),
+                    count => format!("Show {count} columns"),
                 };
                 let name = if left {
-                    format!("←  {columns}")
+                    format!("←  {caption}")
                 } else {
-                    format!("{columns}  →")
+                    format!("{caption}  →")
                 };
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
