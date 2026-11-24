@@ -88,6 +88,7 @@ pub struct Monitor<W: LayoutElement> {
     /// Insert hint element for rendering.
     insert_hint_element: InsertHintElement,
     scroll_cue_labels: [PreviewLabel; 2],
+    additional_scroll_cue_labels: [PreviewLabel; 2],
     scroll_edge_fades: [PreviewLabel; 2],
     /// Location to render the insert hint element.
     insert_hint_render_loc: Option<InsertHintRenderLoc>,
@@ -173,6 +174,7 @@ struct ScrollCue<'a, W> {
     clipped_column_edge: Option<f64>,
     opacity: f32,
     offscreen_columns: usize,
+    additional: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
 
 #[derive(Debug)]
@@ -313,6 +315,24 @@ impl From<&super::OverviewProgress> for OverviewProgress {
     }
 }
 
+fn navigation_title<W: LayoutElement>(window: &W, target: RenderTarget, fallback: &str) -> String {
+    if target.should_block_out(window.rules().block_out_from) {
+        return fallback.into();
+    }
+    window.with_overview_title(|title| {
+        let title: String = title
+            .chars()
+            .take(96)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        if title.trim().is_empty() {
+            fallback.into()
+        } else {
+            title
+        }
+    })
+}
+
 fn visible_extent<'a, W: LayoutElement + 'a>(
     tiles: impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)>,
 ) -> Option<Range<f64>> {
@@ -414,6 +434,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             scroll_cue_labels: Default::default(),
+            additional_scroll_cue_labels: Default::default(),
             scroll_edge_fades: Default::default(),
             insert_hint_render_loc: None,
             overview_open: false,
@@ -1873,19 +1894,46 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         available.min(72.)
                     };
+                let rect = Rectangle::new(
+                    Point::from((
+                        match (left, card) {
+                            (true, true) => bounds.start,
+                            (false, true) => bounds.end - width,
+                            (true, false) => x,
+                            (false, false) => right_edge - width,
+                        },
+                        y,
+                    )),
+                    Size::from((width, height)),
+                );
+                let additional_top = y + height + 8.;
+                let has_space = additional_top + SCROLL_BUTTON_HEIGHT
+                    <= self.working_area.loc.y + self.working_area.size.h;
+                let additional = if card && has_space {
+                    let id = column.id();
+                    let next = if left {
+                        left_columns()
+                            .filter(|(column, _)| column.id() != id)
+                            .max_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
+                    } else {
+                        right_columns()
+                            .filter(|(column, _)| column.id() != id)
+                            .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
+                    };
+                    next.map(|(column, _)| {
+                        (
+                            Rectangle::new(
+                                Point::from((rect.loc.x, additional_top)),
+                                Size::from((width, SCROLL_BUTTON_HEIGHT)),
+                            ),
+                            column.active_window(),
+                        )
+                    })
+                } else {
+                    None
+                };
                 ScrollCue {
-                    rect: Rectangle::new(
-                        Point::from((
-                            match (left, card) {
-                                (true, true) => bounds.start,
-                                (false, true) => bounds.end - width,
-                                (true, false) => x,
-                                (false, false) => right_edge - width,
-                            },
-                            y,
-                        )),
-                        Size::from((width, height)),
-                    ),
+                    rect,
                     destination: column.active_window(),
                     clipped_column_edge: card.then(|| {
                         let boundary = if left { bounds.start } else { bounds.end };
@@ -1897,6 +1945,7 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         right_columns().count()
                     },
+                    additional,
                 }
             };
         [
@@ -1909,17 +1958,24 @@ impl<W: LayoutElement> Monitor<W> {
         self.scroll_cues()
             .into_iter()
             .flatten()
-            .find(|cue| cue.opacity > 0.5 && cue.rect.contains(position))
-            .map(|cue| cue.destination)
+            .filter(|cue| cue.opacity > 0.5)
+            .find_map(|cue| {
+                if cue.rect.contains(position) {
+                    Some(cue.destination)
+                } else {
+                    cue.additional
+                        .filter(|(rect, _)| rect.contains(position))
+                        .map(|(_, window)| window)
+                }
+            })
     }
 
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
-            || self
-                .scroll_cues()
-                .into_iter()
-                .flatten()
-                .any(|cue| cue.destination.id() == id)
+            || self.scroll_cues().into_iter().flatten().any(|cue| {
+                cue.destination.id() == id
+                    || cue.additional.is_some_and(|(_, window)| window.id() == id)
+            })
     }
 
     fn render_scroll_preview<R: NiriRenderer>(
@@ -1985,14 +2041,10 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
         let scale = self.scale.fractional_scale();
-        for (((label, fade), cue), left) in self
-            .scroll_cue_labels
-            .iter()
-            .zip(&self.scroll_edge_fades)
-            .zip(self.scroll_cues())
-            .zip([true, false])
-        {
+        for (index, cue) in self.scroll_cues().into_iter().enumerate() {
             let Some(cue) = cue else { continue };
+            let left = index == 0;
+            let label = &self.scroll_cue_labels[index];
             let card = cue.clipped_column_edge.is_some();
             if card {
                 self.render_scroll_preview(renderer, target, &cue, push);
@@ -2014,21 +2066,8 @@ impl<W: LayoutElement> Monitor<W> {
             let fallback = if card { "Window" } else { fallback };
             let title = if cue.rect.size.w < 102. {
                 String::new()
-            } else if target.should_block_out(cue.destination.rules().block_out_from) {
-                fallback.to_owned()
             } else {
-                cue.destination.with_overview_title(|title| {
-                    let title: String = title
-                        .chars()
-                        .take(96)
-                        .map(|c| if c.is_control() { ' ' } else { c })
-                        .collect();
-                    if title.trim().is_empty() {
-                        fallback.to_owned()
-                    } else {
-                        title
-                    }
-                })
+                navigation_title(cue.destination, target, fallback)
             };
             let text = if card {
                 title
@@ -2046,7 +2085,11 @@ impl<W: LayoutElement> Monitor<W> {
                 if card {
                     LabelKind::WindowNavigation {
                         left,
-                        count: cue.offscreen_columns,
+                        count: if cue.additional.is_some() && cue.offscreen_columns == 2 {
+                            1
+                        } else {
+                            cue.offscreen_columns
+                        },
                     }
                 } else {
                     LabelKind::Button { align_right: !left }
@@ -2057,6 +2100,26 @@ impl<W: LayoutElement> Monitor<W> {
                 cue.opacity,
             ) {
                 draw(label);
+            }
+            if let Some((rect, window)) = cue.additional {
+                let title = navigation_title(window, target, "Another window");
+                let text = if left {
+                    format!("←  {title}")
+                } else {
+                    format!("{title}  →")
+                };
+                if let Some(label) = self.additional_scroll_cue_labels[index].render(
+                    renderer.as_gles_renderer(),
+                    text,
+                    surface,
+                    LabelKind::Button { align_right: !left },
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    cue.opacity,
+                ) {
+                    draw(label);
+                }
             }
             if card {
                 continue;
@@ -2087,7 +2150,7 @@ impl<W: LayoutElement> Monitor<W> {
                 continue;
             }
             let x = if left { boundary } else { boundary - width };
-            if let Some(fade) = fade.render(
+            if let Some(fade) = self.scroll_edge_fades[index].render(
                 renderer.as_gles_renderer(),
                 String::new(),
                 surface,
