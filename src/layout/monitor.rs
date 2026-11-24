@@ -190,9 +190,16 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
-    projections: Vec<(Rectangle<f64, Logical>, Option<u32>)>,
+    projections: Vec<NavigationProjection>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
+}
+
+struct NavigationProjection {
+    rect: Rectangle<f64, Logical>,
+    caption: String,
+    heading_offset: u32,
+    hovered: bool,
 }
 
 struct NavigationTitle<'a, W> {
@@ -2120,6 +2127,7 @@ impl<W: LayoutElement> Monitor<W> {
     fn navigation_strip(
         &self,
         pointer: Option<Point<f64, Logical>>,
+        decorate: bool,
     ) -> Option<NavigationStrip<'_, W>> {
         let ws = self.active_workspace_ref();
         if self.workspace_switch.is_some()
@@ -2275,42 +2283,92 @@ impl<W: LayoutElement> Monitor<W> {
                 ))
             })
             .collect();
-        let projections = pointer
-            .and_then(|point| {
-                let target = titles
-                    .iter()
-                    .find(|title| title.direction.is_some() && title.rect.contains(point))?;
+        let forecasts: Vec<_> = titles
+            .iter()
+            .filter(|_| decorate)
+            .filter_map(|title| {
+                let left = title.direction?;
                 let ids: Vec<_> = scrolling
-                    .columns_after_activating(target.window.id())?
+                    .columns_after_activating(title.window.id())?
                     .filter(|(column, x)| {
                         *x >= bounds.start - pixel && *x + column.width() <= bounds.end + pixel
                     })
                     .map(|(column, _)| column.active_window().id())
                     .collect();
-                if !ids.contains(&target.window.id()) {
-                    return None;
-                }
-                let target_x = target.rect.loc.x;
-                Some(
-                    groups(&|title| ids.contains(&title.window.id()))
-                        .into_iter()
-                        .filter_map(|span| {
-                            let rect = uncovered(Rectangle::new(
-                                Point::from((span.start - 2., band_y + 2.)),
-                                Size::from((
-                                    span.end - span.start + 4.,
-                                    STRIP_VIEWPORT_BAND_HEIGHT,
-                                )),
-                            ))?;
-                            let heading_offset = span
-                                .contains(&target_x)
-                                .then(|| (target_x - rect.loc.x).round() as u32);
-                            Some((rect, heading_offset))
-                        })
-                        .collect(),
-                )
+                ids.contains(&title.window.id())
+                    .then_some((title, left, ids))
             })
-            .unwrap_or_default();
+            .collect();
+        let hover = pointer.and_then(|point| {
+            forecasts
+                .iter()
+                .find(|(title, _, _)| title.rect.contains(point))
+        });
+        let mut destinations: Vec<(Range<f64>, bool, &[&W::Id])> = Vec::new();
+        for (title, left, ids) in &forecasts {
+            if hover.is_some_and(|(_, side, target)| side == left && target == ids) {
+                continue;
+            }
+            let start = title.rect.loc.x;
+            let end = start + title.rect.size.w;
+            if let Some((span, _, _)) = destinations.last_mut().filter(|(span, side, target)| {
+                *side == *left && *target == ids.as_slice() && start <= span.end + gap + 0.001
+            }) {
+                span.end = end;
+            } else {
+                destinations.push((start..end, *left, ids));
+            }
+        }
+        let projection_rect = |span: Range<f64>| {
+            uncovered(Rectangle::new(
+                Point::from((span.start - 2., band_y + 2.)),
+                Size::from((span.end - span.start + 4., STRIP_VIEWPORT_BAND_HEIGHT)),
+            ))
+        };
+        let mut projections: Vec<_> = destinations
+            .into_iter()
+            .filter_map(|(span, left, ids)| {
+                let rect = projection_rect(span)?;
+                let count = ids.len();
+                let unit = if count == 1 { "tile" } else { "tiles" };
+                let caption = if left {
+                    format!("←  View {count} {unit}")
+                } else {
+                    format!("View {count} {unit}  →")
+                };
+                Some(NavigationProjection {
+                    rect,
+                    caption,
+                    heading_offset: 0,
+                    hovered: false,
+                })
+            })
+            .collect();
+        if let Some((target, _, ids)) = hover {
+            let target_x = target.rect.loc.x;
+            projections.extend(
+                groups(&|title| ids.contains(&title.window.id()))
+                    .into_iter()
+                    .filter_map(|span| {
+                        let rect = projection_rect(span.clone())?;
+                        let caption_here = span.contains(&target_x);
+                        Some(NavigationProjection {
+                            rect,
+                            caption: if caption_here {
+                                "After switch".into()
+                            } else {
+                                String::new()
+                            },
+                            heading_offset: if caption_here {
+                                (target_x - rect.loc.x).round() as u32
+                            } else {
+                                0
+                            },
+                            hovered: true,
+                        })
+                    }),
+            );
+        }
         Some(NavigationStrip {
             tray,
             viewports,
@@ -2406,7 +2464,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .map(|(_, window)| window);
         }
 
-        if let Some(strip) = self.navigation_strip(None) {
+        if let Some(strip) = self.navigation_strip(None, false) {
             return strip
                 .titles
                 .into_iter()
@@ -2437,7 +2495,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
             || self
-                .navigation_strip(None)
+                .navigation_strip(None, false)
                 .is_some_and(|strip| strip.titles.iter().any(|title| title.window.id() == id))
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
@@ -2495,7 +2553,7 @@ impl<W: LayoutElement> Monitor<W> {
         pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
-        if let Some(strip) = self.navigation_strip(pointer) {
+        if let Some(strip) = self.navigation_strip(pointer, true) {
             let ws = self.active_workspace_ref();
             let accent = ws.options.layout.border.active_color;
             let surface = caption_background(accent, ws.options.layout.background_color, false);
@@ -2522,6 +2580,12 @@ impl<W: LayoutElement> Monitor<W> {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
                 let visible_tile = !offscreen && !title.floating;
+                let grouped = offscreen
+                    && strip.projections.iter().any(|projection| {
+                        projection
+                            .rect
+                            .contains(title.rect.loc + title.rect.size.to_point().downscale(2.))
+                    });
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2543,7 +2607,7 @@ impl<W: LayoutElement> Monitor<W> {
                     .all(|(other, name)| other == index || window_title_suffix(name) != suffix);
                 let name = if distinct { suffix } else { name };
                 let background = if title.active {
-                    accent
+                    tint_caption(surface, accent)
                 } else if hovered {
                     tint_caption(tint_caption(surface, accent), accent)
                 } else if offscreen {
@@ -2562,6 +2626,8 @@ impl<W: LayoutElement> Monitor<W> {
                         outlined: !title.active
                             && (!visible_tile || hovered || strip.tray.is_none()),
                         direction: title.direction,
+                        focused: title.active,
+                        show_arrow: hovered || !grouped,
                     },
                     title.rect.size.w,
                     scale,
@@ -2597,22 +2663,25 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            for ((rect, heading_offset), label) in strip
+            for (projection, label) in strip
                 .projections
                 .into_iter()
                 .zip(&self.strip_projection_labels)
             {
-                if let Some(projection) = label.render(
+                if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
-                    heading_offset.map_or("", |_| "After switch").into(),
+                    projection.caption,
                     Color { a: 0., ..surface },
-                    LabelKind::StripProjected { heading_offset },
-                    rect.size.w,
+                    LabelKind::StripProjected {
+                        heading_offset: projection.heading_offset,
+                        hovered: projection.hovered,
+                    },
+                    projection.rect.size.w,
                     scale,
-                    rect.loc,
+                    projection.rect.loc,
                     1.,
                 ) {
-                    draw(projection);
+                    draw(label);
                 }
             }
             for (rect, label) in strip.viewports.into_iter().zip(&self.strip_viewport_labels) {

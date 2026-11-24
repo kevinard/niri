@@ -44,12 +44,15 @@ pub(super) enum LabelKind {
     StripTray,
     StripViewport,
     StripProjected {
-        heading_offset: Option<u32>,
+        heading_offset: u32,
+        hovered: bool,
     },
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
         direction: Option<bool>,
+        focused: bool,
+        show_arrow: bool,
     },
     LayerAction {
         show: bool,
@@ -546,7 +549,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport | LabelKind::StripProjected { .. } => 0.65,
+                LabelKind::StripViewport | LabelKind::StripProjected { hovered: true, .. } => 0.65,
+                LabelKind::StripProjected { hovered: false, .. } => 0.35,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
@@ -617,12 +621,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if viewport {
             label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
         }
-        if let LabelKind::StripProjected {
-            heading_offset: Some(offset),
-        } = key.kind
-        {
-            title_x += f64::from(offset);
-            title_width -= f64::from(offset);
+        if let LabelKind::StripProjected { heading_offset, .. } = key.kind {
+            title_x += f64::from(heading_offset);
+            title_width -= f64::from(heading_offset);
         }
         if key.kind == LabelKind::OverviewCommand {
             let keycap = layout(&cr, key);
@@ -660,14 +661,18 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 "sans-serif Medium 13px",
             )));
         }
-        let (status, direction) = match key.kind {
+        let (status, direction, focused, show_arrow) = match key.kind {
             LabelKind::StripButton {
-                status, direction, ..
-            } => (status, direction),
-            _ => (None, None),
+                status,
+                direction,
+                focused,
+                show_arrow,
+                ..
+            } => (status, direction, focused, show_arrow),
+            _ => (None, None, false, false),
         };
         let offscreen = direction.is_some();
-        if let Some(left) = direction {
+        if let Some(left) = direction.filter(|_| show_arrow) {
             let x = if left { 19. } else { width - 19. };
             let y = height / 2.;
             let sign = if left { -1. } else { 1. };
@@ -688,6 +693,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             if left {
                 title_x += 27.;
             }
+        }
+        if focused {
+            label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 13px")));
+            title_width -= 14.;
+            title_x += 14.;
         }
         if let Some(status) = status {
             let detail = layout(&cr, key);
@@ -776,6 +786,16 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         } else {
             (height - f64::from(h)) / 2.
         };
+        if focused {
+            cr.arc(
+                x - 9.,
+                y + f64::from(h) / 2.,
+                3.5,
+                0.,
+                std::f64::consts::TAU,
+            );
+            cr.fill()?;
+        }
         cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
     }
