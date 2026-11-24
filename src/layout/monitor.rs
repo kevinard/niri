@@ -2898,7 +2898,7 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(command) = self.overview_command_label.render(
                     renderer.as_gles_renderer(),
-                    "Show selected window".into(),
+                    "Show selected".into(),
                     background,
                     LabelKind::OverviewCommand,
                     rect.size.w,
