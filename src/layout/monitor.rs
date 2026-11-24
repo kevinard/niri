@@ -1736,9 +1736,7 @@ impl<W: LayoutElement> Monitor<W> {
             Some((win, hit.to_activate()))
         } else {
             let (win, hit) = ws.window_under(pos_within_output - geo.loc)?;
-            if self
-                .scrolling_visible_span(ws)
-                .is_some_and(|bounds| !bounds.contains(&pos_within_output.x))
+            if self.scrolling_clip_excludes(ws, geo.loc, pos_within_output)
                 && !ws.is_floating(win.id())
             {
                 return None;
@@ -1753,10 +1751,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let (ws, geo) = self.workspace_under(pos_within_output)?;
-        if self
-            .scrolling_visible_span(ws)
-            .is_some_and(|bounds| !bounds.contains(&pos_within_output.x))
-        {
+        if self.scrolling_clip_excludes(ws, geo.loc, pos_within_output) {
             self.window_under(pos_within_output)?;
         }
         ws.resize_edges_under(pos_within_output - geo.loc)
@@ -1785,6 +1780,25 @@ impl<W: LayoutElement> Monitor<W> {
             return Some(Self::exclude_narrow_peeks(bounds, self.scroll_cues()));
         }
         Some(bounds)
+    }
+
+    fn navigation_strip_top(&self) -> Option<f64> {
+        let area = self.working_area;
+        navigation_strip_fits(area).then_some(area.loc.y + area.size.h - NAVIGATION_STRIP_HEIGHT)
+    }
+
+    fn scrolling_clip_excludes(
+        &self,
+        ws: &Workspace<W>,
+        workspace_origin: Point<f64, Logical>,
+        location: Point<f64, Logical>,
+    ) -> bool {
+        self.scrolling_visible_span(ws).is_some_and(|bounds| {
+            !bounds.contains(&location.x)
+                || self
+                    .navigation_strip_top()
+                    .is_some_and(|top| location.y - workspace_origin.y >= top)
+        })
     }
 
     fn exclude_narrow_peeks(
@@ -1975,12 +1989,10 @@ impl<W: LayoutElement> Monitor<W> {
     /// remain available in each position without painting over a client surface.
     fn navigation_titles(&self) -> Option<Vec<NavigationTitle<'_, W>>> {
         let ws = self.active_workspace_ref();
-        if self.workspace_switch.is_some()
-            || ws.floating_is_active()
-            || !navigation_strip_fits(self.working_area)
-        {
+        if self.workspace_switch.is_some() || ws.floating_is_active() {
             return None;
         }
+        let top = self.navigation_strip_top()?;
         let bounds = self.scroll_clip(ws)?;
         let scrolling = ws.scrolling();
         let active = scrolling.active_column()?.id();
@@ -2005,15 +2017,14 @@ impl<W: LayoutElement> Monitor<W> {
             .min(236.);
         let strip_width = count as f64 * (width + gap) - gap;
         let x = (bounds.start + bounds.end - strip_width) / 2.;
-        let y = self.working_area.loc.y + self.working_area.size.h
-            - (NAVIGATION_STRIP_HEIGHT + SCROLL_BUTTON_HEIGHT) / 2.;
+        let y = top + (NAVIGATION_STRIP_HEIGHT - SCROLL_BUTTON_HEIGHT) / 2.;
         let visible = Self::exclude_narrow_peeks(bounds.clone(), self.scroll_cues_for(ws, &bounds));
         let pixel = 1. / self.scale.fractional_scale();
         Some(
             columns[first..first + count]
                 .iter()
                 .enumerate()
-                .map(|(index, column)| {
+                .filter_map(|(index, column)| {
                     let position = positions[&column.id()];
                     let direction = if position.x + column.width() <= visible.start + pixel {
                         Some(true)
@@ -2022,15 +2033,23 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         None
                     };
-                    NavigationTitle {
-                        rect: Rectangle::new(
-                            Point::from((x + index as f64 * (width + gap), y)),
-                            Size::from((width, SCROLL_BUTTON_HEIGHT)),
-                        ),
+                    let rect = Rectangle::new(
+                        Point::from((x + index as f64 * (width + gap), y)),
+                        Size::from((width, SCROLL_BUTTON_HEIGHT)),
+                    );
+                    let covered =
+                        ws.floating()
+                            .tiles_with_render_positions()
+                            .any(|(tile, position)| {
+                                rect.intersection(Rectangle::new(position, tile.tile_size()))
+                                    .is_some()
+                            });
+                    (!covered).then_some(NavigationTitle {
+                        rect,
                         window: column.active_window(),
                         active: column.id() == active,
                         direction,
-                    }
+                    })
                 })
                 .collect(),
         )
@@ -2750,6 +2769,13 @@ impl<W: LayoutElement> Monitor<W> {
                     let right = ((bounds.end - geo.loc.x) * scale).floor() as i32;
                     crop_bounds.loc.x = left;
                     crop_bounds.size.w = right.saturating_sub(left).max(0);
+                    if let Some(top) = self.navigation_strip_top() {
+                        let bottom = (top * scale).floor() as i32;
+                        crop_bounds.size.h = crop_bounds
+                            .size
+                            .h
+                            .min(bottom.saturating_sub(crop_bounds.loc.y).max(0));
+                    }
                 }
                 // Macro instead of closure because ws and insert hint have different elem types.
                 macro_rules! push {
