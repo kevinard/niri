@@ -22,8 +22,9 @@ const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
-pub(super) const STRIP_VIEWPORT_HEIGHT: f64 = 14.;
-pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_BUTTON_HEIGHT + STRIP_VIEWPORT_HEIGHT + 2.;
+pub(super) const STRIP_TRAY_HEADER_HEIGHT: f64 = 24.;
+pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 =
+    STRIP_BUTTON_HEIGHT + STRIP_TRAY_HEADER_HEIGHT - 1.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
@@ -426,7 +427,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (
             max_width,
-            STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_VIEWPORT_HEIGHT,
+            STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_TRAY_HEADER_HEIGHT,
         ),
         LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
         LabelKind::StripButton {
@@ -539,11 +540,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport => 0.49,
+                LabelKind::StripViewport => 0.65,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            cr.set_line_width(1.);
+            cr.set_line_width(if key.kind == LabelKind::StripViewport {
+                1.5
+            } else {
+                1.
+            });
             cr.stroke()?;
         } else {
             cr.fill()?;
@@ -597,7 +602,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let mut title_width = width - 2. * PADDING;
         let mut title_x = PADDING;
         if key.kind == LabelKind::StripViewport {
-            label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 11px")));
+            label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
         }
         if key.kind == LabelKind::OverviewCommand {
             let keycap = layout(&cr, key);
@@ -734,14 +739,14 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::NavigationHint | LabelKind::StripViewport => (width - f64::from(w)) / 2.,
+            LabelKind::NavigationHint => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
         let y = if key.kind == LabelKind::StripViewport {
-            height - f64::from(h) - 1.
+            3.
         } else if status.is_some() {
             if offscreen {
                 1.
