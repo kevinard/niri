@@ -36,6 +36,7 @@ pub(super) enum GroupStyle {
 pub(super) enum LabelKind {
     Caption,
     GroupHeading,
+    GroupTitle,
     OverviewCommand,
     StripTray,
     ScrollHandle {
@@ -372,7 +373,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let label = layout(&cr, key);
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
-        LabelKind::GroupHeading | LabelKind::OverviewCommand => (max_width.min(4096.), HEIGHT),
+        LabelKind::GroupHeading | LabelKind::GroupTitle | LabelKind::OverviewCommand => {
+            (max_width.min(4096.), HEIGHT)
+        }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
         LabelKind::ScrollHandle { .. } => (max_width, SCROLL_HANDLE_HEIGHT),
@@ -503,10 +506,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
         let detail = layout(&cr, key);
         detail.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 11px",
+            "sans-serif Medium 10px",
         )));
-        let w = f64::from(detail.pixel_size().0);
-        cr.move_to((width - w) / 2., 34.);
+        detail.set_width(((width - 2.) * f64::from(pango::SCALE)) as i32);
+        detail.set_alignment(pango::Alignment::Center);
+        cr.move_to(1., 34.);
         pangocairo::functions::show_layout(&cr, &detail);
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
@@ -674,7 +678,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
+            LabelKind::GroupHeading | LabelKind::GroupTitle => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
