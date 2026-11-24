@@ -136,6 +136,10 @@ pub trait LayoutElement {
     /// Unique ID of this element.
     fn id(&self) -> &Self::Id;
 
+    fn with_overview_title<T>(&self, display: impl FnOnce(&str) -> T) -> T {
+        display("")
+    }
+
     /// Updates the config for the element.
     fn update_config(&mut self, blur_config: niri_config::Blur) {
         let _ = blur_config;

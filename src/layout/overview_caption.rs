@@ -18,11 +18,12 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
-const TRACK_WIDTH: f64 = 72.;
 
 #[derive(Debug)]
 pub(super) struct OverviewCaption {
-    texture: RefCell<Option<(Key, Option<TextureBuffer<GlesTexture>>)>>,
+    title: PreviewLabel,
+    viewport_label: PreviewLabel,
+    viewport_rules: RefCell<[SolidColorBuffer; 2]>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
 }
@@ -30,7 +31,9 @@ pub(super) struct OverviewCaption {
 impl Default for OverviewCaption {
     fn default() -> Self {
         Self {
-            texture: RefCell::default(),
+            title: PreviewLabel::default(),
+            viewport_label: PreviewLabel::default(),
+            viewport_rules: RefCell::default(),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
         }
@@ -43,50 +46,50 @@ struct Key {
     text: String,
     background: Color,
     ink: Color,
-    viewport: Option<(u8, u8)>,
+    thumbnail: bool,
     width: u32,
     scale: f64,
 }
 
-impl OverviewCaption {
+pub(super) enum ViewportDecoration {
+    Rule(SolidColorRenderElement),
+    Caption(PrimaryGpuTextureRenderElement),
+}
+
+#[derive(Debug, Default)]
+pub(super) struct PreviewLabel {
+    texture: RefCell<Option<(Key, Option<TextureBuffer<GlesTexture>>)>>,
+}
+
+impl PreviewLabel {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render(
         &self,
         renderer: &mut GlesRenderer,
-        index: usize,
-        name: Option<&str>,
-        empty: bool,
-        active: bool,
-        accent: Color,
-        backdrop: Color,
-        viewport: Option<(u8, u8)>,
+        text: String,
+        background: Color,
+        thumbnail: bool,
         width: f64,
         scale: f64,
         location: Point<f64, Logical>,
         alpha: f32,
     ) -> Option<PrimaryGpuTextureRenderElement> {
-        // Round the width down in steps so a zoom redraw does not repeatedly
-        // rasterize the same short caption.
-        let viewport = viewport.filter(|_| width >= 255.);
-        let background = if active {
-            Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
-        } else if is_light(backdrop) {
-            Color::new_unpremul(0.92, 0.95, 0.93, 0.97)
-        } else {
-            Color::new_unpremul(0.08, 0.14, 0.15, 0.96)
-        };
         let ink = if is_light(background) {
-            Color::new_unpremul(0.07, 0.16, 0.13, 1.)
+            Color::new_unpremul(0.06, 0.13, 0.11, 1.)
         } else {
-            Color::new_unpremul(0.94, 0.98, 0.95, 1.)
+            Color::new_unpremul(0.95, 0.98, 0.95, 1.)
         };
         let key = Key {
             renderer: renderer.context_id(),
-            text: caption(index, name, empty, viewport.is_some()),
+            text,
             background,
             ink,
-            viewport,
-            width: (width as u32 / 8) * 8,
+            thumbnail,
+            width: if thumbnail {
+                width as u32
+            } else {
+                (width as u32 / 8) * 8
+            },
             scale,
         };
         let mut cache = self.texture.borrow_mut();
@@ -107,6 +110,94 @@ impl OverviewCaption {
             Kind::Unspecified,
         );
         Some(PrimaryGpuTextureRenderElement(element))
+    }
+}
+
+pub(super) fn caption_background(accent: Color, backdrop: Color, active: bool) -> Color {
+    if active {
+        Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
+    } else if is_light(backdrop) {
+        Color::new_unpremul(0.92, 0.95, 0.93, 0.97)
+    } else {
+        Color::new_unpremul(0.08, 0.14, 0.15, 0.96)
+    }
+}
+
+impl OverviewCaption {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render(
+        &self,
+        renderer: &mut GlesRenderer,
+        index: usize,
+        name: Option<&str>,
+        empty: bool,
+        background: Color,
+        width: f64,
+        scale: f64,
+        location: Point<f64, Logical>,
+        alpha: f32,
+    ) -> Option<PrimaryGpuTextureRenderElement> {
+        self.title.render(
+            renderer,
+            caption(index, name, empty),
+            background,
+            false,
+            width,
+            scale,
+            location,
+            alpha,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_viewport(
+        &self,
+        renderer: &mut GlesRenderer,
+        strip: std::ops::Range<f64>,
+        visible: std::ops::Range<f64>,
+        y: f64,
+        accent: Color,
+        backdrop: Color,
+        scale: f64,
+        alpha: f32,
+        push: &mut dyn FnMut(ViewportDecoration),
+    ) {
+        let mut lines = self.viewport_rules.borrow_mut();
+        let track = Color::new_unpremul(accent.r, accent.g, accent.b, 0.36 * alpha);
+        let highlight = Color::new_unpremul(accent.r, accent.g, accent.b, alpha);
+        for (buffer, (range, color)) in lines
+            .iter_mut()
+            .zip([(visible.clone(), highlight), (strip, track)])
+        {
+            let width = range.end - range.start;
+            if width <= 0. {
+                continue;
+            }
+            buffer.update((width, 2.), color);
+            push(ViewportDecoration::Rule(
+                SolidColorRenderElement::from_buffer(
+                    buffer,
+                    (range.start, y),
+                    1.,
+                    Kind::Unspecified,
+                ),
+            ));
+        }
+        if visible.end - visible.start >= 118. {
+            let position = Point::from(((visible.start + visible.end) / 2. - 49., y - 30.));
+            if let Some(element) = self.viewport_label.render(
+                renderer,
+                "Visible area".into(),
+                caption_background(accent, backdrop, false),
+                false,
+                120.,
+                scale,
+                position,
+                alpha,
+            ) {
+                push(ViewportDecoration::Caption(element));
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -169,7 +260,7 @@ fn is_light(color: Color) -> bool {
     0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b >= 0.55
 }
 
-fn caption(index: usize, name: Option<&str>, empty: bool, has_viewport: bool) -> String {
+fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
     let name: String = name
         .unwrap_or_default()
         .chars()
@@ -177,15 +268,11 @@ fn caption(index: usize, name: Option<&str>, empty: bool, has_viewport: bool) ->
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let name = name.trim();
-    let mut title = match (name.is_empty(), empty) {
+    match (name.is_empty(), empty) {
         (true, true) => format!("{index}   Empty workspace"),
         (true, false) => format!("Workspace {index}"),
         (false, _) => format!("{index}   {name}"),
-    };
-    if has_viewport {
-        title.push_str("   ·   Visible area");
     }
-    title
 }
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
@@ -204,31 +291,57 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let cr = cairo::Context::new(&probe)?;
     cr.scale(key.scale, key.scale);
     let label = layout(&cr, key);
-    let track_space = key.viewport.map_or(0., |_| TRACK_WIDTH + PADDING);
-    let width = (f64::from(label.pixel_size().0) + 2. * PADDING + track_space)
-        .max(30.)
-        .min(f64::from(key.width));
+    let max_width = f64::from(key.width);
+    let (width, height) = if key.thumbnail {
+        (max_width.min(4096.), 22.)
+    } else {
+        (
+            (f64::from(label.pixel_size().0) + 2. * PADDING)
+                .max(30.)
+                .min(max_width),
+            HEIGHT,
+        )
+    };
     let pixel_width = (width * key.scale).ceil() as i32;
-    let pixel_height = (HEIGHT * key.scale).ceil() as i32;
+    let pixel_height = (height * key.scale).ceil() as i32;
 
     let surface = ImageSurface::create(cairo::Format::ARgb32, pixel_width, pixel_height)?;
     let cr = cairo::Context::new(&surface)?;
     cr.scale(key.scale, key.scale);
-    let radius = HEIGHT / 2.;
+    let radius = if key.thumbnail { 7. } else { height / 2. };
     cr.arc(
         radius,
         radius,
         radius,
-        std::f64::consts::FRAC_PI_2,
-        3. * std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+        1.5 * std::f64::consts::PI,
     );
     cr.arc(
         width - radius,
         radius,
         radius,
         -std::f64::consts::FRAC_PI_2,
-        std::f64::consts::FRAC_PI_2,
+        0.,
     );
+    if key.thumbnail {
+        cr.line_to(width, height);
+        cr.line_to(0., height);
+    } else {
+        cr.arc(
+            width - radius,
+            height - radius,
+            radius,
+            0.,
+            std::f64::consts::FRAC_PI_2,
+        );
+        cr.arc(
+            radius,
+            height - radius,
+            radius,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+        );
+    }
     cr.close_path();
     let color = key.background;
     cr.set_source_rgba(
@@ -240,27 +353,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     cr.fill()?;
 
     let label = layout(&cr, key);
-    label.set_width(((width - 2. * PADDING - track_space) * f64::from(pango::SCALE)) as i32);
+    label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
     let (_, h) = label.pixel_size();
     let ink = key.ink;
-    cr.move_to(PADDING, (HEIGHT - f64::from(h)) / 2.);
+    cr.move_to(PADDING, (height - f64::from(h)) / 2.);
     cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
     pangocairo::functions::show_layout(&cr, &label);
-    if let Some((start, end)) = key.viewport {
-        let x = width - PADDING - TRACK_WIDTH;
-        let y = HEIGHT / 2.;
-        cr.set_line_cap(cairo::LineCap::Round);
-        cr.set_line_width(4.);
-        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.28);
-        cr.move_to(x, y);
-        cr.line_to(x + TRACK_WIDTH, y);
-        cr.stroke()?;
-        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-        let at = |percent: u8| x + TRACK_WIDTH * f64::from(percent) / 100.;
-        cr.move_to(at(start), y);
-        cr.line_to(at(end), y);
-        cr.stroke()?;
-    }
     drop(cr);
 
     Ok(TextureBuffer::from_memory(
@@ -281,12 +379,9 @@ mod tests {
 
     #[test]
     fn captions_use_the_workspace_index_and_plain_names() {
-        assert_eq!(caption(2, None, false, false), "Workspace 2");
-        assert_eq!(caption(3, Some("  "), false, false), "Workspace 3");
-        assert_eq!(
-            caption(4, Some("Field\nnotes"), false, false),
-            "4   Field notes"
-        );
-        assert_eq!(caption(1, Some(&"x".repeat(160)), false, false).len(), 132);
+        assert_eq!(caption(2, None, false), "Workspace 2");
+        assert_eq!(caption(3, Some("  "), false), "Workspace 3");
+        assert_eq!(caption(4, Some("Field\nnotes"), false), "4   Field notes");
+        assert_eq!(caption(1, Some(&"x".repeat(160)), false).len(), 132);
     }
 }

@@ -12,6 +12,7 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
+use super::overview_caption::{caption_background, ViewportDecoration};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
 use super::workspace::{
@@ -28,7 +29,7 @@ use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::SolidColorRenderElement;
 use crate::render_helpers::xray::XrayPos;
-use crate::render_helpers::RenderCtx;
+use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::rubber_band::RubberBand;
 use crate::utils::transaction::Transaction;
 use crate::utils::{
@@ -293,6 +294,15 @@ impl From<&super::OverviewProgress> for OverviewProgress {
             super::OverviewProgress::Open => Self::Value(1.),
         }
     }
+}
+
+fn visible_extent<'a, W: LayoutElement + 'a>(
+    tiles: impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)>,
+) -> Option<Range<f64>> {
+    tiles
+        .filter(|(_, _, shown)| *shown)
+        .map(|(tile, pos, _)| pos.x..pos.x + tile.tile_size().w)
+        .reduce(|extent, next| extent.start.min(next.start)..extent.end.max(next.end))
 }
 
 /// Center the complete strip in the overview when it fits at the configured
@@ -1533,16 +1543,7 @@ impl<W: LayoutElement> Monitor<W> {
                         return None;
                     }
 
-                    let extent = ws
-                        .tiles_with_render_positions()
-                        .filter(|(_, _, visible)| *visible)
-                        .fold(None::<Range<f64>>, |extent, (tile, pos, _)| {
-                            let left = pos.x;
-                            let right = pos.x + tile.tile_size().w;
-                            Some(extent.map_or(left..right, |extent| {
-                                extent.start.min(left)..extent.end.max(right)
-                            }))
-                        })?;
+                    let extent = visible_extent(ws.tiles_with_render_positions())?;
                     fit_overview_strip(extent, &viewport, zoom, final_zoom)
                 })
                 .collect()
@@ -1788,77 +1789,153 @@ impl<W: LayoutElement> Monitor<W> {
         )
     }
 
-    fn scroll_viewport(&self, ws: &Workspace<W>) -> Option<(u8, u8)> {
-        let extent = ws
-            .scrolling()
-            .tiles_with_render_positions()
-            .filter(|(_, _, visible)| *visible)
-            .fold(None::<Range<f64>>, |extent, (tile, pos, _)| {
-                let left = pos.x;
-                let right = pos.x + tile.tile_size().w;
-                Some(extent.map_or(left..right, |extent| {
-                    extent.start.min(left)..extent.end.max(right)
-                }))
-            })?;
-        let width = extent.end - extent.start;
-        if width <= 0. {
+    fn scroll_viewport(
+        &self,
+        ws: &Workspace<W>,
+        geo: Rectangle<f64, Logical>,
+    ) -> Option<(Range<f64>, Range<f64>)> {
+        let extent = visible_extent(ws.scrolling().tiles_with_render_positions())?;
+        let view = ws.working_area();
+        let start = extent.start.max(view.loc.x);
+        let end = extent.end.min(view.loc.x + view.size.w);
+        if start >= end || (start <= extent.start && end >= extent.end) {
             return None;
         }
-        let view = ws.working_area();
-        let percent = |x: f64| (((x - extent.start) / width).clamp(0., 1.) * 100.).round() as u8;
-        let start = percent(view.loc.x);
-        let end = percent(view.loc.x + view.size.w);
-        (start < end && (start > 0 || end < 100)).then_some((start, end))
+        let (left, right) = self.overview_horizontal_bounds();
+        let zoom = self.overview_zoom();
+        let x = |x| (geo.loc.x + zoom * x).clamp(left, right);
+        Some((x(extent.start)..x(extent.end), x(start)..x(end)))
     }
 
     fn render_overview_captions<R: NiriRenderer>(
         &self,
         renderer: &mut R,
+        target: RenderTarget,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let Some(progress) = self.overview_progress_value() else {
             return;
         };
-        // Labels appear once there is space above the card and recede early on closing.
         let alpha = ((progress - 0.35) / 0.65).clamp(0., 1.) as f32;
+        if alpha == 0. {
+            return;
+        }
+        let label_alpha = ((progress - 0.82) / 0.18).clamp(0., 1.) as f32;
         let scale = self.scale.fractional_scale();
-        for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
-            let top = geo.loc.y - 36.;
-            let (left, right) = self.overview_horizontal_bounds();
-            let x = left + OVERVIEW_INSET;
-            let width = (right - x - OVERVIEW_INSET).min(350.);
-            if top < 0. || alpha == 0. || width < 36. {
-                continue;
-            }
-
-            let active = index == self.active_workspace_idx;
-            let Some(caption) = ws.overview_caption.render(
-                renderer.as_gles_renderer(),
-                index + 1,
-                ws.name().map(String::as_str),
-                !ws.has_windows_or_name(),
-                active,
-                ws.options.layout.border.active_color,
-                ws.options.layout.background_color,
-                if active {
-                    self.scroll_viewport(ws)
-                } else {
-                    None
-                },
-                width,
-                scale,
-                Point::from((x, top)),
-                alpha,
-            ) else {
-                continue;
-            };
-            let elem = MonitorInnerRenderElement::Caption(caption);
-            let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+        let zoom = self.overview_zoom();
+        let (left, right) = self.overview_horizontal_bounds();
+        let mut draw = |element| {
+            let element = RescaleRenderElement::from_element(element, Point::default(), 1.);
             push(RelocateRenderElement::from_element(
-                elem,
+                element,
                 Point::default(),
                 Relocate::Relative,
             ));
+        };
+
+        for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
+            let active = index == self.active_workspace_idx;
+            let accent = ws.options.layout.border.active_color;
+            let backdrop = ws.options.layout.background_color;
+            let top = geo.loc.y - 36.;
+            let x = left + OVERVIEW_INSET;
+            let width = (right - x - OVERVIEW_INSET).min(235.);
+            if top >= 0. && width >= 36. {
+                if let Some(caption) = ws.overview_caption.render(
+                    renderer.as_gles_renderer(),
+                    index + 1,
+                    ws.name().map(String::as_str),
+                    !ws.has_windows_or_name(),
+                    caption_background(accent, backdrop, active),
+                    width,
+                    scale,
+                    Point::from((x, top)),
+                    alpha,
+                ) {
+                    draw(MonitorInnerRenderElement::Caption(caption));
+                }
+                if active {
+                    if let Some((strip, visible)) = self.scroll_viewport(ws, geo) {
+                        ws.overview_caption.render_viewport(
+                            renderer.as_gles_renderer(),
+                            strip,
+                            visible,
+                            geo.loc.y + 2.,
+                            accent,
+                            backdrop,
+                            scale,
+                            alpha,
+                            &mut |element| match element {
+                                ViewportDecoration::Rule(element) => {
+                                    draw(MonitorInnerRenderElement::SolidColor(element))
+                                }
+                                ViewportDecoration::Caption(element) => {
+                                    draw(MonitorInnerRenderElement::Caption(element))
+                                }
+                            },
+                        );
+                    }
+                }
+            }
+
+            if label_alpha == 0. {
+                continue;
+            }
+            let mut in_front: Vec<Rectangle<f64, Logical>> = Vec::new();
+            let focused = active.then(|| ws.active_window()).flatten();
+            for (tile, pos, visible) in ws.tiles_with_render_positions() {
+                if !visible {
+                    continue;
+                }
+                let location = geo.loc + pos.upscale(zoom);
+                let size = tile.tile_size().upscale(zoom);
+                if location.x + size.w < left || location.x > right {
+                    continue;
+                }
+                let rect = Rectangle::new(location, size);
+                let label = Rectangle::new(
+                    location + Point::from((1., 1.)),
+                    Size::from((size.w - 2., 22.)),
+                );
+                let covered = in_front
+                    .iter()
+                    .any(|front| front.intersection(label).is_some());
+                in_front.push(rect);
+                let window = tile.window();
+                if covered
+                    || size.h < 40.
+                    || label.size.w < 65.
+                    || location.x < left
+                    || location.x + size.w > right
+                    || target.should_block_out(window.rules().block_out_from)
+                {
+                    continue;
+                }
+
+                let selected = focused.is_some_and(|focused| focused.id() == window.id());
+                window.with_overview_title(|title| {
+                    let title: String = title
+                        .chars()
+                        .take(512)
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect();
+                    if title.trim().is_empty() {
+                        return;
+                    }
+                    if let Some(label) = tile.overview_label.render(
+                        renderer.as_gles_renderer(),
+                        title,
+                        caption_background(accent, backdrop, selected),
+                        true,
+                        label.size.w,
+                        scale,
+                        label.loc,
+                        label_alpha,
+                    ) {
+                        draw(MonitorInnerRenderElement::Caption(label));
+                    }
+                });
+            }
         }
     }
 
@@ -1877,7 +1954,7 @@ impl<W: LayoutElement> Monitor<W> {
         let zoom = self.overview_zoom();
 
         if self.options.overview.framed_workspaces {
-            self.render_overview_captions(ctx.renderer, push);
+            self.render_overview_captions(ctx.renderer, ctx.target, push);
         }
 
         let insert_hint_render_loc = self

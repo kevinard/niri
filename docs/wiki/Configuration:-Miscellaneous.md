@@ -419,5 +419,7 @@ overview {
 Centers the overview in the usable area and keeps scrolling window previews
 clear of reserved side panels. Each visible workspace has a full-size caption
 with its number and configured name. The overview centers the full strip when
-it fits at the configured zoom. Wider strips keep their scroll position and can
-still be explored with the overview's usual gestures and shortcuts.
+it fits at the configured zoom. Visible thumbnails keep readable titles and the
+focus accent. A horizontal rule aligns the live viewport with the preview strip
+when part of it is offscreen. Wider strips retain the usual gestures and
+shortcuts.
