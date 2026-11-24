@@ -2683,6 +2683,10 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    pub fn has_navigation_controls(&self) -> bool {
+        self.has_framed_overview() || self.options.layout.clip_scroll_to_work_area
+    }
+
     pub fn has_framed_overview(&self) -> bool {
         self.options.overview.framed_workspaces && self.overview_progress.is_some()
     }

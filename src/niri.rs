@@ -4681,7 +4681,7 @@ impl Niri {
         let mon = self.layout.monitor_for_output(output).unwrap();
         let zoom = mon.overview_zoom();
         let pointer = self.seat.get_pointer().unwrap();
-        let pointer = ((mon.has_framed_overview() || mon.options.layout.clip_scroll_to_work_area)
+        let pointer = (mon.has_navigation_controls()
             && self.pointer_visibility.is_visible()
             && !pointer.is_grabbed())
         .then(|| pointer.current_location())
