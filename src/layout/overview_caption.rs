@@ -26,7 +26,9 @@ pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) enum LabelKind {
     Caption,
     GroupHeading,
-    Preview,
+    Preview {
+        show_action: bool,
+    },
     Button {
         align_right: bool,
     },
@@ -143,6 +145,16 @@ pub(super) fn caption_background(accent: Color, backdrop: Color, active: bool) -
     } else {
         Color::new_unpremul(0.08, 0.14, 0.15, 1.)
     }
+}
+
+pub(super) fn tint_caption(background: Color, accent: Color) -> Color {
+    let mix = |base, highlight| base * 0.76 + highlight * 0.24;
+    Color::new_unpremul(
+        mix(background.r, accent.r),
+        mix(background.g, accent.g),
+        mix(background.b, accent.b),
+        1.,
+    )
 }
 
 impl OverviewCaption {
@@ -324,7 +336,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
         LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
-        LabelKind::Preview => (max_width.min(4096.), 22.),
+        LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
@@ -360,7 +372,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
     let radius = match key.kind {
-        LabelKind::Preview => 7.,
+        LabelKind::Preview { .. } => 7.,
         LabelKind::WindowNavigation { .. } => 14.,
         _ => height / 2.,
     };
@@ -378,7 +390,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         -std::f64::consts::FRAC_PI_2,
         0.,
     );
-    if key.kind == LabelKind::Preview {
+    if matches!(key.kind, LabelKind::Preview { .. }) {
         cr.line_to(width, height);
         cr.line_to(0., height);
     } else {
@@ -409,7 +421,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             color.b.into(),
             color.a.into(),
         );
-        cr.fill()?;
+        if matches!(
+            key.kind,
+            LabelKind::Button { .. } | LabelKind::WindowNavigation { .. }
+        ) {
+            cr.fill_preserve()?;
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.28);
+            cr.set_line_width(1.);
+            cr.stroke()?;
+        } else {
+            cr.fill()?;
+        }
     }
 
     if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
@@ -451,7 +473,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     } else {
         cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         let label = layout(&cr, key);
-        label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
+        let mut title_width = width - 2. * PADDING;
+        if matches!(key.kind, LabelKind::Preview { show_action: true }) {
+            let action = layout(&cr, key);
+            action.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
+            action.set_text("Show window");
+            let (w, h) = action.pixel_size();
+            title_width -= f64::from(w) + PADDING;
+            cr.move_to(width - PADDING - f64::from(w), (height - f64::from(h)) / 2.);
+            pangocairo::functions::show_layout(&cr, &action);
+        }
+        label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
             LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
