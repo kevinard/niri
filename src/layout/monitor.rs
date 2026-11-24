@@ -12,7 +12,7 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
-use super::overview_caption::{caption_background, PreviewLabel};
+use super::overview_caption::{caption_background, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT};
 use super::scrolling::{Column, ColumnWidth, ScrollDirection};
 use super::tile::Tile;
 use super::workspace::{
@@ -158,6 +158,11 @@ pub(super) struct InsertHint {
 struct InsertHintRenderLoc {
     workspace: InsertWorkspace,
     location: Point<f64, Logical>,
+}
+
+struct ScrollCue<'a, W> {
+    rect: Rectangle<f64, Logical>,
+    destination: &'a W,
 }
 
 #[derive(Debug)]
@@ -1723,7 +1728,7 @@ impl<W: LayoutElement> Monitor<W> {
         Some(area.loc.x..right)
     }
 
-    fn scroll_cue_rects(&self) -> [Option<Rectangle<f64, Logical>>; 2] {
+    fn scroll_cues(&self) -> [Option<ScrollCue<'_, W>>; 2] {
         let ws = self.active_workspace_ref();
         if self.workspace_switch.is_some() || ws.floating_is_active() {
             return [None, None];
@@ -1731,7 +1736,9 @@ impl<W: LayoutElement> Monitor<W> {
         let Some(bounds) = self.scroll_clip(ws) else {
             return [None, None];
         };
-        if bounds.end - bounds.start < 90. || self.working_area.size.h < 28. {
+        let width = ((bounds.end - bounds.start) / 5.).floor().min(184.);
+        let height = SCROLL_BUTTON_HEIGHT;
+        if width < 30. || self.working_area.size.h < height {
             return [None, None];
         }
         let scrolling = ws.scrolling();
@@ -1742,54 +1749,95 @@ impl<W: LayoutElement> Monitor<W> {
             return [None, None];
         };
         let mut columns = scrolling.columns();
-        let first = columns.next().map(Column::id);
-        let last = columns.last().map(Column::id).or(first);
+        let mut previous = None;
+        for column in columns.by_ref() {
+            if column.id() == active {
+                break;
+            }
+            previous = Some(column);
+        }
+        let next = columns.next();
         let tolerance = 1. / self.scale.fractional_scale();
-        let hidden_left = first != Some(active) && extent.start < bounds.start - tolerance;
-        let hidden_right = last != Some(active) && extent.end > bounds.end + tolerance;
-        let y = self.working_area.loc.y + (self.working_area.size.h - 28.) / 2.;
-        let rect = |x| Rectangle::new(Point::from((x, y)), Size::from((30., 28.)));
+        let y = self.working_area.loc.y + (self.working_area.size.h - height) / 2.;
+        let rect = |x| Rectangle::new(Point::from((x, y)), Size::from((width, height)));
         [
-            hidden_left.then(|| rect(bounds.start + 4.)),
-            hidden_right.then(|| rect(bounds.end - 34.)),
+            previous
+                .filter(|_| extent.start < bounds.start - tolerance)
+                .map(|column| ScrollCue {
+                    rect: rect(bounds.start + 4.),
+                    destination: column.active_window(),
+                }),
+            next.filter(|_| extent.end > bounds.end + tolerance)
+                .map(|column| ScrollCue {
+                    rect: rect(bounds.end - width - 4.),
+                    destination: column.active_window(),
+                }),
         ]
     }
 
     pub fn scroll_cue_under(&self, position: Point<f64, Logical>) -> Option<ScrollDirection> {
-        self.scroll_cue_rects()
+        self.scroll_cues()
             .into_iter()
             .zip([ScrollDirection::Left, ScrollDirection::Right])
-            .find_map(|(rect, direction)| {
-                rect.filter(|rect| rect.contains(position)).map(|_| direction)
+            .find_map(|(cue, direction)| {
+                cue.filter(|cue| cue.rect.contains(position)).map(|_| direction)
             })
     }
 
     fn render_scroll_cues<R: NiriRenderer>(
         &self,
         renderer: &mut R,
+        target: RenderTarget,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let ws = self.active_workspace_ref();
-        let color = caption_background(
-            ws.options.layout.border.active_color,
-            ws.options.layout.background_color,
-            true,
+        let accent = ws.options.layout.border.active_color;
+        let surface = caption_background(accent, ws.options.layout.background_color, false);
+        let mix = |base, highlight| base * 0.76 + highlight * 0.24;
+        let color = Color::new_unpremul(
+            mix(surface.r, accent.r),
+            mix(surface.g, accent.g),
+            mix(surface.b, accent.b),
+            1.,
         );
-        for ((label, rect), icon) in self
+        for ((label, cue), (icon, fallback)) in self
             .scroll_cue_labels
             .iter()
-            .zip(self.scroll_cue_rects())
-            .zip(["‹", "›"])
+            .zip(self.scroll_cues())
+            .zip([("‹", "Previous window"), ("›", "Next window")])
         {
-            let Some(rect) = rect else { continue };
+            let Some(cue) = cue else { continue };
+            let title = if cue.rect.size.w < 102. {
+                String::new()
+            } else if target.should_block_out(cue.destination.rules().block_out_from) {
+                fallback.to_owned()
+            } else {
+                cue.destination.with_overview_title(|title| {
+                    let title: String = title
+                        .chars()
+                        .take(96)
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect();
+                    if title.trim().is_empty() {
+                        fallback.to_owned()
+                    } else {
+                        title
+                    }
+                })
+            };
+            let text = if title.is_empty() {
+                icon.to_owned()
+            } else {
+                format!("{icon}  {title}")
+            };
             if let Some(label) = label.render(
                 renderer.as_gles_renderer(),
-                icon.into(),
+                text,
                 color,
-                false,
-                32.,
+                LabelKind::Button,
+                cue.rect.size.w,
                 self.scale.fractional_scale(),
-                rect.loc,
+                cue.rect.loc,
                 1.,
             ) {
                 let elem = MonitorInnerRenderElement::Caption(label);
@@ -1930,7 +1978,7 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         ws: &Workspace<W>,
         geo: Rectangle<f64, Logical>,
-    ) -> Option<(Range<f64>, Range<f64>)> {
+    ) -> Option<Range<f64>> {
         let tiles = || ws.scrolling().tiles_with_render_positions();
         let extent = visible_extent(tiles())?;
         let view = ws.working_area();
@@ -1946,7 +1994,7 @@ impl<W: LayoutElement> Monitor<W> {
         let (left, right) = self.overview_horizontal_bounds();
         let zoom = self.overview_zoom();
         let x = |x: f64| (geo.loc.x + zoom * x).clamp(left, right);
-        Some((x(extent.start)..x(extent.end), x(visible.start)..x(visible.end)))
+        Some(x(visible.start)..x(visible.end))
     }
 
     fn render_overview_captions<R: NiriRenderer>(
@@ -2004,7 +2052,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
 
             let desktop_view = active.then(|| self.desktop_window_extent(ws, geo)).flatten();
-            if let Some((strip, visible)) = &desktop_view {
+            if let Some(visible) = &desktop_view {
                 let caption_end = x + if ws.name().is_some() { width } else { 125. };
                 let label_x = (visible.start + 10.).max(caption_end);
                 if top >= 0. && visible.end - label_x >= 148. {
@@ -2012,7 +2060,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         "Visible on desktop".into(),
                         caption_background(accent, backdrop, false),
-                        false,
+                        LabelKind::Caption,
                         172.,
                         scale,
                         Point::from((label_x, top)),
@@ -2021,13 +2069,6 @@ impl<W: LayoutElement> Monitor<W> {
                         draw(MonitorInnerRenderElement::Caption(caption));
                     }
                 }
-                ws.overview_caption.render_outside_view(
-                    strip.clone(),
-                    visible,
-                    (geo.loc.y + 10.)..(geo.loc.y + geo.size.h - 10.),
-                    alpha,
-                    &mut |element| draw(MonitorInnerRenderElement::SolidColor(element)),
-                );
             }
 
             if label_alpha == 0. {
@@ -2078,7 +2119,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         title,
                         caption_background(accent, backdrop, selected),
-                        true,
+                        LabelKind::Preview,
                         label.size.w,
                         scale,
                         label.loc,
@@ -2108,7 +2149,7 @@ impl<W: LayoutElement> Monitor<W> {
         if self.options.overview.framed_workspaces {
             self.render_overview_captions(ctx.renderer, ctx.target, push);
         }
-        self.render_scroll_cues(ctx.renderer, push);
+        self.render_scroll_cues(ctx.renderer, ctx.target, push);
 
         let insert_hint_render_loc = self
             .insert_hint_render_loc
@@ -2297,13 +2338,13 @@ impl<W: LayoutElement> Monitor<W> {
                 continue;
             };
             if index == self.active_workspace_idx {
-                if let Some((_, desktop)) = self.desktop_window_extent(ws, geo) {
+                if let Some(desktop) = self.desktop_window_extent(ws, geo) {
                     // Include whole previews for any windows visible on the desktop.
                     // This keeps the tray edge in a gap between windows.
                     let inset = 8. * progress;
                     let right = rect.loc.x + rect.size.w;
-                    let start = (desktop.start - inset).max(rect.loc.x);
-                    let end = (desktop.end + inset).min(right);
+                    let start = (desktop.start - inset / 2.).max(rect.loc.x);
+                    let end = (desktop.end + inset / 2.).min(right);
                     let reveal = ((progress - 0.35) / 0.65).clamp(0., 1.);
                     let start = rect.loc.x + (start - rect.loc.x) * reveal;
                     let end = right + (end - right) * reveal;

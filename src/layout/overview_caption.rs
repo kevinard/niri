@@ -18,12 +18,19 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
+pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LabelKind {
+    Caption,
+    Preview,
+    Button,
+}
 
 #[derive(Debug)]
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
     pub(super) desktop_view: PreviewLabel,
-    outside_view: RefCell<[SolidColorBuffer; 2]>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
 }
@@ -33,7 +40,6 @@ impl Default for OverviewCaption {
         Self {
             title: PreviewLabel::default(),
             desktop_view: PreviewLabel::default(),
-            outside_view: RefCell::default(),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
         }
@@ -46,7 +52,7 @@ struct Key {
     text: String,
     background: Color,
     ink: Color,
-    thumbnail: bool,
+    kind: LabelKind,
     width: u32,
     scale: f64,
 }
@@ -63,7 +69,7 @@ impl PreviewLabel {
         renderer: &mut GlesRenderer,
         text: String,
             background: Color,
-        thumbnail: bool,
+        kind: LabelKind,
         width: f64,
         scale: f64,
         location: Point<f64, Logical>,
@@ -79,11 +85,10 @@ impl PreviewLabel {
             text,
             background,
             ink,
-            thumbnail,
-            width: if thumbnail {
-                width as u32
-            } else {
-                (width as u32 / 8) * 8
+            kind,
+            width: match kind {
+                LabelKind::Caption => (width as u32 / 8) * 8,
+                LabelKind::Preview | LabelKind::Button => width as u32,
             },
             scale,
         };
@@ -136,45 +141,12 @@ impl OverviewCaption {
             renderer,
             caption(index, name, empty),
             background,
-            false,
+            LabelKind::Caption,
             width,
             scale,
             location,
             alpha,
         )
-    }
-
-    pub(super) fn render_outside_view(
-        &self,
-        strip: std::ops::Range<f64>,
-        visible: &std::ops::Range<f64>,
-        vertical: std::ops::Range<f64>,
-        alpha: f32,
-        push: &mut dyn FnMut(SolidColorRenderElement),
-    ) {
-        let shade = Color::new_unpremul(0., 0.035, 0.025, 0.19 * alpha);
-        let height = vertical.end - vertical.start;
-        if height <= 0. {
-            return;
-        }
-
-        let mut buffers = self.outside_view.borrow_mut();
-        for (buffer, range) in buffers.iter_mut().zip([
-            strip.start..visible.start,
-            visible.end..strip.end,
-        ]) {
-            let width = range.end - range.start;
-            if width <= 0. {
-                continue;
-            }
-            buffer.update((width, height), shade);
-            push(SolidColorRenderElement::from_buffer(
-                buffer,
-                (range.start, vertical.start),
-                1.,
-                Kind::Unspecified,
-            ));
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -269,15 +241,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     cr.scale(key.scale, key.scale);
     let label = layout(&cr, key);
     let max_width = f64::from(key.width);
-    let (width, height) = if key.thumbnail {
-        (max_width.min(4096.), 22.)
-    } else {
-        (
+    let (width, height) = match key.kind {
+        LabelKind::Preview => (max_width.min(4096.), 22.),
+        LabelKind::Button => (max_width, SCROLL_BUTTON_HEIGHT),
+        LabelKind::Caption => (
             (f64::from(label.pixel_size().0) + 2. * PADDING)
                 .max(30.)
                 .min(max_width),
             HEIGHT,
-        )
+        ),
     };
     let pixel_width = (width * key.scale).ceil() as i32;
     let pixel_height = (height * key.scale).ceil() as i32;
@@ -285,7 +257,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let surface = ImageSurface::create(cairo::Format::ARgb32, pixel_width, pixel_height)?;
     let cr = cairo::Context::new(&surface)?;
     cr.scale(key.scale, key.scale);
-    let radius = if key.thumbnail { 7. } else { height / 2. };
+    let radius = if key.kind == LabelKind::Preview { 7. } else { height / 2. };
     cr.arc(
         radius,
         radius,
@@ -300,7 +272,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         -std::f64::consts::FRAC_PI_2,
         0.,
     );
-    if key.thumbnail {
+    if key.kind == LabelKind::Preview {
         cr.line_to(width, height);
         cr.line_to(0., height);
     } else {

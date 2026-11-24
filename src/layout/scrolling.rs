@@ -871,12 +871,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn active_window(&self) -> Option<&W> {
-        if self.columns.is_empty() {
-            return None;
-        }
-
-        let col = &self.columns[self.active_column_idx];
-        Some(col.tiles[col.active_tile_idx].window())
+        self.active_column().map(Column::active_window)
     }
 
     pub fn active_window_mut(&mut self) -> Option<&mut W> {
@@ -4788,6 +4783,10 @@ impl<W: LayoutElement> Column<W> {
     /// Fullscreen and maximized pinned columns scroll at their end of the strip instead.
     fn pinned_in_place(&self) -> Option<PinSide> {
         self.pinned.filter(|_| self.sizing_mode().is_normal())
+    }
+
+    pub(super) fn active_window(&self) -> &W {
+        self.tiles[self.active_tile_idx].window()
     }
 
     fn update_config(
