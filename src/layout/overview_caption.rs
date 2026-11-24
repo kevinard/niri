@@ -22,9 +22,8 @@ const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
-pub(super) const STRIP_TRAY_HEADER_HEIGHT: f64 = 24.;
-pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 =
-    STRIP_BUTTON_HEIGHT + STRIP_TRAY_HEADER_HEIGHT - 1.;
+pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_BUTTON_HEIGHT + 4.;
+pub(super) const STRIP_RANGE_HEIGHT: f64 = 3.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
@@ -43,13 +42,6 @@ pub(super) enum FocusMarker {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProjectionOutline {
-    Hidden,
-    Resting,
-    Highlighted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
     Caption,
     NavigationHint,
@@ -57,9 +49,7 @@ pub(super) enum LabelKind {
     OverviewCommand,
     StripTray,
     StripViewport,
-    StripProjected {
-        outline: ProjectionOutline,
-    },
+    StripRange,
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
@@ -444,13 +434,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             (max_width.min(4096.), OVERVIEW_CONTROL_HEIGHT)
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
-        LabelKind::StripTray => (
-            max_width,
-            STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_TRAY_HEADER_HEIGHT,
-        ),
-        LabelKind::StripViewport | LabelKind::StripProjected { .. } => {
-            (max_width, STRIP_VIEWPORT_BAND_HEIGHT)
-        }
+        LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
+        LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
+        LabelKind::StripRange => (max_width, STRIP_RANGE_HEIGHT),
         LabelKind::StripButton {
             direction: Some(_), ..
         } => (max_width, STRIP_BUTTON_HEIGHT - 6.),
@@ -494,7 +480,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
-        LabelKind::StripViewport | LabelKind::StripProjected { .. } => 11.,
+        LabelKind::StripViewport => 10.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton {
             direction: Some(_), ..
@@ -550,8 +536,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripTray
-                | LabelKind::StripViewport
-                | LabelKind::StripProjected { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint
                 | LabelKind::StripButton { outlined: true, .. }
@@ -560,36 +544,23 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 | LabelKind::WindowNavigation { .. }
         ) {
             cr.fill_preserve()?;
-            let stroke_alpha = match key.kind {
-                LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport
-                | LabelKind::StripProjected {
-                    outline: ProjectionOutline::Highlighted,
-                } => 0.65,
-                LabelKind::StripProjected {
-                    outline: ProjectionOutline::Resting,
-                } => 0.35,
-                LabelKind::StripProjected {
-                    outline: ProjectionOutline::Hidden,
-                } => 0.,
-                _ => 0.28,
+            let stroke_alpha = if key.kind == LabelKind::StripTray {
+                0.14
+            } else {
+                0.28
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            let viewport = matches!(
-                key.kind,
-                LabelKind::StripViewport | LabelKind::StripProjected { .. }
-            );
-            cr.set_line_width(if viewport { 1.5 } else { 1. });
-            if matches!(key.kind, LabelKind::StripProjected { .. }) {
-                cr.set_dash(&[5., 3.], 0.);
-            }
+            cr.set_line_width(1.);
             cr.stroke()?;
         } else {
             cr.fill()?;
         }
     }
 
-    if key.kind == LabelKind::StripTray {
+    if matches!(
+        key.kind,
+        LabelKind::StripTray | LabelKind::StripViewport | LabelKind::StripRange
+    ) {
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
@@ -635,13 +606,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let label = layout(&cr, key);
         let mut title_width = width - 2. * PADDING;
         let mut title_x = PADDING;
-        let viewport = matches!(
-            key.kind,
-            LabelKind::StripViewport | LabelKind::StripProjected { .. }
-        );
-        if viewport {
-            label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
-        }
         if key.kind == LabelKind::OverviewCommand {
             let keycap = layout(&cr, key);
             keycap.set_text("Enter");
@@ -788,13 +752,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let x = match key.kind {
             LabelKind::NavigationHint => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
-            LabelKind::LayerAction { .. } | LabelKind::StripProjected { .. } => title_x,
+            LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        let y = if viewport {
-            3.
-        } else if status.is_some() {
+        let y = if status.is_some() {
             if offscreen {
                 1.
             } else {
