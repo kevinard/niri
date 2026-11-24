@@ -2219,7 +2219,7 @@ impl<W: LayoutElement> Monitor<W> {
         let tray_width = tabs_width + action_space;
         let start = (bounds.start + bounds.end - tray_width) / 2.;
         let y = top + 8.;
-        let action_y = y + STRIP_BUTTON_HEIGHT + 1.;
+        let action_y = y + STRIP_BUTTON_HEIGHT + 3.;
         let uncovered = |rect: Rectangle<f64, Logical>| {
             let covered = floating_visible
                 && floating.iter().any(|(tile, position)| {
@@ -2730,7 +2730,7 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    direction_background,
+                    tint_caption(surface, accent),
                     LabelKind::StripViewport,
                     rect.size.w,
                     scale,

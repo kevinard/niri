@@ -21,9 +21,9 @@ const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 30.;
-pub(super) const STRIP_ACTION_HEIGHT: f64 = 21.;
+pub(super) const STRIP_ACTION_HEIGHT: f64 = 26.;
 pub(super) const STRIP_LAYER_ACTION_HEIGHT: f64 = 40.;
-pub(super) const STRIP_TRAY_HEIGHT: f64 = 58.;
+pub(super) const STRIP_TRAY_HEIGHT: f64 = 66.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_TRAY_HEIGHT - 4.;
 pub(super) const STRIP_RANGE_HEIGHT: f64 = 3.;
@@ -538,6 +538,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             key.kind,
             LabelKind::StripTray
                 | LabelKind::StripViewport
+                | LabelKind::ScrollAction { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint
                 | LabelKind::StripButton { outlined: true, .. }
@@ -548,14 +549,14 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport => 0.57,
+                LabelKind::StripViewport => 0.49,
+                LabelKind::ScrollAction { .. } => 0.64,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            cr.set_line_width(if key.kind == LabelKind::StripViewport {
-                1.5
-            } else {
-                1.
+            cr.set_line_width(match key.kind {
+                LabelKind::StripViewport | LabelKind::ScrollAction { .. } => 1.5,
+                _ => 1.,
             });
             cr.stroke()?;
         } else {
@@ -573,8 +574,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         label.set_alignment(pango::Alignment::Center);
         label.set_text("Tiled in view");
-        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.86);
-        cr.move_to(PADDING, height - 19.);
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.75);
+        cr.move_to(PADDING, height - 22.);
         pangocairo::functions::show_layout(&cr, &label);
     } else if let LabelKind::ScrollAction { left, columns } = key.kind {
         let count = match columns {
@@ -585,32 +586,52 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let detail = layout(&cr, key);
         detail.set_font_description(Some(&FontDescription::from_string("sans-serif 11px")));
         detail.set_text(&count);
-        let (detail_width, _) = detail.pixel_size();
+        let (detail_width, detail_height) = detail.pixel_size();
         let detail_width = f64::from(detail_width);
-        let show_count = detail_width + 132. <= width;
 
-        let text = if left {
-            format!("←  Focus {}", key.text)
-        } else {
-            format!("Focus {}  →", key.text)
-        };
+        let arrow_x = if left { 14. } else { width - 14. };
+        let arrow_y = height / 2.;
+        let sign = if left { -1. } else { 1. };
+        cr.arc(arrow_x, arrow_y, 9., 0., std::f64::consts::TAU);
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.94);
+        cr.fill()?;
+        cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
+        cr.set_line_width(1.6);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_line_join(cairo::LineJoin::Round);
+        cr.move_to(arrow_x - 4. * sign, arrow_y);
+        cr.line_to(arrow_x + 4. * sign, arrow_y);
+        cr.move_to(arrow_x, arrow_y - 3.5);
+        cr.line_to(arrow_x + 4. * sign, arrow_y);
+        cr.line_to(arrow_x, arrow_y + 3.5);
+        cr.stroke()?;
+
+        let label = layout(&cr, key);
         label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
         label.set_ellipsize(EllipsizeMode::Middle);
-        label.set_text(&text);
+        label.set_text(&format!("Scroll to {}", key.text));
+        let text_width = width - 29. - PADDING;
+        let show_count =
+            columns > 0 && f64::from(label.pixel_size().0) + detail_width + PADDING <= text_width;
         let reserved = if show_count {
             detail_width + PADDING
         } else {
             0.
         };
-        label.set_width(((width - 2. * PADDING - reserved) * f64::from(pango::SCALE)) as i32);
+        label.set_width(((text_width - reserved) * f64::from(pango::SCALE)) as i32);
         label.set_alignment(if left {
             pango::Alignment::Left
         } else {
             pango::Alignment::Right
         });
+        let (_, label_height) = label.pixel_size();
         cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-        cr.move_to(PADDING + if left { 0. } else { reserved }, 2.);
+        cr.move_to(
+            if left { 29. } else { PADDING + reserved },
+            (height - f64::from(label_height)) / 2.,
+        );
         pangocairo::functions::show_layout(&cr, &label);
+
         if show_count {
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.8);
             cr.move_to(
@@ -619,7 +640,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 } else {
                     PADDING
                 },
-                3.,
+                (height - f64::from(detail_height)) / 2.,
             );
             pangocairo::functions::show_layout(&cr, &detail);
         }

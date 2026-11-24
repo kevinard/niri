@@ -6482,7 +6482,7 @@ fn pinned_view_x(area: Rectangle<f64, Logical>, gaps: f64, side: PinSide, width:
     }
 }
 
-pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 64.;
+pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 72.;
 
 pub(super) fn navigation_strip_fits(area: Rectangle<f64, Logical>) -> bool {
     area.size.w >= 420. && area.size.h >= 400.
