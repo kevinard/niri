@@ -2157,15 +2157,11 @@ impl<W: LayoutElement> Monitor<W> {
             .columns()
             .map(|column| {
                 let position = positions[&column.id()];
-                let direction = if position.x + column.width() <= visible.start + pixel {
-                    Some(true)
-                } else if position.x >= visible.end - pixel {
-                    Some(false)
-                } else {
-                    None
-                };
-                let fully_visible = position.x >= visible.start - pixel
-                    && position.x + column.width() <= visible.end + pixel;
+                let clipped_left = (visible.start - position.x).max(0.);
+                let clipped_right = (position.x + column.width() - visible.end).max(0.);
+                let fully_visible = clipped_left.max(clipped_right) <= pixel;
+                let direction = (!fully_visible && column.active_window().id() != active.id())
+                    .then_some(clipped_left >= clipped_right);
                 (
                     column.active_window(),
                     direction,
@@ -3346,7 +3342,13 @@ impl<W: LayoutElement> Monitor<W> {
                     if title.trim().is_empty() {
                         return;
                     }
-                    let background = if desktop_focus { accent } else { surface };
+                    let background = if desktop_focus {
+                        accent
+                    } else if selected {
+                        tint_caption(surface, selection_color)
+                    } else {
+                        surface
+                    };
                     if let Some(label) = tile.overview_label.render(
                         renderer.as_gles_renderer(),
                         title,
