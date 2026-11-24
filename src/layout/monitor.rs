@@ -1219,6 +1219,11 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn update_render_elements(&mut self, is_active: bool) {
+        let showing_previews = self.has_framed_overview()
+            && self
+                .overview_progress_value()
+                .is_some_and(|progress| progress >= 0.82);
+        let is_active = is_active && !showing_previews;
         let mut insert_hint_ws_geo = None;
         let insert_hint_ws_id = self
             .insert_hint
@@ -2943,12 +2948,9 @@ impl<W: LayoutElement> Monitor<W> {
                 }
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
-                    (
-                        "Click a preview     ← →  Select     Tab  Switch layer",
-                        362.,
-                    )
+                    ("← →  Select     Tab  Switch layer", 251.)
                 } else {
-                    ("Click a preview     ← →  Select", 238.)
+                    ("← →  Select", 103.)
                 };
                 let hint_x = rect.loc.x - width - 12.;
                 if hint_x >= x + 235. {
@@ -2967,6 +2969,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
+            let mut hidden_group_labeled = false;
             if let Some(groups) = active
                 .then(|| self.overview_groups(ws, geo, progress))
                 .flatten()
@@ -2987,11 +2990,12 @@ impl<W: LayoutElement> Monitor<W> {
                             group.title.into(),
                             surface,
                             LabelKind::GroupHeading,
-                            width,
+                            group.minimum_width,
                             scale,
                             Point::from((group.range.start, y)),
                             label_alpha,
                         ) {
+                            hidden_group_labeled |= group.style == GroupStyle::Hidden;
                             draw(MonitorInnerRenderElement::Caption(caption));
                         }
                     }
@@ -3035,7 +3039,9 @@ impl<W: LayoutElement> Monitor<W> {
                 }
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
-                let hidden = !ws.is_floating_visible() && ws.is_floating(window.id());
+                let hidden = !hidden_group_labeled
+                    && !ws.is_floating_visible()
+                    && ws.is_floating(window.id());
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -3284,23 +3290,34 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let progress = self.overview_progress_value()?.clamp(0., 1.);
         let margin = OVERVIEW_FRAME_MARGIN.min(self.working_area.size.w / 2.);
-        let left = self.working_area.loc.x + margin;
-        let width = self.working_area.size.w - 2. * margin;
         let empty = index != self.active_workspace_idx && !ws.has_windows_or_name();
-        let width = if empty { width.min(280.) } else { width };
+        let area = self.overview_content();
+        let (left, width) = if empty {
+            (area.loc.x + OVERVIEW_INSET, area.size.w.min(188.))
+        } else {
+            (
+                self.working_area.loc.x + margin,
+                self.working_area.size.w - 2. * margin,
+            )
+        };
         let height = if empty {
-            geo.size.h.min(50.)
+            geo.size.h.min(28.)
         } else {
             geo.size.h
         };
-        let position = Point::from((geo.loc.x + (left - geo.loc.x) * progress, geo.loc.y));
+        let y = if empty {
+            geo.loc.y + 11. * progress
+        } else {
+            geo.loc.y
+        };
+        let position = Point::from((geo.loc.x + (left - geo.loc.x) * progress, y));
         let size = Size::from((
             geo.size.w + (width - geo.size.w) * progress,
             geo.size.h + (height - geo.size.h) * progress,
         ));
         let scale = self.scale.fractional_scale();
         Rectangle::new(position, size)
-            .intersection(self.overview_content())
+            .intersection(area)
             .map(|rect| rect.to_physical_precise_round(scale).to_logical(scale))
     }
 
@@ -3343,24 +3360,9 @@ impl<W: LayoutElement> Monitor<W> {
                     if range.is_empty() {
                         return None;
                     }
-                    let leading = groups[..index]
-                        .iter()
-                        .rev()
-                        .flatten()
-                        .next()
-                        .map_or(8., |previous| {
-                            ((range.start - previous.range.end) / 2. - 2.).clamp(2., 8.)
-                        });
-                    let trailing = groups[index + 1..]
-                        .iter()
-                        .flatten()
-                        .next()
-                        .map_or(8., |next| {
-                            ((next.range.start - range.end) / 2. - 2.).clamp(2., 8.)
-                        });
                     Rectangle::new(
-                        Point::from((range.start - leading, geo.loc.y - 37.)),
-                        Size::from((range.end - range.start + leading + trailing, 32.)),
+                        Point::from((range.start, geo.loc.y - 7.)),
+                        Size::from((range.end - range.start, 2.)),
                     )
                     .intersection(self.overview_content())
                     .map(|rect| {
@@ -3377,26 +3379,25 @@ impl<W: LayoutElement> Monitor<W> {
                     let Some((group, style)) = group else {
                         continue;
                     };
-                    ws.overview_caption.render_desktop_group(
-                        renderer,
+                    ws.overview_caption.render_group_rule(
                         index,
                         *group,
                         *style,
                         ws.options.layout.background_color,
                         ws.options.layout.border.active_color,
                         group_alpha,
-                        scale,
                         &mut draw,
                     );
                 }
             }
-            let frame_alpha = progress as f32
-                * (1.
-                    - if groups.is_some() {
-                        0.75 * group_alpha
-                    } else {
-                        0.
-                    });
+            let fade = if !active && !ws.has_windows_or_name() {
+                group_alpha
+            } else if groups.is_some() {
+                0.75 * group_alpha
+            } else {
+                0.
+            };
+            let frame_alpha = progress as f32 * (1. - fade);
             if frame_alpha > 0. {
                 ws.overview_caption.render_frame(
                     renderer,
