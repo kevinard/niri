@@ -14,7 +14,7 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, frame_radius, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
-    VIEWPORT_TRACK_HEIGHT,
+    SCROLL_CARD_HEIGHT, VIEWPORT_TRACK_HEIGHT,
 };
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -167,6 +167,7 @@ struct InsertHintRenderLoc {
 struct ScrollCue<'a, W> {
     rect: Rectangle<f64, Logical>,
     destination: &'a W,
+    clipped_column_edge: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -1705,7 +1706,7 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             let (win, hit) = ws.window_under(pos_within_output - geo.loc)?;
             if self
-                .scroll_clip(ws)
+                .scrolling_visible_span(ws)
                 .is_some_and(|bounds| !bounds.contains(&pos_within_output.x))
                 && !ws.is_floating(win.id())
             {
@@ -1722,7 +1723,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         let (ws, geo) = self.workspace_under(pos_within_output)?;
         if self
-            .scroll_clip(ws)
+            .scrolling_visible_span(ws)
             .is_some_and(|bounds| !bounds.contains(&pos_within_output.x))
         {
             self.window_under(pos_within_output)?;
@@ -1745,6 +1746,20 @@ impl<W: LayoutElement> Monitor<W> {
             return None;
         }
         Some(area.loc.x..right)
+    }
+
+    fn scrolling_visible_span(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
+        let mut bounds = self.scroll_clip(ws)?;
+        if ws.id() == self.active_workspace_ref().id() {
+            let [left, right] = self.scroll_cues();
+            if let Some(edge) = left.and_then(|cue| cue.clipped_column_edge) {
+                bounds.start = bounds.start.max(edge);
+            }
+            if let Some(edge) = right.and_then(|cue| cue.clipped_column_edge) {
+                bounds.end = bounds.end.min(edge);
+            }
+        }
+        Some(bounds)
     }
 
     fn scroll_cues(&self) -> [Option<ScrollCue<'_, W>>; 2] {
@@ -1780,7 +1795,6 @@ impl<W: LayoutElement> Monitor<W> {
             .filter(|(column, pos)| pos.x + column.width() > bounds.end + tolerance)
             .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
         let inset = 12.;
-        let y = self.working_area.loc.y + (self.working_area.size.h - height).min(72.);
         let left_edge = bounds.start + inset;
         let right_edge = bounds.end - inset;
         let left_width = active_x.map_or(width, |x| (x - left_edge - 4.).floor().clamp(32., width));
@@ -1789,16 +1803,45 @@ impl<W: LayoutElement> Monitor<W> {
                 .floor()
                 .clamp(32., width)
         });
-        let rect = |x, width| Rectangle::new(Point::from((x, y)), Size::from((width, height)));
+        let stationary = !scrolling.are_transitions_ongoing();
+        let make_cue = |(column, pos): (&Column<W>, Point<f64, Logical>), x, width, left| {
+            let edge = if left { pos.x + column.width() } else { pos.x };
+            let exposed = if left {
+                edge - bounds.start
+            } else {
+                bounds.end - edge
+            };
+            let unclipped = active_x.is_some_and(|x| {
+                if left {
+                    edge <= x
+                } else {
+                    edge >= x + active.width()
+                }
+            });
+            // A narrow cut through an inactive window is rarely useful at rest.
+            // Preserve the complete strip while the camera moves or a gesture is held.
+            let card = stationary
+                && unclipped
+                && width >= 144.
+                && self.working_area.size.h >= SCROLL_CARD_HEIGHT
+                && exposed < column.width() * 0.60;
+            let height = if card { SCROLL_CARD_HEIGHT } else { height };
+            let available = self.working_area.size.h - height;
+            let y = self.working_area.loc.y
+                + if card {
+                    available / 2.
+                } else {
+                    available.min(72.)
+                };
+            ScrollCue {
+                rect: Rectangle::new(Point::from((x, y)), Size::from((width, height))),
+                destination: column.active_window(),
+                clipped_column_edge: card.then_some(edge),
+            }
+        };
         [
-            left.map(|(column, _)| ScrollCue {
-                rect: rect(left_edge, left_width),
-                destination: column.active_window(),
-            }),
-            right.map(|(column, _)| ScrollCue {
-                rect: rect(right_edge - right_width, right_width),
-                destination: column.active_window(),
-            }),
+            left.map(|column| make_cue(column, left_edge, left_width, true)),
+            right.map(|column| make_cue(column, right_edge - right_width, right_width, false)),
         ]
     }
 
@@ -1886,11 +1929,13 @@ impl<W: LayoutElement> Monitor<W> {
             .zip([true, false])
         {
             let Some(cue) = cue else { continue };
+            let card = cue.clipped_column_edge.is_some();
             let fallback = if left {
                 "Previous window"
             } else {
                 "Next window"
             };
+            let fallback = if card { "Window" } else { fallback };
             let title = if cue.rect.size.w < 102. {
                 String::new()
             } else if target.should_block_out(cue.destination.rules().block_out_from) {
@@ -1909,7 +1954,9 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 })
             };
-            let text = if title.is_empty() {
+            let text = if card {
+                title
+            } else if title.is_empty() {
                 if left { "←" } else { "→" }.to_owned()
             } else if left {
                 format!("←  {title}")
@@ -1920,13 +1967,20 @@ impl<W: LayoutElement> Monitor<W> {
                 renderer.as_gles_renderer(),
                 text,
                 color,
-                LabelKind::Button { align_right: !left },
+                if card {
+                    LabelKind::WindowNavigation { left }
+                } else {
+                    LabelKind::Button { align_right: !left }
+                },
                 cue.rect.size.w,
                 scale,
                 cue.rect.loc,
                 1.,
             ) {
                 draw(label);
+            }
+            if card {
+                continue;
             }
             let Some((tile, pos, _)) = ws
                 .scrolling()
@@ -2372,7 +2426,10 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     crop_bounds
                 };
-                if let Some(bounds) = (pass == 3).then(|| self.scroll_clip(ws)).flatten() {
+                if let Some(bounds) = (pass == 3)
+                    .then(|| self.scrolling_visible_span(ws))
+                    .flatten()
+                {
                     let left = ((bounds.start - geo.loc.x) * scale).ceil() as i32;
                     let right = ((bounds.end - geo.loc.x) * scale).floor() as i32;
                     crop_bounds.loc.x = left;
