@@ -187,6 +187,7 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     titles: Vec<NavigationTitle<'a, W>>,
+    scroll_actions: [Option<(Rectangle<f64, Logical>, &'a W)>; 2],
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
 
@@ -1895,64 +1896,6 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
-    fn scroll_controls_in_gutters(&self) -> [Option<ScrollCue<'_, W>>; 2] {
-        let ws = self.active_workspace_ref();
-        if ws.is_floating_visible() && !ws.floating().is_empty() {
-            return [None, None];
-        }
-        let scrolling = ws.scrolling();
-        let Some(distance) = scrolling.distance_to_stationary_view() else {
-            return [None, None];
-        };
-        let opacity = (1. - distance / 32.).clamp(0., 1.) as f32;
-        let (Some(bounds), Some(visible), Some(top)) = (
-            self.scroll_clip(ws),
-            self.scrolling_visible_span(ws),
-            self.navigation_strip_top(),
-        ) else {
-            return [None, None];
-        };
-        if opacity == 0. {
-            return [None, None];
-        }
-        let mut left_edge = visible.end;
-        let mut right_edge = visible.start;
-        for (column, pos) in scrolling.columns_with_render_positions() {
-            let left = pos.x.max(visible.start);
-            let right = (pos.x + column.width()).min(visible.end);
-            if left < right {
-                left_edge = left_edge.min(left);
-                right_edge = right_edge.max(right);
-            }
-        }
-        if left_edge >= right_edge {
-            return [None, None];
-        }
-        let width = 176.;
-        let inset = 16.;
-        let y = (self.working_area.loc.y + top - STRIP_BUTTON_HEIGHT) / 2.;
-        let mut cues = self.scroll_cues_for(ws, &bounds);
-        let gaps = [bounds.start..left_edge, right_edge..bounds.end];
-        for (index, (entry, gap)) in cues.iter_mut().zip(gaps).enumerate() {
-            if gap.end - gap.start < width + inset * 2. {
-                *entry = None;
-                continue;
-            }
-            let Some(cue) = entry else { continue };
-            let x = if index == 0 {
-                gap.start + inset
-            } else {
-                gap.end - width - inset
-            };
-            cue.rect = Rectangle::new(
-                Point::from((x, y)),
-                Size::from((width, STRIP_BUTTON_HEIGHT)),
-            );
-            cue.opacity = opacity;
-        }
-        cues
-    }
-
     fn exclude_narrow_peeks(
         mut bounds: Range<f64>,
         [left, right]: [Option<ScrollCue<'_, W>>; 2],
@@ -2188,6 +2131,11 @@ impl<W: LayoutElement> Monitor<W> {
             .position(|(window, _, _)| window.id() == active.id())?;
         let gap = 8.;
         let available = bounds.end - bounds.start - 24.;
+        let scroll_width = 100.;
+        let scroll_slot = scroll_width + gap;
+        let reserve_scroll = scrolling.columns().count() > 1 && available >= 640.;
+        let scroll_space = if reserve_scroll { 2. * scroll_slot } else { 0. };
+        let available = available - scroll_space;
         let capacity = ((available + gap) / 184.).floor() as usize;
         let count = windows
             .len()
@@ -2255,6 +2203,15 @@ impl<W: LayoutElement> Monitor<W> {
         let layer_action = layer_destination.and_then(|window| {
             button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
         });
+        let scroll_actions = if reserve_scroll {
+            let [left, right] = self.scroll_cues_for(ws, &bounds);
+            [(x - scroll_slot, left), (x + strip_width + gap, right)].map(|(x, cue)| {
+                let cue = cue?;
+                button(x, scroll_width).map(|rect| (rect, cue.destination))
+            })
+        } else {
+            [None, None]
+        };
         let tray = uncovered(Rectangle::new(
             Point::from((x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
             Size::from((
@@ -2265,6 +2222,7 @@ impl<W: LayoutElement> Monitor<W> {
         Some(NavigationStrip {
             tray,
             titles,
+            scroll_actions,
             layer_action,
         })
     }
@@ -2371,11 +2329,12 @@ impl<W: LayoutElement> Monitor<W> {
                         .map(|(_, window)| window)
                 })
                 .or_else(|| {
-                    self.scroll_controls_in_gutters()
+                    strip
+                        .scroll_actions
                         .into_iter()
                         .flatten()
-                        .find(|cue| cue.opacity > 0.5 && cue.rect.contains(position))
-                        .map(|cue| cue.destination)
+                        .find(|(rect, _)| rect.contains(position))
+                        .map(|(_, window)| window)
                 });
         }
         self.scroll_cues()
@@ -2506,7 +2465,9 @@ impl<W: LayoutElement> Monitor<W> {
                     navigation_title(title.window, target, "Window"),
                     background,
                     LabelKind::StripButton {
-                        direction: title.direction,
+                        direction: title
+                            .direction
+                            .filter(|&left| strip.scroll_actions[usize::from(!left)].is_none()),
                         status,
                         outlined: !has_tray,
                     },
@@ -2560,19 +2521,10 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(tray);
                 }
             }
-            for (index, cue) in self.scroll_controls_in_gutters().into_iter().enumerate() {
-                let Some(cue) = cue else { continue };
+            for (index, action) in strip.scroll_actions.into_iter().enumerate() {
+                let Some((rect, _)) = action else { continue };
                 let left = index == 0;
-                let hovered = pointer.is_some_and(|point| cue.rect.contains(point));
-                let fallback = if left {
-                    "Previous window"
-                } else {
-                    "Next window"
-                };
-                let title = navigation_title(cue.destination, target, fallback);
-                let title = title
-                    .rsplit_once(" — ")
-                    .map_or(title.as_str(), |(_, app)| app);
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
                 let background = if hovered {
                     tint_caption(surface, accent)
                 } else {
@@ -2580,17 +2532,17 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(label) = self.scroll_cue_labels[index].render(
                     renderer.as_gles_renderer(),
-                    title.into(),
+                    "Scroll".into(),
                     background,
                     LabelKind::StripButton {
                         direction: Some(left),
-                        status: Some(fallback),
+                        status: None,
                         outlined: true,
                     },
-                    cue.rect.size.w,
+                    rect.size.w,
                     scale,
-                    cue.rect.loc,
-                    cue.opacity,
+                    rect.loc,
+                    1.,
                 ) {
                     draw(label);
                 }
