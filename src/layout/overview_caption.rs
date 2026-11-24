@@ -340,7 +340,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     let mix = |base: f32, text: f32| {
         f64::from(if track {
-            base * 0.72 + text * 0.28
+            base * 0.23 + text * 0.77
         } else {
             base
         })
@@ -349,15 +349,16 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         mix(color.r, ink.r),
         mix(color.g, ink.g),
         mix(color.b, ink.b),
-        color.a.into(),
+        if track { 0.88 } else { color.a.into() },
     );
     cr.fill()?;
 
-    cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
     if let LabelKind::Viewport { start, end } = key.kind {
-        cr.rectangle(f64::from(start), 0., f64::from(end - start), height);
+        cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
+        cr.rectangle(f64::from(start), 2., f64::from(end - start), height - 4.);
         cr.fill()?;
     } else {
+        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         let label = layout(&cr, key);
         label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
