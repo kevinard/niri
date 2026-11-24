@@ -34,7 +34,7 @@ pub(super) enum GroupStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
     Caption,
-    GroupHeading,
+    ShortcutHints,
     GroupTitle,
     OverviewCommand,
     StripTray,
@@ -413,7 +413,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let label = layout(&cr, key);
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
-        LabelKind::GroupHeading | LabelKind::GroupTitle | LabelKind::OverviewCommand => {
+        LabelKind::ShortcutHints | LabelKind::GroupTitle | LabelKind::OverviewCommand => {
             (max_width.min(4096.), HEIGHT)
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
@@ -457,7 +457,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
-        LabelKind::OverviewCommand => 9.,
+        LabelKind::OverviewCommand | LabelKind::ShortcutHints => 9.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton { .. } => 9.,
         _ => height / 2.,
@@ -498,7 +498,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     cr.close_path();
     let color = key.background;
     let ink = key.ink;
-    if matches!(key.kind, LabelKind::GroupHeading | LabelKind::GroupTitle) {
+    if key.kind == LabelKind::GroupTitle {
         cr.new_path();
     } else {
         cr.set_source_rgba(
@@ -511,6 +511,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             key.kind,
             LabelKind::StripTray
                 | LabelKind::OverviewCommand
+                | LabelKind::ShortcutHints
                 | LabelKind::StripButton { outlined: true, .. }
                 | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
@@ -667,7 +668,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
+            LabelKind::ShortcutHints => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),

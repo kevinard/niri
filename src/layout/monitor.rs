@@ -2443,7 +2443,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let background = if title.active {
                     accent
                 } else if hovered {
-                    tint_caption(surface, accent)
+                    tint_caption(tint_caption(surface, accent), accent)
                 } else {
                     surface
                 };
@@ -2972,7 +2972,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let background = if hovered {
                     accent
                 } else {
-                    tint_caption(surface, accent)
+                    tint_caption(tint_caption(surface, accent), accent)
                 };
                 let action = if ws
                     .active_window()
@@ -3013,7 +3013,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         shortcuts.into(),
                         surface,
-                        LabelKind::GroupHeading,
+                        LabelKind::ShortcutHints,
                         width,
                         scale,
                         position,
