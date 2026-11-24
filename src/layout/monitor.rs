@@ -95,7 +95,6 @@ pub struct Monitor<W: LayoutElement> {
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_projection_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_direction_labels: [PreviewLabel; 2],
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
@@ -190,17 +189,10 @@ struct OverviewGroup {
 
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
-    viewports: Vec<Rectangle<f64, Logical>>,
+    column_groups: Vec<(Rectangle<f64, Logical>, bool)>,
     projections: Vec<Rectangle<f64, Logical>>,
-    scroll_actions: [Option<NavigationScroll<'a, W>>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
-}
-
-struct NavigationScroll<'a, W> {
-    rect: Rectangle<f64, Logical>,
-    destination: &'a W,
-    columns: usize,
 }
 
 struct NavigationTitle<'a, W> {
@@ -208,6 +200,8 @@ struct NavigationTitle<'a, W> {
     window: &'a W,
     active: bool,
     direction: Option<bool>,
+    destination_columns: Option<usize>,
+    grouped: bool,
     floating: bool,
 }
 
@@ -488,7 +482,6 @@ impl<W: LayoutElement> Monitor<W> {
             strip_labels: Default::default(),
             strip_viewport_labels: Default::default(),
             strip_projection_labels: Default::default(),
-            strip_direction_labels: Default::default(),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
@@ -2202,16 +2195,6 @@ impl<W: LayoutElement> Monitor<W> {
             _ => None,
         };
         let action_space = layer_destination.map_or(0., |_| action_width + action_gap);
-        let direction_width = 156.;
-        let direction_gap = 14.;
-        let direction_space = 2. * (direction_width + direction_gap);
-        let directions_fit =
-            available - action_space >= direction_space + (110. + gap) * count as f64;
-        let available = if directions_fit {
-            available - direction_space
-        } else {
-            available
-        };
         let first = active_index
             .saturating_sub(count / 2)
             .min(windows.len() - count);
@@ -2243,7 +2226,7 @@ impl<W: LayoutElement> Monitor<W> {
             ))
         };
         let mut next_x = start;
-        let titles: Vec<_> = windows
+        let mut titles: Vec<_> = windows
             .iter()
             .filter_map(|&(window, direction, floating, window_width)| {
                 let width = button_space * weight(window_width) / total_weight;
@@ -2255,6 +2238,8 @@ impl<W: LayoutElement> Monitor<W> {
                     window,
                     active: window.id() == active.id(),
                     direction,
+                    destination_columns: None,
+                    grouped: false,
                     floating,
                 })
             })
@@ -2269,6 +2254,74 @@ impl<W: LayoutElement> Monitor<W> {
                 STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
             )),
         ));
+        let destination_columns = |window: &W| {
+            scrolling
+                .columns_after_activating(window.id())
+                .map(|columns| {
+                    columns
+                        .filter(|(column, x)| {
+                            *x >= bounds.start - pixel && *x + column.width() <= bounds.end + pixel
+                        })
+                        .map(|(column, _)| column.active_window().id())
+                        .collect::<Vec<_>>()
+                })
+        };
+        let column_band = |span: Range<f64>| {
+            uncovered(Rectangle::new(
+                Point::from((span.start - 2., y - 2.)),
+                Size::from((span.end - span.start + 4., STRIP_VIEWPORT_BAND_HEIGHT)),
+            ))
+        };
+        let mut column_groups = Vec::new();
+        if decorate {
+            for left in [true, false] {
+                let is_on_side = |title: &NavigationTitle<'_, W>| title.direction == Some(left);
+                let nearest = if left {
+                    titles.iter().rposition(is_on_side)
+                } else {
+                    titles.iter().position(is_on_side)
+                };
+                let Some(index) = nearest else { continue };
+                let Some(ids) = destination_columns(titles[index].window) else {
+                    continue;
+                };
+                titles[index].destination_columns = Some(ids.len());
+                let shares_view = |title: &NavigationTitle<'_, W>| {
+                    is_on_side(title)
+                        && ids.contains(&title.window.id())
+                        && destination_columns(title.window).as_ref() == Some(&ids)
+                };
+                let mut first = index;
+                let mut last = index;
+                if left {
+                    while first > 0
+                        && titles[first].rect.loc.x - titles[first - 1].rect.loc.x
+                            <= titles[first - 1].rect.size.w + gap + 0.001
+                        && shares_view(&titles[first - 1])
+                    {
+                        first -= 1;
+                    }
+                } else {
+                    while last + 1 < titles.len()
+                        && titles[last + 1].rect.loc.x - titles[last].rect.loc.x
+                            <= titles[last].rect.size.w + gap + 0.001
+                        && shares_view(&titles[last + 1])
+                    {
+                        last += 1;
+                    }
+                }
+                if first != last {
+                    let start = titles[first].rect.loc.x;
+                    let end = titles[last].rect.loc.x + titles[last].rect.size.w;
+                    if let Some(rect) = column_band(start..end) {
+                        column_groups.push((rect, false));
+                        for title in &mut titles[first..=last] {
+                            title.grouped = true;
+                        }
+                    }
+                }
+            }
+        }
         let groups = |matches: &dyn Fn(&NavigationTitle<'_, W>) -> bool| {
             let mut spans: Vec<Range<f64>> = Vec::new();
             for title in titles.iter().filter(|title| matches(title)) {
@@ -2285,67 +2338,18 @@ impl<W: LayoutElement> Monitor<W> {
             }
             spans
         };
-        let viewports = groups(&|title| !title.floating && title.direction.is_none())
-            .into_iter()
-            .filter_map(|span| {
-                uncovered(Rectangle::new(
-                    Point::from((span.start - 2., y - 2.)),
-                    Size::from((span.end - span.start + 4., STRIP_VIEWPORT_BAND_HEIGHT)),
-                ))
-            })
-            .collect();
-        let destination_columns = |window: &W| {
-            scrolling
-                .columns_after_activating(window.id())
-                .map(|columns| {
-                    columns
-                        .filter(|(column, x)| {
-                            *x >= bounds.start - pixel && *x + column.width() <= bounds.end + pixel
-                        })
-                        .map(|(column, _)| column.active_window().id())
-                        .collect::<Vec<_>>()
-                })
-        };
-        let left = titles
-            .iter()
-            .rev()
-            .find(|title| title.direction == Some(true));
-        let right = titles.iter().find(|title| title.direction == Some(false));
-        let destinations = [left, right];
-        let scroll_actions = std::array::from_fn(|index| {
-            if !directions_fit {
-                return None;
-            }
-            let destination = destinations[index]?.window;
-            let x = if index == 0 {
-                start - direction_width - direction_gap
-            } else {
-                start + tray_width + direction_gap
-            };
-            let rect = button(x, direction_width)?;
-            let columns = if decorate {
-                destination_columns(destination).map_or(0, |columns| columns.len())
-            } else {
-                0
-            };
-            Some(NavigationScroll {
-                rect,
-                destination,
-                columns,
-            })
-        });
+        if decorate {
+            column_groups.extend(
+                groups(&|title| !title.floating && title.direction.is_none())
+                    .into_iter()
+                    .filter_map(|span| column_band(span).map(|rect| (rect, true))),
+            );
+        }
         let preview = pointer.and_then(|point| {
             titles
                 .iter()
                 .find(|title| title.direction.is_some() && title.rect.contains(point))
                 .map(|title| title.window)
-                .or_else(|| {
-                    scroll_actions
-                        .iter()
-                        .flatten()
-                        .find(|action| action.rect.contains(point))
-                        .map(|action| action.destination)
-                })
         });
         let projections = preview
             .and_then(destination_columns)
@@ -2361,9 +2365,8 @@ impl<W: LayoutElement> Monitor<W> {
             .collect();
         Some(NavigationStrip {
             tray,
-            viewports,
+            column_groups,
             projections,
-            scroll_actions,
             titles,
             layer_action,
         })
@@ -2461,14 +2464,6 @@ impl<W: LayoutElement> Monitor<W> {
                 .into_iter()
                 .find(|title| title.rect.contains(position))
                 .map(|title| title.window)
-                .or_else(|| {
-                    strip
-                        .scroll_actions
-                        .iter()
-                        .flatten()
-                        .find(|action| action.rect.contains(position))
-                        .map(|action| action.destination)
-                })
                 .or_else(|| {
                     strip
                         .layer_action
@@ -2574,24 +2569,12 @@ impl<W: LayoutElement> Monitor<W> {
                 .iter()
                 .map(|title| navigation_title(title.window, target, "Window"))
                 .collect();
-            let pending_focus = pointer.and_then(|point| {
-                strip
-                    .scroll_actions
-                    .iter()
-                    .flatten()
-                    .find(|action| action.rect.contains(point))
-                    .map(|action| action.destination.id())
-            });
             for (index, (title, label)) in
                 strip.titles.into_iter().zip(&self.strip_labels).enumerate()
             {
-                let hovered = pointer.is_some_and(|point| title.rect.contains(point))
-                    || pending_focus == Some(title.window.id());
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
                 let visible_tile = !offscreen && !title.floating;
-                let grouped = title
-                    .direction
-                    .is_some_and(|left| strip.scroll_actions[usize::from(!left)].is_some());
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2621,9 +2604,15 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let background = if title.active {
                     accent
+                } else if title.destination_columns.is_some() {
+                    if hovered {
+                        tint_caption(direction_background, accent)
+                    } else {
+                        direction_background
+                    }
                 } else if hovered {
                     tint_caption(surface, accent)
-                } else if grouped {
+                } else if title.grouped {
                     Color { a: 0., ..surface }
                 } else if offscreen {
                     Color { a: 0.65, ..surface }
@@ -2632,58 +2621,36 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     surface
                 };
+                let kind = match (title.direction, title.destination_columns) {
+                    (Some(left), Some(columns)) => LabelKind::ScrollDestination {
+                        left,
+                        columns,
+                        focus,
+                    },
+                    _ => LabelKind::StripButton {
+                        status,
+                        outlined: !title.active
+                            && ((!visible_tile && !title.grouped)
+                                || hovered
+                                || strip.tray.is_none()),
+                        direction: title.direction,
+                        focus,
+                        show_arrow: offscreen && !title.grouped,
+                    },
+                };
+                let y_offset = if offscreen && title.destination_columns.is_none() {
+                    3.
+                } else {
+                    0.
+                };
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
                     name.to_owned(),
                     background,
-                    LabelKind::StripButton {
-                        status,
-                        outlined: !title.active
-                            && ((!visible_tile && !grouped) || hovered || strip.tray.is_none()),
-                        direction: title.direction,
-                        focus,
-                        show_arrow: !grouped,
-                    },
+                    kind,
                     title.rect.size.w,
                     scale,
-                    title.rect.loc + Point::from((0., if offscreen { 3. } else { 0. })),
-                    1.,
-                ) {
-                    draw(label);
-                }
-            }
-            for (index, (action, label)) in strip
-                .scroll_actions
-                .into_iter()
-                .zip(&self.strip_direction_labels)
-                .enumerate()
-            {
-                let Some(action) = action else { continue };
-                let left = index == 0;
-                let title = navigation_title(action.destination, target, "Window");
-                let suffix = window_title_suffix(&title);
-                let distinct = titles
-                    .iter()
-                    .filter(|title| window_title_suffix(title) == suffix)
-                    .count()
-                    == 1;
-                let text = if distinct { suffix } else { &title };
-                let hovered = pointer.is_some_and(|point| action.rect.contains(point));
-                if let Some(label) = label.render(
-                    renderer.as_gles_renderer(),
-                    text.into(),
-                    if hovered {
-                        tint_caption(direction_background, accent)
-                    } else {
-                        direction_background
-                    },
-                    LabelKind::ScrollDestination {
-                        left,
-                        columns: action.columns,
-                    },
-                    action.rect.size.w,
-                    scale,
-                    action.rect.loc,
+                    title.rect.loc + Point::from((0., y_offset)),
                     1.,
                 ) {
                     draw(label);
@@ -2733,12 +2700,20 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            for (rect, label) in strip.viewports.into_iter().zip(&self.strip_viewport_labels) {
+            for ((rect, visible), label) in strip
+                .column_groups
+                .into_iter()
+                .zip(&self.strip_viewport_labels)
+            {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    direction_background,
-                    LabelKind::StripViewport,
+                    if visible {
+                        direction_background
+                    } else {
+                        Color { a: 0., ..surface }
+                    },
+                    LabelKind::StripViewport { visible },
                     rect.size.w,
                     scale,
                     rect.loc,

@@ -48,11 +48,14 @@ pub(super) enum LabelKind {
     GroupTitle,
     OverviewCommand,
     StripTray,
-    StripViewport,
+    StripViewport {
+        visible: bool,
+    },
     StripRange,
     ScrollDestination {
         left: bool,
         columns: usize,
+        focus: FocusMarker,
     },
     StripButton {
         status: Option<&'static str>,
@@ -442,7 +445,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING),
-        LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
+        LabelKind::StripViewport { .. } => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
         LabelKind::StripRange => (max_width, STRIP_RANGE_HEIGHT),
         LabelKind::StripButton {
             direction: Some(_), ..
@@ -487,7 +490,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
-        LabelKind::StripViewport => 10.,
+        LabelKind::StripViewport { .. } => 10.,
         LabelKind::ScrollDestination { .. } => 17.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton {
@@ -544,7 +547,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripTray
-                | LabelKind::StripViewport
+                | LabelKind::StripViewport { .. }
                 | LabelKind::ScrollDestination { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint
@@ -556,15 +559,21 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport => 0.57,
+                LabelKind::StripViewport { visible: true } => 0.57,
+                LabelKind::StripViewport { visible: false } => 0.34,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            cr.set_line_width(if key.kind == LabelKind::StripViewport {
-                1.5
-            } else {
-                1.
-            });
+            if matches!(key.kind, LabelKind::StripViewport { visible: false }) {
+                cr.set_dash(&[3., 3.], 0.);
+            }
+            cr.set_line_width(
+                if matches!(key.kind, LabelKind::StripViewport { visible: true }) {
+                    1.5
+                } else {
+                    1.
+                },
+            );
             cr.stroke()?;
         } else {
             cr.fill()?;
@@ -573,7 +582,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
     if matches!(
         key.kind,
-        LabelKind::StripTray | LabelKind::StripViewport | LabelKind::StripRange
+        LabelKind::StripTray | LabelKind::StripViewport { .. } | LabelKind::StripRange
     ) {
         drop(cr);
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
@@ -670,12 +679,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 show_arrow,
                 ..
             } => (status, direction, focus, show_arrow),
-            LabelKind::ScrollDestination { left, .. } => (
-                scroll_status.as_deref(),
-                Some(left),
-                FocusMarker::None,
-                true,
-            ),
+            LabelKind::ScrollDestination { left, focus, .. } => {
+                (scroll_status.as_deref(), Some(left), focus, true)
+            }
             _ => (None, None, FocusMarker::None, false),
         };
         let offscreen = matches!(
