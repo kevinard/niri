@@ -45,7 +45,7 @@ pub(super) enum LabelKind {
         show: bool,
     },
     Preview {
-        show_action: bool,
+        hovered: bool,
     },
     Button {
         align_right: bool,
@@ -626,12 +626,19 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
-        if let LabelKind::Preview { show_action } = key.kind {
+        if let LabelKind::Preview { hovered } = key.kind {
             let action = layout(&cr, key);
             action.set_font_description(Some(&FontDescription::from_string(
                 "sans-serif Medium 12px",
             )));
-            action.set_text(if show_action { "Show window" } else { "↗" });
+            let text = if width >= 270. {
+                "Show window"
+            } else if width >= 135. {
+                "Show"
+            } else {
+                "↗"
+            };
+            action.set_text(text);
             let (w, h) = action.pixel_size();
             let control_width = (f64::from(w) + 14.).max(22.);
             let right = width - 4.;
@@ -652,7 +659,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 1.5 * std::f64::consts::PI,
             );
             cr.close_path();
-            if show_action {
+            if hovered {
                 cr.fill()?;
                 cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
             } else {

@@ -93,7 +93,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     layer_action_label: PreviewLabel,
-    overview_action_label: PreviewLabel,
+    overview_shortcuts_label: PreviewLabel,
     scroll_cue_labels: [PreviewLabel; 2],
     additional_scroll_cue_labels: [PreviewLabel; 2],
     scroll_edge_fades: [PreviewLabel; 2],
@@ -464,7 +464,7 @@ impl<W: LayoutElement> Monitor<W> {
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
             layer_action_label: PreviewLabel::default(),
-            overview_action_label: PreviewLabel::default(),
+            overview_shortcuts_label: PreviewLabel::default(),
             scroll_cue_labels: Default::default(),
             additional_scroll_cue_labels: Default::default(),
             scroll_edge_fades: Default::default(),
@@ -2858,10 +2858,15 @@ impl<W: LayoutElement> Monitor<W> {
                 && contains_y(top, 28.)
                 && right - left >= 520.
             {
-                let width = 146.;
-                if let Some(action_label) = self.overview_action_label.render(
+                let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
+                let (shortcuts, width) = if mixed_layers {
+                    ("Tab  Switch layer     ← →  Select     Enter  Show", 356.)
+                } else {
+                    ("← →  Select     Enter  Show", 206.)
+                };
+                if let Some(label) = self.overview_shortcuts_label.render(
                     renderer.as_gles_renderer(),
-                    "Select a window".into(),
+                    shortcuts.into(),
                     caption_background(accent, backdrop, false),
                     LabelKind::GroupHeading,
                     width,
@@ -2869,7 +2874,7 @@ impl<W: LayoutElement> Monitor<W> {
                     Point::from((right - OVERVIEW_INSET - width, top)),
                     alpha,
                 ) {
-                    draw(MonitorInnerRenderElement::Caption(action_label));
+                    draw(MonitorInnerRenderElement::Caption(label));
                 }
             }
 
@@ -2972,9 +2977,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         title,
                         background,
-                        LabelKind::Preview {
-                            show_action: hovered && label.size.w >= 160.,
-                        },
+                        LabelKind::Preview { hovered },
                         label.size.w,
                         scale,
                         label.loc,
