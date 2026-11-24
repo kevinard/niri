@@ -2203,7 +2203,7 @@ impl<W: LayoutElement> Monitor<W> {
             _ => None,
         };
         let action_space = layer_destination.map_or(0., |_| action_width + action_gap);
-        let direction_width = 136.;
+        let direction_width = 154.;
         let direction_gap = 8.;
         let direction_space = 2. * (direction_width + direction_gap);
         let separate_scroll_actions =
@@ -2661,8 +2661,6 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         "Floating"
                     })
-                } else if will_focus {
-                    Some("Focus on switch")
                 } else if !has_layer_action && !ws.floating().is_empty() && floating_visible {
                     Some("Hides floating windows")
                 } else if hovered && !offscreen && has_layer_action && floating_visible {
@@ -2717,9 +2715,9 @@ impl<W: LayoutElement> Monitor<W> {
                     name.to_owned(),
                     background,
                     kind,
-                    title.rect.size.w,
+                    title.rect.size.w - 6.,
                     scale,
-                    title.rect.loc + Point::from((0., y_offset)),
+                    title.rect.loc + Point::from((3., y_offset)),
                     1.,
                 ) {
                     draw(label);
@@ -2732,31 +2730,25 @@ impl<W: LayoutElement> Monitor<W> {
                 .enumerate()
             {
                 let Some(action) = action else { continue };
-                let left = side == 0;
-                let caption = match action.columns {
-                    0 => "Show windows".into(),
-                    1 => "Show 1 column".into(),
-                    count => format!("Show {count} columns"),
-                };
-                let name = if left {
-                    format!("←  {caption}")
-                } else {
-                    format!("{caption}  →")
-                };
+                let title = navigation_title(action.window, target, "Window");
+                let suffix = window_title_suffix(&title);
+                let distinct = titles
+                    .iter()
+                    .filter(|name| window_title_suffix(name) == suffix)
+                    .count()
+                    == 1;
+                let name = if distinct { suffix } else { &title };
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
-                    name,
+                    name.into(),
                     if pointer.is_some_and(|point| action.rect.contains(point)) {
                         tint_caption(direction_background, accent)
                     } else {
                         direction_background
                     },
-                    LabelKind::StripButton {
-                        status: None,
-                        outlined: false,
-                        direction: None,
-                        focus: FocusMarker::None,
-                        show_arrow: false,
+                    LabelKind::ScrollAction {
+                        left: side == 0,
+                        columns: action.columns,
                     },
                     action.rect.size.w,
                     scale,

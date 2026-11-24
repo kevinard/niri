@@ -52,6 +52,10 @@ pub(super) enum LabelKind {
         visible: bool,
     },
     StripRange,
+    ScrollAction {
+        left: bool,
+        columns: usize,
+    },
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
@@ -442,9 +446,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::StripButton {
             direction: Some(_), ..
         } => (max_width, STRIP_BUTTON_HEIGHT - 6.),
-        LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
-            (max_width, STRIP_BUTTON_HEIGHT)
-        }
+        LabelKind::StripButton { .. }
+        | LabelKind::LayerAction { .. }
+        | LabelKind::ScrollAction { .. } => (max_width, STRIP_BUTTON_HEIGHT),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
@@ -487,7 +491,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::StripButton {
             direction: Some(_), ..
         } => 17.,
-        LabelKind::StripButton { .. } => 9.,
+        LabelKind::StripButton { .. } | LabelKind::ScrollAction { .. } => 9.,
         _ => height / 2.,
     };
     cr.arc(
@@ -578,7 +582,35 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
 
-    if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
+    if let LabelKind::ScrollAction { left, columns } = key.kind {
+        let title = match columns {
+            0 => "Show windows".into(),
+            1 => "Show 1 column".into(),
+            count => format!("Show {count} columns"),
+        };
+        let title = if left {
+            format!("←  {title}")
+        } else {
+            format!("{title}  →")
+        };
+        let label = layout(&cr, key);
+        label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
+        label.set_alignment(pango::Alignment::Center);
+        label.set_font_description(Some(&FontDescription::from_string(
+            "sans-serif Medium 13px",
+        )));
+        label.set_text(&title);
+        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+        cr.move_to(PADDING, 4.);
+        pangocairo::functions::show_layout(&cr, &label);
+
+        label.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
+        label.set_ellipsize(EllipsizeMode::Middle);
+        label.set_text(&format!("Focus {}", key.text));
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.88);
+        cr.move_to(PADDING, 21.);
+        pangocairo::functions::show_layout(&cr, &label);
+    } else if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
         title.set_single_paragraph_mode(false);
         title.set_wrap(pango::WrapMode::WordChar);
