@@ -2291,7 +2291,7 @@ impl<W: LayoutElement> Monitor<W> {
             .reduce(f64::max)?;
         let width = 216.;
         let rect = Rectangle::new(
-            Point::from((area.loc.x + (area.size.w - width) / 2., bottom + 7.)),
+            Point::from((area.loc.x + (area.size.w - width) / 2., bottom + 17.)),
             Size::from((width, 28.)),
         );
         let fits = |part: Rectangle<f64, Logical>| {
@@ -2432,7 +2432,8 @@ impl<W: LayoutElement> Monitor<W> {
                     Some("Hides floating windows")
                 } else {
                     match title.direction {
-                        Some(_) => Some("Show window"),
+                        Some(true) => Some("←  Show"),
+                        Some(false) => Some("Show  →"),
                         None if hovered && has_layer_action && floating_visible => {
                             Some("Reveal tiled windows")
                         }
@@ -2451,7 +2452,6 @@ impl<W: LayoutElement> Monitor<W> {
                     navigation_title(title.window, target, "Window"),
                     background,
                     LabelKind::StripButton {
-                        direction: title.direction,
                         status,
                         outlined: !title.active,
                     },
@@ -3458,6 +3458,8 @@ impl<W: LayoutElement> Monitor<W> {
             });
 
             if let Some(groups) = &groups {
+                let zoom = self.overview_zoom();
+                let positions = self.floating_overview_positions(ws, progress);
                 for (index, group) in groups.iter().enumerate() {
                     let Some((group, style)) = group else {
                         continue;
@@ -3472,7 +3474,18 @@ impl<W: LayoutElement> Monitor<W> {
                         &mut draw,
                     );
                     let top = geo.loc.y + strip_offset - 39.;
-                    let bottom = geo.loc.y + geo.size.h - 2.;
+                    let bottom = ws
+                        .tiles_with_overview_positions(&positions)
+                        .filter_map(|(tile, pos, visible)| {
+                            let left = geo.loc.x + pos.x * zoom;
+                            let right = left + tile.tile_size().w * zoom;
+                            let inside = left < group.loc.x + group.size.w && right > group.loc.x;
+                            (visible && inside)
+                                .then_some(geo.loc.y + (pos.y + tile.tile_size().h) * zoom)
+                        })
+                        .reduce(f64::max)
+                        .unwrap_or(geo.loc.y + geo.size.h)
+                        + 6.;
                     let backing = Rectangle::new(
                         Point::from((group.loc.x - 2., top)),
                         Size::from((group.size.w + 4., (bottom - top).max(0.))),
@@ -3491,10 +3504,8 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 }
             }
-            let fade = if !active && !ws.has_windows_or_name() {
+            let fade = if groups.is_some() || !active && !ws.has_windows_or_name() {
                 group_alpha
-            } else if groups.is_some() {
-                0.74 * group_alpha
             } else {
                 0.
             };

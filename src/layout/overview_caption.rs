@@ -39,7 +39,6 @@ pub(super) enum LabelKind {
     OverviewCommand,
     StripTray,
     StripButton {
-        direction: Option<bool>,
         status: Option<&'static str>,
         outlined: bool,
     },
@@ -499,7 +498,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     cr.close_path();
     let color = key.background;
     let ink = key.ink;
-    if key.kind == LabelKind::GroupHeading {
+    if matches!(key.kind, LabelKind::GroupHeading | LabelKind::GroupTitle) {
         cr.new_path();
     } else {
         cr.set_source_rgba(
@@ -608,30 +607,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 "sans-serif Medium 13px",
             )));
         }
-        if let LabelKind::StripButton {
-            direction: Some(left),
-            ..
-        } = key.kind
-        {
-            let arrow = layout(&cr, key);
-            arrow.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 20px",
-            )));
-            arrow.set_text(if left { "←" } else { "→" });
-            let (w, h) = arrow.pixel_size();
-            let x = if left {
-                PADDING
-            } else {
-                width - PADDING - f64::from(w)
-            };
-            cr.move_to(x, (height - f64::from(h)) / 2.);
-            pangocairo::functions::show_layout(&cr, &arrow);
-            let slot = f64::from(w) + 5.;
-            title_width -= slot;
-            if left {
-                title_x += slot;
-            }
-        }
         let status = match key.kind {
             LabelKind::StripButton { status, .. } => status,
             _ => None,
@@ -692,7 +667,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::GroupHeading | LabelKind::GroupTitle => (width - f64::from(w)) / 2.,
+            LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
