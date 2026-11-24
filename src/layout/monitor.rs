@@ -1895,6 +1895,58 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
+    fn scroll_controls_in_gutters(&self) -> [Option<ScrollCue<'_, W>>; 2] {
+        let ws = self.active_workspace_ref();
+        if ws.is_floating_visible() && !ws.floating().is_empty() {
+            return [None, None];
+        }
+        let scrolling = ws.scrolling();
+        let Some(distance) = scrolling.distance_to_stationary_view() else {
+            return [None, None];
+        };
+        let opacity = (1. - distance / 32.).clamp(0., 1.) as f32;
+        let (Some(bounds), Some(visible), Some(top)) = (
+            self.scroll_clip(ws),
+            self.scrolling_visible_span(ws),
+            self.navigation_strip_top(),
+        ) else {
+            return [None, None];
+        };
+        if opacity == 0. {
+            return [None, None];
+        }
+        let mut left_edge = visible.end;
+        let mut right_edge = visible.start;
+        for (column, pos) in scrolling.columns_with_render_positions() {
+            let left = pos.x.max(visible.start);
+            let right = (pos.x + column.width()).min(visible.end);
+            if left < right {
+                left_edge = left_edge.min(left);
+                right_edge = right_edge.max(right);
+            }
+        }
+        if left_edge >= right_edge {
+            return [None, None];
+        }
+        let width = 164.;
+        let y = (self.working_area.loc.y + top - STRIP_BUTTON_HEIGHT) / 2.;
+        let mut cues = self.scroll_cues_for(ws, &bounds);
+        let gaps = [bounds.start..left_edge, right_edge..bounds.end];
+        for (entry, gap) in cues.iter_mut().zip(gaps) {
+            if gap.end - gap.start < width + 32. {
+                *entry = None;
+                continue;
+            }
+            let Some(cue) = entry else { continue };
+            cue.rect = Rectangle::new(
+                Point::from(((gap.start + gap.end - width) / 2., y)),
+                Size::from((width, STRIP_BUTTON_HEIGHT)),
+            );
+            cue.opacity = opacity;
+        }
+        cues
+    }
+
     fn exclude_narrow_peeks(
         mut bounds: Range<f64>,
         [left, right]: [Option<ScrollCue<'_, W>>; 2],
@@ -2311,6 +2363,13 @@ impl<W: LayoutElement> Monitor<W> {
                         .layer_action
                         .filter(|(rect, _)| rect.contains(position))
                         .map(|(_, window)| window)
+                })
+                .or_else(|| {
+                    self.scroll_controls_in_gutters()
+                        .into_iter()
+                        .flatten()
+                        .find(|cue| cue.opacity > 0.5 && cue.rect.contains(position))
+                        .map(|cue| cue.destination)
                 });
         }
         self.scroll_cues()
@@ -2493,6 +2552,37 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(tray);
+                }
+            }
+            for (index, cue) in self.scroll_controls_in_gutters().into_iter().enumerate() {
+                let Some(cue) = cue else { continue };
+                let left = index == 0;
+                let hovered = pointer.is_some_and(|point| cue.rect.contains(point));
+                let title = if left {
+                    "Previous window"
+                } else {
+                    "Next window"
+                };
+                let background = if hovered {
+                    tint_caption(surface, accent)
+                } else {
+                    surface
+                };
+                if let Some(label) = self.scroll_cue_labels[index].render(
+                    renderer.as_gles_renderer(),
+                    title.into(),
+                    background,
+                    LabelKind::StripButton {
+                        direction: Some(left),
+                        status: None,
+                        outlined: true,
+                    },
+                    cue.rect.size.w,
+                    scale,
+                    cue.rect.loc,
+                    cue.opacity,
+                ) {
+                    draw(label);
                 }
             }
             return;
@@ -3429,9 +3519,24 @@ impl<W: LayoutElement> Monitor<W> {
                         &mut draw,
                     );
                     if *style == GroupStyle::Hidden {
+                        let overview_positions = self.floating_overview_positions(ws, progress);
+                        let zoom = self.overview_zoom();
+                        let bottom = ws
+                            .floating()
+                            .tiles_with_preview_positions(&overview_positions)
+                            .map(|(tile, pos)| geo.loc.y + (pos.y + tile.tile_size().h) * zoom)
+                            .reduce(f64::max)
+                            .unwrap_or(geo.loc.y + geo.size.h);
+                        let bottom = self
+                            .overview_command()
+                            .filter(|(_, window)| ws.is_floating(window.id()))
+                            .map_or(bottom, |(command, _)| {
+                                bottom.max(command.loc.y + command.size.h)
+                            });
+                        let top = geo.loc.y - 37.;
                         let backing = Rectangle::new(
-                            Point::from((group.loc.x - 6., geo.loc.y - 37.)),
-                            Size::from((group.size.w + 12., geo.size.h + 23.)),
+                            Point::from((group.loc.x - 6., top)),
+                            Size::from((group.size.w + 12., bottom - top + 10.)),
                         );
                         if let Some(backing) = backing.intersection(self.overview_content()) {
                             ws.overview_caption.render_hidden_group(

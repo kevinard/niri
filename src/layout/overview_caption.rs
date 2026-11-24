@@ -238,9 +238,9 @@ impl OverviewCaption {
             return;
         }
         let color = if is_light(backdrop) {
-            Color::new_unpremul(0.78, 0.85, 0.82, alpha * 0.72)
+            Color::new_unpremul(0.78, 0.85, 0.82, alpha * 0.55)
         } else {
-            Color::new_unpremul(0.05, 0.10, 0.13, alpha * 0.73)
+            Color::new_unpremul(0.05, 0.10, 0.13, alpha * 0.51)
         };
         let geometry = Rectangle::from_size(rect.size);
         let mut group = self.hidden_group.borrow_mut();
