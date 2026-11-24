@@ -21,6 +21,7 @@ const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
+pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 24.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 48.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const STRIP_VIEWPORT_BAND_HEIGHT: f64 = STRIP_TRAY_HEIGHT - 4.;
@@ -51,6 +52,7 @@ pub(super) enum LabelKind {
     OverviewCommand,
     StripTray,
     StripViewport,
+    SharedScroll,
     ScrollWindow {
         left: bool,
         hovered: bool,
@@ -59,6 +61,7 @@ pub(super) enum LabelKind {
         status: Option<&'static str>,
         outlined: bool,
         focus: FocusMarker,
+        compact: bool,
     },
     LayerAction {
         show: bool,
@@ -402,7 +405,9 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let font = if matches!(key.kind, LabelKind::StripButton { .. })
+    let font = if key.kind == LabelKind::SharedScroll {
+        "sans-serif Medium 12px"
+    } else if matches!(key.kind, LabelKind::StripButton { .. })
         || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
     {
         "sans-serif Medium 13px"
@@ -443,6 +448,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
         LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
+        LabelKind::SharedScroll => (max_width, STRIP_BUTTON_HEIGHT - STRIP_GROUP_BUTTON_HEIGHT),
+        LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
         LabelKind::StripButton { .. }
         | LabelKind::ScrollWindow { .. }
         | LabelKind::LayerAction { .. } => (max_width, STRIP_BUTTON_HEIGHT),
@@ -524,7 +531,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     cr.close_path();
     let color = key.background;
     let ink = key.ink;
-    if key.kind == LabelKind::GroupTitle {
+    if matches!(key.kind, LabelKind::GroupTitle | LabelKind::SharedScroll) {
         cr.new_path();
     } else {
         cr.set_source_rgba(
@@ -806,7 +813,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
+            LabelKind::StripButton { .. } | LabelKind::SharedScroll => {
+                title_x + (title_width - f64::from(w)) / 2.
+            }
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
