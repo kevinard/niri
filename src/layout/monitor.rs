@@ -2154,9 +2154,14 @@ impl<W: LayoutElement> Monitor<W> {
         let first = active_index
             .saturating_sub(count / 2)
             .min(windows.len() - count);
+        let max_width = if layer_destination.is_some() {
+            212.
+        } else {
+            236.
+        };
         let width = ((title_space - gap * (count - 1) as f64) / count as f64)
             .floor()
-            .min(236.);
+            .min(max_width);
         let titles_width = count as f64 * (width + gap) - gap;
         let strip_width = titles_width + (available - title_space);
         let x = (bounds.start + bounds.end - strip_width) / 2.;
@@ -2242,24 +2247,49 @@ impl<W: LayoutElement> Monitor<W> {
             return None;
         }
 
-        let area = self.overview_content();
-        if area.size.w < 550. || self.overview_progress_value()? < 0.82 {
+        let progress = self.overview_progress_value()?;
+        if progress < 0.82 {
             return None;
         }
 
         let window = self.overview_selected_window()?;
-        let geo = self
+        let ((_, ws), geo) = self
             .workspaces_with_render_geo_idx()
-            .find_map(|((idx, _), geo)| (idx == self.active_workspace_idx).then_some(geo))?;
-        let width = (area.size.w - 275.).min(316.);
+            .find(|((idx, _), _)| *idx == self.active_workspace_idx)?;
+        let zoom = self.overview_zoom();
+        let positions = self.floating_overview_positions(ws, progress);
+        let previews = || {
+            ws.tiles_with_overview_positions(&positions)
+                .filter_map(|(tile, pos, visible)| {
+                    visible.then_some((
+                        tile.window().id(),
+                        Rectangle::new(geo.loc + pos.upscale(zoom), tile.tile_size().upscale(zoom)),
+                    ))
+                })
+        };
+        let (_, preview) = previews().find(|(id, _)| *id == window.id())?;
+        let width = preview.size.w.min(216.);
+        if width < 174. {
+            return None;
+        }
         let rect = Rectangle::new(
             Point::from((
-                area.loc.x + area.size.w - OVERVIEW_INSET - width,
-                geo.loc.y - OVERVIEW_HEADER_OFFSET,
+                preview.loc.x + (preview.size.w - width) / 2.,
+                preview.loc.y + preview.size.h + 7.,
             )),
             Size::from((width, 28.)),
         );
-        (rect.intersection(area) == Some(rect)).then_some((rect, window))
+        let area = self.overview_content();
+        let fits = |part: Rectangle<f64, Logical>| {
+            part.loc.x >= area.loc.x
+                && part.loc.y >= area.loc.y
+                && part.loc.x + part.size.w <= area.loc.x + area.size.w
+                && part.loc.y + part.size.h <= area.loc.y + area.size.h
+        };
+        let clear = fits(rect)
+            && fits(preview)
+            && previews().all(|(_, preview)| preview.intersection(rect).is_none());
+        clear.then_some((rect, window))
     }
 
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
@@ -2933,10 +2963,17 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     tint_caption(surface, accent)
                 };
-                let title = navigation_title(window, target, "selected window");
+                let action = if ws
+                    .active_window()
+                    .is_some_and(|active| active.id() == window.id())
+                {
+                    "Return to window"
+                } else {
+                    "Switch to window"
+                };
                 if let Some(command) = self.overview_command_label.render(
                     renderer.as_gles_renderer(),
-                    format!("Show {title}"),
+                    action.into(),
                     background,
                     LabelKind::OverviewCommand,
                     rect.size.w,
@@ -2946,13 +2983,16 @@ impl<W: LayoutElement> Monitor<W> {
                 ) {
                     draw(MonitorInnerRenderElement::Caption(command));
                 }
+            }
+            if active && ws.active_window().is_some() && contains_y(top, 28.) {
+                let surface = caption_background(accent, backdrop, false);
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
                     ("← →  Select     Tab  Switch layer", 251.)
                 } else {
                     ("← →  Select", 103.)
                 };
-                let hint_x = rect.loc.x - width - 12.;
+                let hint_x = right - OVERVIEW_INSET - width;
                 if hint_x >= x + 235. {
                     if let Some(label) = self.overview_shortcuts_label.render(
                         renderer.as_gles_renderer(),
@@ -3388,6 +3428,22 @@ impl<W: LayoutElement> Monitor<W> {
                         group_alpha,
                         &mut draw,
                     );
+                    if *style == GroupStyle::Hidden {
+                        let backing = Rectangle::new(
+                            Point::from((group.loc.x - 6., geo.loc.y - 37.)),
+                            Size::from((group.size.w + 12., geo.size.h + 23.)),
+                        );
+                        if let Some(backing) = backing.intersection(self.overview_content()) {
+                            ws.overview_caption.render_hidden_group(
+                                renderer,
+                                backing,
+                                ws.options.layout.background_color,
+                                group_alpha,
+                                scale,
+                                &mut draw,
+                            );
+                        }
+                    }
                 }
             }
             let fade = if !active && !ws.has_windows_or_name() {

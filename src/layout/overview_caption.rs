@@ -67,6 +67,7 @@ pub(super) struct OverviewCaption {
     title: PreviewLabel,
     pub(super) desktop_labels: [PreviewLabel; 3],
     group_rules: [RefCell<SolidColorBuffer>; 3],
+    hidden_group: RefCell<BorderRenderElement>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
@@ -78,6 +79,7 @@ impl Default for OverviewCaption {
             title: PreviewLabel::default(),
             desktop_labels: Default::default(),
             group_rules: Default::default(),
+            hidden_group: RefCell::new(BorderRenderElement::empty()),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
@@ -212,15 +214,50 @@ impl OverviewCaption {
         let ink = if is_light(backdrop) { 0.16 } else { 0.88 };
         let color = match style {
             GroupStyle::Desktop => Color {
-                a: alpha * 0.54,
+                a: alpha * 0.72,
                 ..accent
             },
-            GroupStyle::Offscreen => Color::new_unpremul(ink, ink, ink, alpha * 0.28),
-            GroupStyle::Hidden => Color::new_unpremul(ink, ink, ink, alpha * 0.18),
+            GroupStyle::Offscreen => Color::new_unpremul(ink, ink, ink, alpha * 0.43),
+            GroupStyle::Hidden => Color::new_unpremul(ink, ink, ink, alpha * 0.31),
         };
         let mut rule = self.group_rules[index].borrow_mut();
         rule.update(rect.size, color);
         push(SolidColorRenderElement::from_buffer(&rule, rect.loc, 1., Kind::Unspecified).into());
+    }
+
+    pub(super) fn render_hidden_group(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        rect: Rectangle<f64, Logical>,
+        backdrop: Color,
+        alpha: f32,
+        scale: f64,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        if !BorderRenderElement::has_shader(renderer) {
+            return;
+        }
+        let color = if is_light(backdrop) {
+            Color::new_unpremul(0.78, 0.85, 0.82, alpha * 0.72)
+        } else {
+            Color::new_unpremul(0.05, 0.10, 0.13, alpha * 0.73)
+        };
+        let geometry = Rectangle::from_size(rect.size);
+        let mut group = self.hidden_group.borrow_mut();
+        group.update(
+            rect.size,
+            geometry,
+            Default::default(),
+            color,
+            color,
+            0.,
+            geometry,
+            0.,
+            frame_radius(rect, 1.),
+            scale as f32,
+            1.,
+        );
+        push(group.clone().with_location(rect.loc).into());
     }
 
     #[allow(clippy::too_many_arguments)]
