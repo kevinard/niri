@@ -52,7 +52,7 @@ pub(super) enum LabelKind {
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
     pub(super) desktop_labels: [PreviewLabel; 3],
-    desktop_groups: [RefCell<BorderRenderElement>; 3],
+    desktop_groups: [RefCell<[BorderRenderElement; 2]>; 3],
     frame: RefCell<[BorderRenderElement; 2]>,
     preview_hover: RefCell<BorderRenderElement>,
     fallback_fill: RefCell<SolidColorBuffer>,
@@ -65,7 +65,9 @@ impl Default for OverviewCaption {
         Self {
             title: PreviewLabel::default(),
             desktop_labels: Default::default(),
-            desktop_groups: std::array::from_fn(|_| RefCell::new(BorderRenderElement::empty())),
+            desktop_groups: std::array::from_fn(|_| {
+                RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty()))
+            }),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             preview_hover: RefCell::new(BorderRenderElement::empty()),
             fallback_fill: RefCell::default(),
@@ -211,9 +213,10 @@ impl OverviewCaption {
             return;
         }
         let surface = caption_background(accent, backdrop, false);
-        let tint = if emphasized { 0.18 } else { 0. };
+        let tint = if emphasized { 0.12 } else { 0. };
         let mix = |base, highlight| base * (1. - tint) + highlight * tint;
-        let opacity = if is_light(backdrop) { 0.74 } else { 0.82 };
+        let light = is_light(backdrop);
+        let opacity = if light { 0.56 } else { 0.62 };
         let color = Color::new_unpremul(
             mix(surface.r, accent.r),
             mix(surface.g, accent.g),
@@ -221,21 +224,28 @@ impl OverviewCaption {
             alpha * opacity,
         );
         let geometry = Rectangle::from_size(rect.size);
+        let border_ink = if light { 0.18 } else { 0.85 };
+        let outline = Color::new_unpremul(border_ink, border_ink, border_ink, alpha * 0.25);
         let mut group = self.desktop_groups[index].borrow_mut();
-        group.update(
-            rect.size,
-            geometry,
-            Default::default(),
-            color,
-            color,
-            0.,
-            geometry,
-            0.,
-            frame_radius(rect, 1.),
-            scale as f32,
-            1.,
-        );
-        push(group.clone().with_location(rect.loc).into());
+        for (element, (color, width)) in group
+            .iter_mut()
+            .zip([(outline, (1. / scale) as f32), (color, 0.)])
+        {
+            element.update(
+                rect.size,
+                geometry,
+                Default::default(),
+                color,
+                color,
+                0.,
+                geometry,
+                width,
+                frame_radius(rect, 1.),
+                scale as f32,
+                1.,
+            );
+            push(element.clone().with_location(rect.loc).into());
+        }
     }
 
     pub(super) fn render_preview_hover(
@@ -546,12 +556,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         };
         if let Some(status) = status {
             let detail = layout(&cr, key);
+            label.set_font_description(Some(&FontDescription::from_string(
+                "sans-serif Medium 13px",
+            )));
             detail.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 11px",
+                "sans-serif Medium 12px",
             )));
             detail.set_text(status);
+            detail.set_ellipsize(EllipsizeMode::End);
+            detail.set_width((title_width * f64::from(pango::SCALE)) as i32);
             let (w, h) = detail.pixel_size();
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.86);
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.93);
             cr.move_to(
                 title_x + (title_width - f64::from(w)) / 2.,
                 height - f64::from(h) - 3.,
@@ -600,7 +615,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             _ => PADDING,
         };
         let y = if status.is_some() {
-            3.
+            2.
         } else {
             (height - f64::from(h)) / 2.
         };
