@@ -2224,12 +2224,12 @@ impl<W: LayoutElement> Monitor<W> {
         let inset = scroll_handle_inset(area);
         let scroll_actions = if inset > 0. {
             let y = (area.loc.y + top - SCROLL_HANDLE_HEIGHT) / 2.;
-            let positions = [(area.loc.x + 4., left), (bounds.end + 4., right)];
+            let positions = [(area.loc.x + 8., left), (bounds.end + 8., right)];
             positions.map(|(x, cue)| {
                 let cue = cue?;
                 let rect = Rectangle::new(
                     Point::from((x, y)),
-                    Size::from((inset - 8., SCROLL_HANDLE_HEIGHT)),
+                    Size::from((inset - 16., SCROLL_HANDLE_HEIGHT)),
                 );
                 uncovered(rect).map(|rect| ScrollAction {
                     rect,
@@ -2557,10 +2557,11 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let left = index == 0;
                 let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let base = tint_caption(surface, accent);
                 let background = if hovered {
-                    tint_caption(surface, accent)
+                    tint_caption(base, accent)
                 } else {
-                    surface
+                    base
                 };
                 if let Some(label) = self.scroll_cue_labels[index].render(
                     renderer.as_gles_renderer(),
@@ -3167,6 +3168,28 @@ impl<W: LayoutElement> Monitor<W> {
                 let hidden = !hidden_group_labeled
                     && !ws.is_floating_visible()
                     && ws.is_floating(window.id());
+                let current = active
+                    && !selected
+                    && ws
+                        .active_window()
+                        .is_some_and(|window| window.id() == tile.window().id());
+                let badge = if hidden {
+                    Some("Hidden")
+                } else if current {
+                    Some("Current")
+                } else {
+                    None
+                };
+                if selected && contains_y(rect.loc.y, rect.size.h) {
+                    ws.overview_caption.render_selection(
+                        renderer,
+                        rect,
+                        accent,
+                        label_alpha,
+                        scale,
+                        &mut |outline| draw(MonitorInnerRenderElement::Decoration(outline)),
+                    );
+                }
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -3181,7 +3204,7 @@ impl<W: LayoutElement> Monitor<W> {
                         renderer.as_gles_renderer(),
                         title,
                         background,
-                        LabelKind::Preview { hidden },
+                        LabelKind::Preview { badge },
                         label.size.w,
                         scale,
                         label.loc,

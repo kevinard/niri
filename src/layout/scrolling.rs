@@ -5694,7 +5694,7 @@ fn compute_new_view_offset(
 }
 
 pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 64.;
-pub(super) const SCROLL_HANDLE_LANE: f64 = 42.;
+pub(super) const SCROLL_HANDLE_LANE: f64 = 58.;
 
 pub(super) fn navigation_strip_fits(area: Rectangle<f64, Logical>) -> bool {
     area.size.w >= 420. && area.size.h >= 400.

@@ -51,7 +51,7 @@ pub(super) enum LabelKind {
         show: bool,
     },
     Preview {
-        hidden: bool,
+        badge: Option<&'static str>,
     },
     Button {
         align_right: bool,
@@ -73,6 +73,7 @@ pub(super) struct OverviewCaption {
     pub(super) desktop_labels: [PreviewLabel; 3],
     group_rules: [RefCell<SolidColorBuffer>; 3],
     hidden_group: RefCell<BorderRenderElement>,
+    selection: RefCell<BorderRenderElement>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
@@ -85,6 +86,7 @@ impl Default for OverviewCaption {
             desktop_labels: Default::default(),
             group_rules: Default::default(),
             hidden_group: RefCell::new(BorderRenderElement::empty()),
+            selection: RefCell::new(BorderRenderElement::empty()),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
@@ -265,6 +267,36 @@ impl OverviewCaption {
         push(group.clone().with_location(rect.loc).into());
     }
 
+    pub(super) fn render_selection(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        rect: Rectangle<f64, Logical>,
+        accent: Color,
+        alpha: f32,
+        scale: f64,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        if !BorderRenderElement::has_shader(renderer) {
+            return;
+        }
+        let geometry = Rectangle::from_size(rect.size);
+        let mut selection = self.selection.borrow_mut();
+        selection.update(
+            rect.size,
+            geometry,
+            Default::default(),
+            accent,
+            accent,
+            0.,
+            geometry,
+            2.,
+            CornerRadius::from(10.).fit_to(rect.size.w as f32, rect.size.h as f32),
+            scale as f32,
+            alpha,
+        );
+        push(selection.clone().with_location(rect.loc).into());
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_frame(
         &self,
@@ -345,14 +377,18 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    layout.set_font_description(Some(&FontDescription::from_string(
-        "sans-serif Medium 14px",
-    )));
+    let font = if matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220 {
+        "sans-serif Medium 13px"
+    } else {
+        "sans-serif Medium 14px"
+    };
+    layout.set_font_description(Some(&FontDescription::from_string(font)));
     layout.set_single_paragraph_mode(true);
     layout.set_ellipsize(
         if matches!(
             key.kind,
             LabelKind::StripButton { .. }
+                | LabelKind::Preview { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::Button { .. }
                 | LabelKind::WindowNavigation { .. }
@@ -496,7 +532,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     if let LabelKind::ScrollHandle { left } = key.kind {
         let arrow = layout(&cr, key);
         arrow.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 23px",
+            "sans-serif Medium 24px",
         )));
         arrow.set_text(if left { "←" } else { "→" });
         let w = f64::from(arrow.pixel_size().0);
@@ -506,7 +542,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
         let detail = layout(&cr, key);
         detail.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 10px",
+            "sans-serif Medium 12px",
         )));
         detail.set_width(((width - 2.) * f64::from(pango::SCALE)) as i32);
         detail.set_alignment(pango::Alignment::Center);
@@ -639,12 +675,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
-        if matches!(key.kind, LabelKind::Preview { hidden: true }) {
+        if let LabelKind::Preview { badge: Some(badge) } = key.kind {
             let action = layout(&cr, key);
             action.set_font_description(Some(&FontDescription::from_string(
                 "sans-serif Medium 12px",
             )));
-            action.set_text("Hidden");
+            action.set_text(badge);
             let (w, h) = action.pixel_size();
             let control_width = (f64::from(w) + 14.).max(22.);
             let right = width - 4.;
