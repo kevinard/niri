@@ -20,11 +20,12 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
-pub(super) const SCROLL_CARD_HEIGHT: f64 = 62.;
+pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
     Caption,
+    GroupHeading,
     Preview,
     Button { align_right: bool },
     WindowNavigation { left: bool },
@@ -309,6 +310,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let label = layout(&cr, key);
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
+        LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
         LabelKind::Preview => (max_width.min(4096.), 22.),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
@@ -395,13 +397,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     cr.close_path();
     let color = key.background;
     let ink = key.ink;
-    cr.set_source_rgba(
-        color.r.into(),
-        color.g.into(),
-        color.b.into(),
-        color.a.into(),
-    );
-    cr.fill()?;
+    if key.kind == LabelKind::GroupHeading {
+        cr.new_path();
+    } else {
+        cr.set_source_rgba(
+            color.r.into(),
+            color.g.into(),
+            color.b.into(),
+            color.a.into(),
+        );
+        cr.fill()?;
+    }
 
     if let LabelKind::WindowNavigation { left } = key.kind {
         let title = layout(&cr, key);
@@ -432,10 +438,10 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let label = layout(&cr, key);
         label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
-        let x = if matches!(key.kind, LabelKind::Button { align_right: true }) {
-            width - PADDING - f64::from(w)
-        } else {
-            PADDING
+        let x = match key.kind {
+            LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
+            LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
+            _ => PADDING,
         };
         cr.move_to(x, (height - f64::from(h)) / 2.);
         pangocairo::functions::show_layout(&cr, &label);
