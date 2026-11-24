@@ -1928,18 +1928,24 @@ impl<W: LayoutElement> Monitor<W> {
         if left_edge >= right_edge {
             return [None, None];
         }
-        let width = 164.;
+        let width = 176.;
+        let inset = 16.;
         let y = (self.working_area.loc.y + top - STRIP_BUTTON_HEIGHT) / 2.;
         let mut cues = self.scroll_cues_for(ws, &bounds);
         let gaps = [bounds.start..left_edge, right_edge..bounds.end];
-        for (entry, gap) in cues.iter_mut().zip(gaps) {
-            if gap.end - gap.start < width + 32. {
+        for (index, (entry, gap)) in cues.iter_mut().zip(gaps).enumerate() {
+            if gap.end - gap.start < width + inset * 2. {
                 *entry = None;
                 continue;
             }
             let Some(cue) = entry else { continue };
+            let x = if index == 0 {
+                gap.start + inset
+            } else {
+                gap.end - width - inset
+            };
             cue.rect = Rectangle::new(
-                Point::from(((gap.start + gap.end - width) / 2., y)),
+                Point::from((x, y)),
                 Size::from((width, STRIP_BUTTON_HEIGHT)),
             );
             cue.opacity = opacity;
@@ -2558,11 +2564,15 @@ impl<W: LayoutElement> Monitor<W> {
                 let Some(cue) = cue else { continue };
                 let left = index == 0;
                 let hovered = pointer.is_some_and(|point| cue.rect.contains(point));
-                let title = if left {
+                let fallback = if left {
                     "Previous window"
                 } else {
                     "Next window"
                 };
+                let title = navigation_title(cue.destination, target, fallback);
+                let title = title
+                    .rsplit_once(" — ")
+                    .map_or(title.as_str(), |(_, app)| app);
                 let background = if hovered {
                     tint_caption(surface, accent)
                 } else {
@@ -2574,7 +2584,7 @@ impl<W: LayoutElement> Monitor<W> {
                     background,
                     LabelKind::StripButton {
                         direction: Some(left),
-                        status: None,
+                        status: Some(fallback),
                         outlined: true,
                     },
                     cue.rect.size.w,

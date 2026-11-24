@@ -709,6 +709,36 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 if columns_fit(total_width, self.working_area.size.w, self.scale) {
                     self.compute_new_view_offset_for_column_fit(target_x, idx)
                 } else {
+                    // When the source overflows, the target can still share the viewport
+                    // with its other neighbor. Fit that pair before isolating the target.
+                    let neighbor = if source_idx > idx {
+                        idx.checked_sub(1)
+                    } else {
+                        (idx + 1 < self.columns.len()).then_some(idx + 1)
+                    };
+                    if let Some(neighbor) = neighbor.filter(|&neighbor| {
+                        self.options.layout.clip_scroll_to_work_area
+                            && self.data[idx].pinned.is_none()
+                            && self.data[neighbor].pinned.is_none()
+                            && self.columns[idx].sizing_mode().is_normal()
+                            && self.columns[neighbor].sizing_mode().is_normal()
+                    }) {
+                        let neighbor_x = self.column_x(neighbor);
+                        let left = target_col_x.min(neighbor_x);
+                        let right = (target_col_x + target_col_width)
+                            .max(neighbor_x + self.columns[neighbor].width());
+                        let width = right - left;
+                        let gaps = self.options.layout.gaps;
+                        if columns_fit(width + gaps * 2., self.working_area.size.w, self.scale) {
+                            let offset = self.compute_new_view_offset_fit(
+                                target_x,
+                                left,
+                                width,
+                                SizingMode::Normal,
+                            );
+                            return offset + left - target_col_x;
+                        }
+                    }
                     self.compute_new_view_offset_for_column_centered(target_x, idx)
                 }
             }
