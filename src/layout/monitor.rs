@@ -2556,6 +2556,7 @@ impl<W: LayoutElement> Monitor<W> {
             let ws = self.active_workspace_ref();
             let accent = ws.options.layout.border.active_color;
             let surface = caption_background(accent, ws.options.layout.background_color, false);
+            let direction_background = tint_caption(tint_caption(surface, accent), accent);
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible();
@@ -2573,10 +2574,19 @@ impl<W: LayoutElement> Monitor<W> {
                 .iter()
                 .map(|title| navigation_title(title.window, target, "Window"))
                 .collect();
+            let pending_focus = pointer.and_then(|point| {
+                strip
+                    .scroll_actions
+                    .iter()
+                    .flatten()
+                    .find(|action| action.rect.contains(point))
+                    .map(|action| action.destination.id())
+            });
             for (index, (title, label)) in
                 strip.titles.into_iter().zip(&self.strip_labels).enumerate()
             {
-                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point))
+                    || pending_focus == Some(title.window.id());
                 let offscreen = title.direction.is_some();
                 let visible_tile = !offscreen && !title.floating;
                 let grouped = title
@@ -2609,8 +2619,12 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     FocusMarker::None
                 };
-                let background = if title.active || hovered {
+                let background = if title.active {
+                    accent
+                } else if hovered {
                     tint_caption(surface, accent)
+                } else if grouped {
+                    Color { a: 0., ..surface }
                 } else if offscreen {
                     Color { a: 0.65, ..surface }
                 } else if visible_tile && strip.tray.is_some() {
@@ -2625,7 +2639,7 @@ impl<W: LayoutElement> Monitor<W> {
                     LabelKind::StripButton {
                         status,
                         outlined: !title.active
-                            && (!visible_tile || hovered || strip.tray.is_none()),
+                            && ((!visible_tile && !grouped) || hovered || strip.tray.is_none()),
                         direction: title.direction,
                         focus,
                         show_arrow: !grouped,
@@ -2662,9 +2676,9 @@ impl<W: LayoutElement> Monitor<W> {
                     renderer.as_gles_renderer(),
                     text,
                     if hovered {
-                        tint_caption(accent, surface)
+                        tint_caption(direction_background, accent)
                     } else {
-                        accent
+                        direction_background
                     },
                     LabelKind::Button { align_right: !left },
                     action.rect.size.w,
@@ -2724,7 +2738,7 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    tint_caption(tint_caption(surface, accent), accent),
+                    tint_caption(surface, accent),
                     LabelKind::StripViewport,
                     rect.size.w,
                     scale,

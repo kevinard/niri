@@ -536,6 +536,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripTray
+                | LabelKind::StripViewport
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint
                 | LabelKind::StripButton { outlined: true, .. }
@@ -544,13 +545,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 | LabelKind::WindowNavigation { .. }
         ) {
             cr.fill_preserve()?;
-            let stroke_alpha = if key.kind == LabelKind::StripTray {
-                0.14
-            } else {
-                0.28
+            let stroke_alpha = match key.kind {
+                LabelKind::StripTray => 0.14,
+                LabelKind::StripViewport => 0.57,
+                _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            cr.set_line_width(1.);
+            cr.set_line_width(if key.kind == LabelKind::StripViewport {
+                1.5
+            } else {
+                1.
+            });
             cr.stroke()?;
         } else {
             cr.fill()?;
