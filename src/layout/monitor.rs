@@ -2160,10 +2160,9 @@ impl<W: LayoutElement> Monitor<W> {
             .iter()
             .position(|(window, _, _)| window.id() == active.id())?;
         let gap = 8.;
-        let group_gap = 20.;
         let inset = 16.;
         let available = bounds.end - bounds.start - 2. * inset;
-        let capacity = ((available + gap - 2. * group_gap) / 160.).floor() as usize;
+        let capacity = ((available + gap) / 160.).floor() as usize;
         let count = windows
             .len()
             .min(capacity.max(1))
@@ -2173,8 +2172,7 @@ impl<W: LayoutElement> Monitor<W> {
         let floating_visible = ws.is_floating_visible();
         let layer_destination = match (scrolling.active_window(), ws.floating().active_window()) {
             (Some(tiled), Some(floating))
-                if available
-                    >= action_width + action_gap + 2. * group_gap + (150. + gap) * count as f64 =>
+                if available >= action_width + action_gap + (150. + gap) * count as f64 =>
             {
                 Some(if floating_visible { tiled } else { floating })
             }
@@ -2185,38 +2183,13 @@ impl<W: LayoutElement> Monitor<W> {
             .saturating_sub(count / 2)
             .min(windows.len() - count);
         let windows = &windows[first..first + count];
-        let [left, on_desktop, right] = [Some(true), None, Some(false)].map(|side| {
-            windows
-                .iter()
-                .filter(|(_, direction, _)| *direction == side)
-                .count()
-        });
-        let group_count = [left, on_desktop, right]
-            .into_iter()
-            .filter(|&count| count != 0)
-            .count();
-        let group_space = group_count.saturating_sub(1) as f64 * group_gap;
-        let gaps = (count - group_count) as f64 * gap;
-        let width = ((available - action_space - group_space - gaps) / count as f64)
+        let gaps = (count - 1) as f64 * gap;
+        let width = ((available - action_space - gaps) / count as f64)
             .floor()
             .min(194.);
-        let group_width = |count: usize| (count as f64 * (width + gap) - gap).max(0.);
-        let left_x = bounds.start + inset;
-        let right_x = bounds.end - inset - group_width(right);
-        let center_width = group_width(on_desktop) + action_space;
-        let center_min = if left == 0 {
-            left_x
-        } else {
-            left_x + group_width(left) + group_gap
-        };
-        let center_max = if right == 0 {
-            bounds.end - inset - center_width
-        } else {
-            right_x - group_gap - center_width
-        };
-        let center_x = ((bounds.start + bounds.end - center_width) / 2.)
-            .max(center_min)
-            .min(center_max);
+        let tabs_width = width * count as f64 + gaps;
+        let tray_width = tabs_width + action_space;
+        let start = (bounds.start + bounds.end - tray_width) / 2.;
         let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
         let uncovered = |rect: Rectangle<f64, Logical>| {
             let covered = floating_visible
@@ -2232,18 +2205,11 @@ impl<W: LayoutElement> Monitor<W> {
                 Size::from((width, STRIP_BUTTON_HEIGHT)),
             ))
         };
-        let mut next = [left_x, center_x, right_x];
-        let titles = windows
+        let titles: Vec<_> = windows
             .iter()
-            .filter_map(|&(window, direction, floating)| {
-                let index = match direction {
-                    Some(true) => 0,
-                    None => 1,
-                    Some(false) => 2,
-                };
-                let x = next[index];
-                next[index] += width + gap;
-                let rect = button(x, width)?;
+            .enumerate()
+            .filter_map(|(index, &(window, direction, floating))| {
+                let rect = button(start + index as f64 * (width + gap), width)?;
                 Some(NavigationTitle {
                     rect,
                     window,
@@ -2254,19 +2220,10 @@ impl<W: LayoutElement> Monitor<W> {
             })
             .collect();
         let layer_action = layer_destination.and_then(|window| {
-            button(
-                center_x + group_width(on_desktop) + action_gap,
-                action_width,
-            )
-            .map(|rect| (rect, window))
+            button(start + tabs_width + action_gap, action_width).map(|rect| (rect, window))
         });
-        let (tray_x, tray_width) = if left > 0 || right > 0 {
-            (left_x, available)
-        } else {
-            (center_x, center_width)
-        };
         let tray = uncovered(Rectangle::new(
-            Point::from((tray_x - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
+            Point::from((start - STRIP_TRAY_PADDING, y - STRIP_TRAY_PADDING)),
             Size::from((
                 tray_width + 2. * STRIP_TRAY_PADDING,
                 STRIP_BUTTON_HEIGHT + 2. * STRIP_TRAY_PADDING,
@@ -2504,11 +2461,13 @@ impl<W: LayoutElement> Monitor<W> {
                     .iter()
                     .enumerate()
                     .all(|(other, name)| other == index || window_title_suffix(name) != suffix);
-                let name = if !offscreen && distinct { suffix } else { name };
+                let name = if distinct { suffix } else { name };
                 let background = if title.active {
                     accent
                 } else if hovered {
                     tint_caption(tint_caption(surface, accent), accent)
+                } else if offscreen {
+                    Color { a: 0.65, ..surface }
                 } else {
                     surface
                 };
@@ -2520,6 +2479,7 @@ impl<W: LayoutElement> Monitor<W> {
                         status,
                         outlined: !title.active,
                         offscreen,
+                        visible_tile: !title.floating && !offscreen,
                     },
                     title.rect.size.w,
                     scale,

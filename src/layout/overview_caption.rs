@@ -43,6 +43,7 @@ pub(super) enum LabelKind {
         status: Option<&'static str>,
         outlined: bool,
         offscreen: bool,
+        visible_tile: bool,
     },
     LayerAction {
         show: bool,
@@ -466,6 +467,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
+        LabelKind::StripButton {
+            offscreen: true, ..
+        } => 17.,
         LabelKind::StripButton { .. } => 9.,
         _ => height / 2.,
     };
@@ -716,6 +720,20 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         };
         cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
+        if matches!(
+            key.kind,
+            LabelKind::StripButton {
+                visible_tile: true,
+                ..
+            }
+        ) {
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.58);
+            cr.set_line_width(2.);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.move_to(width / 2. - 11., height - 5.);
+            cr.line_to(width / 2. + 11., height - 5.);
+            cr.stroke()?;
+        }
     }
     drop(cr);
 
