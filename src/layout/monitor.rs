@@ -12,8 +12,8 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
-use super::overview_caption::caption_background;
-use super::scrolling::{Column, ColumnWidth};
+use super::overview_caption::{caption_background, PreviewLabel};
+use super::scrolling::{Column, ColumnWidth, ScrollDirection};
 use super::tile::Tile;
 use super::workspace::{
     OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
@@ -81,6 +81,7 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) insert_hint: Option<InsertHint>,
     /// Insert hint element for rendering.
     insert_hint_element: InsertHintElement,
+    scroll_cue_labels: [PreviewLabel; 2],
     /// Location to render the insert hint element.
     insert_hint_render_loc: Option<InsertHintRenderLoc>,
     /// Whether the overview is open.
@@ -396,6 +397,7 @@ impl<W: LayoutElement> Monitor<W> {
             previous_workspace_id: None,
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
+            scroll_cue_labels: Default::default(),
             insert_hint_render_loc: None,
             overview_open: false,
             overview_progress: None,
@@ -1721,6 +1723,86 @@ impl<W: LayoutElement> Monitor<W> {
         Some(area.loc.x..right)
     }
 
+    fn scroll_cue_rects(&self) -> [Option<Rectangle<f64, Logical>>; 2] {
+        let ws = self.active_workspace_ref();
+        if self.workspace_switch.is_some() || ws.floating_is_active() {
+            return [None, None];
+        }
+        let Some(bounds) = self.scroll_clip(ws) else {
+            return [None, None];
+        };
+        if bounds.end - bounds.start < 90. || self.working_area.size.h < 28. {
+            return [None, None];
+        }
+        let scrolling = ws.scrolling();
+        let Some(extent) = visible_extent(scrolling.tiles_with_render_positions()) else {
+            return [None, None];
+        };
+        let Some(active) = scrolling.active_column().map(Column::id) else {
+            return [None, None];
+        };
+        let mut columns = scrolling.columns();
+        let first = columns.next().map(Column::id);
+        let last = columns.last().map(Column::id).or(first);
+        let tolerance = 1. / self.scale.fractional_scale();
+        let hidden_left = first != Some(active) && extent.start < bounds.start - tolerance;
+        let hidden_right = last != Some(active) && extent.end > bounds.end + tolerance;
+        let y = self.working_area.loc.y + (self.working_area.size.h - 28.) / 2.;
+        let rect = |x| Rectangle::new(Point::from((x, y)), Size::from((30., 28.)));
+        [
+            hidden_left.then(|| rect(bounds.start + 4.)),
+            hidden_right.then(|| rect(bounds.end - 34.)),
+        ]
+    }
+
+    pub fn scroll_cue_under(&self, position: Point<f64, Logical>) -> Option<ScrollDirection> {
+        self.scroll_cue_rects()
+            .into_iter()
+            .zip([ScrollDirection::Left, ScrollDirection::Right])
+            .find_map(|(rect, direction)| {
+                rect.filter(|rect| rect.contains(position)).map(|_| direction)
+            })
+    }
+
+    fn render_scroll_cues<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let ws = self.active_workspace_ref();
+        let color = caption_background(
+            ws.options.layout.border.active_color,
+            ws.options.layout.background_color,
+            true,
+        );
+        for ((label, rect), icon) in self
+            .scroll_cue_labels
+            .iter()
+            .zip(self.scroll_cue_rects())
+            .zip(["‹", "›"])
+        {
+            let Some(rect) = rect else { continue };
+            if let Some(label) = label.render(
+                renderer.as_gles_renderer(),
+                icon.into(),
+                color,
+                false,
+                32.,
+                self.scale.fractional_scale(),
+                rect.loc,
+                1.,
+            ) {
+                let elem = MonitorInnerRenderElement::Caption(label);
+                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                push(RelocateRenderElement::from_element(
+                    elem,
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            }
+        }
+    }
+
     pub(super) fn insert_position(
         &self,
         pos_within_output: Point<f64, Logical>,
@@ -2021,6 +2103,7 @@ impl<W: LayoutElement> Monitor<W> {
         if self.options.overview.framed_workspaces {
             self.render_overview_captions(ctx.renderer, ctx.target, push);
         }
+        self.render_scroll_cues(ctx.renderer, push);
 
         let insert_hint_render_loc = self
             .insert_hint_render_loc

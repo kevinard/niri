@@ -3490,6 +3490,37 @@ impl State {
 
             let is_overview_open = self.niri.layout.is_overview_open();
 
+            if button == Some(MouseButton::Left)
+                && !mod_down
+                && !pointer.is_grabbed()
+                && !is_mru_open
+                && !self.niri.is_locked()
+                && !self.niri.screenshot_ui.is_open()
+                && !self.niri.exit_confirm_dialog.is_open()
+            {
+                let location = pointer.current_location();
+                let cue = self.niri.output_under(location).and_then(|(output, point)| {
+                    let monitor = self.niri.layout.monitor_for_output(output)?;
+                    let direction = monitor.scroll_cue_under(point)?;
+                    self.niri
+                        .contents_under(location)
+                        .layer
+                        .is_none()
+                        .then(|| (output.clone(), direction))
+                });
+                if let Some((output, direction)) = cue {
+                    self.niri.layout.focus_output(&output);
+                    match direction {
+                        ScrollDirection::Left => self.niri.layout.focus_left(),
+                        ScrollDirection::Right => self.niri.layout.focus_right(),
+                    };
+                    self.niri.layer_shell_on_demand_focus = None;
+                    self.niri.suppressed_buttons.insert(button_code);
+                    self.niri.queue_redraw_all();
+                    return;
+                }
+            }
+
             if is_overview_open && !pointer.is_grabbed() && button == Some(MouseButton::Right) {
                 if let Some((output, ws)) = self.niri.workspace_under_cursor(true) {
                     let ws_id = ws.id();

@@ -645,4 +645,5 @@ layout { clip-scroll-to-work-area; }
 
 Clip the scrolling strip at the horizontal space reserved by side panels.
 This keeps passing tiled window content and controls out of the panel margin.
+A chevron at the edge brings the next clipped column into view.
 Floating, maximized and fullscreen windows retain their usual bounds.
