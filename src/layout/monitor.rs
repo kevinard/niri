@@ -11,6 +11,7 @@ use smithay::backend::renderer::element::utils::{
 use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
+use super::focus_ring::FocusRingRenderElement;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -39,6 +40,7 @@ use crate::utils::{
 const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
 
 const OVERVIEW_INSET: f64 = 20.;
+const OVERVIEW_FRAME_MARGIN: f64 = 12.;
 
 const WORKSPACE_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
     stiffness: 0.5,
@@ -196,6 +198,7 @@ niri_render_elements! {
         Shadow = ShadowRenderElement,
         SolidColor = SolidColorRenderElement,
         Caption = PrimaryGpuTextureRenderElement,
+        OverviewFrame = FocusRingRenderElement,
     }
 }
 
@@ -1627,8 +1630,11 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<&Workspace<W>> {
-        self.workspaces_with_render_geo()
-            .find_map(|(ws, geo)| geo.contains(pos_within_output).then_some(ws))
+        self.workspaces_with_render_geo_idx()
+            .find_map(|((index, ws), geo)| {
+                let geo = self.overview_frame_geometry(ws, index, geo).unwrap_or(geo);
+                geo.contains(pos_within_output).then_some(ws)
+            })
     }
 
     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
@@ -1755,9 +1761,11 @@ impl<W: LayoutElement> Monitor<W> {
             .overview_progress_value()
             .unwrap_or_default()
             .clamp(0., 1.);
-        let left = self.working_area.loc.x * progress;
+        let margin = OVERVIEW_FRAME_MARGIN.min(self.working_area.size.w / 2.);
+        let left = (self.working_area.loc.x + margin) * progress;
         let right = self.view_size.w
-            + (self.working_area.loc.x + self.working_area.size.w - self.view_size.w) * progress;
+            + (self.working_area.loc.x + self.working_area.size.w - margin - self.view_size.w)
+                * progress;
         (left, right)
     }
 
@@ -1979,8 +1987,40 @@ impl<W: LayoutElement> Monitor<W> {
         self.options.overview.framed_workspaces && self.overview_progress.is_some()
     }
 
+    fn overview_frame_geometry(
+        &self,
+        ws: &Workspace<W>,
+        index: usize,
+        geo: Rectangle<f64, Logical>,
+    ) -> Option<Rectangle<f64, Logical>> {
+        if !self.has_framed_overview() {
+            return None;
+        }
+        let progress = self.overview_progress_value()?.clamp(0., 1.);
+        let margin = OVERVIEW_FRAME_MARGIN.min(self.working_area.size.w / 2.);
+        let left = self.working_area.loc.x + margin;
+        let width = self.working_area.size.w - 2. * margin;
+        let height = if index != self.active_workspace_idx && !ws.has_windows_or_name() {
+            geo.size.h.min(94.)
+        } else {
+            geo.size.h
+        };
+        let position = Point::from((geo.loc.x + (left - geo.loc.x) * progress, geo.loc.y));
+        let size = Size::from((
+            geo.size.w + (width - geo.size.w) * progress,
+            geo.size.h + (height - geo.size.h) * progress,
+        ));
+        let scale = self.scale.fractional_scale();
+        Some(
+            Rectangle::new(position, size)
+                .to_physical_precise_round(scale)
+                .to_logical(scale),
+        )
+    }
+
     pub fn render_overview_frames<R: NiriRenderer>(
         &self,
+        renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
         let progress = self
@@ -1989,21 +2029,18 @@ impl<W: LayoutElement> Monitor<W> {
             .clamp(0., 1.);
         let scale = self.scale.fractional_scale();
         for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
-            let left = self.working_area.loc.x + 12.;
-            let width = (self.working_area.size.w - 24.).max(0.);
-            let position = Point::from((geo.loc.x + (left - geo.loc.x) * progress, geo.loc.y));
-            let size = Size::from((geo.size.w + (width - geo.size.w) * progress, geo.size.h));
-            let rect = Rectangle::new(position, size)
-                .to_physical_precise_round(scale)
-                .to_logical(scale);
+            let Some(rect) = self.overview_frame_geometry(ws, index, geo) else {
+                continue;
+            };
             ws.overview_caption.render_frame(
+                renderer,
                 rect,
                 ws.options.layout.background_color,
                 index == self.active_workspace_idx,
                 progress as f32,
                 scale,
                 &mut |elem| {
-                    let elem = MonitorInnerRenderElement::SolidColor(elem);
+                    let elem = MonitorInnerRenderElement::OverviewFrame(elem);
                     let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
                     push(RelocateRenderElement::from_element(
                         elem,

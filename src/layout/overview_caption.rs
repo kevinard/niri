@@ -1,25 +1,39 @@
 use std::cell::RefCell;
 
-use niri_config::Color;
+use niri_config::{Color, CornerRadius};
 use pango::{EllipsizeMode, FontDescription};
 use pangocairo::cairo::{self, ImageSurface};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{ContextId, Renderer};
-use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
+use smithay::utils::{Logical, Point, Rectangle, Transform};
 
+use super::focus_ring::FocusRingRenderElement;
+use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
+use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct OverviewCaption {
     texture: RefCell<Option<(Key, Option<TextureBuffer<GlesTexture>>)>>,
-    frame: RefCell<[SolidColorBuffer; 5]>,
+    frame: RefCell<[BorderRenderElement; 2]>,
+    fallback_fill: RefCell<SolidColorBuffer>,
+}
+
+impl Default for OverviewCaption {
+    fn default() -> Self {
+        Self {
+            texture: RefCell::default(),
+            frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
+            fallback_fill: RefCell::default(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -73,60 +87,63 @@ impl OverviewCaption {
         );
         Some(PrimaryGpuTextureRenderElement(element))
     }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_frame(
         &self,
+        renderer: &mut impl NiriRenderer,
         rect: Rectangle<f64, Logical>,
         background: Color,
         active: bool,
         progress: f32,
         scale: f64,
-        push: &mut dyn FnMut(SolidColorRenderElement),
+        push: &mut dyn FnMut(FocusRingRenderElement),
     ) {
-        let pixel = 1. / scale;
-        let Rectangle { loc, size } = rect;
+        if rect.size.w <= 0. || rect.size.h <= 0. {
+            return;
+        }
         let opacity = background.a + (1. - background.a) * progress * 0.24;
         let fill = Color::new_unpremul(background.r, background.g, background.b, opacity);
+        if !BorderRenderElement::has_shader(renderer) {
+            let mut fallback = self.fallback_fill.borrow_mut();
+            fallback.update(rect.size, fill);
+            push(
+                SolidColorRenderElement::from_buffer(&fallback, rect.loc, 1., Kind::Unspecified)
+                    .into(),
+            );
+            return;
+        }
+
         let ink = if background.r + background.g + background.b > 1.5 {
             0.08
         } else {
             0.94
         };
-        let outline_alpha = if active { 0.44 } else { 0.31 };
+        let outline_alpha = if active { 0.36 } else { 0.26 };
         let outline = Color::new_unpremul(ink, ink, ink, outline_alpha * progress);
+        let geo = Rectangle::from_size(rect.size);
+        let radius =
+            CornerRadius::from(18. * progress).fit_to(rect.size.w as f32, rect.size.h as f32);
         let mut frame = self.frame.borrow_mut();
-        if size.w > 2. * pixel && size.h > 2. * pixel {
-            let edges = [
-                (loc, Size::from((size.w, pixel))),
-                (
-                    loc + Point::from((0., size.h - pixel)),
-                    Size::from((size.w, pixel)),
-                ),
-                (
-                    loc + Point::from((0., pixel)),
-                    Size::from((pixel, size.h - 2. * pixel)),
-                ),
-                (
-                    loc + Point::from((size.w - pixel, pixel)),
-                    Size::from((pixel, size.h - 2. * pixel)),
-                ),
-            ];
-            for (buffer, (position, size)) in frame[1..].iter_mut().zip(edges) {
-                buffer.update(size, outline);
-                push(SolidColorRenderElement::from_buffer(
-                    buffer,
-                    position,
-                    1.,
-                    Kind::Unspecified,
-                ));
-            }
+        for (element, (color, width)) in frame
+            .iter_mut()
+            .zip([(outline, (1. / scale) as f32), (fill, 0.)])
+        {
+            element.update(
+                rect.size,
+                geo,
+                Default::default(),
+                color,
+                color,
+                0.,
+                geo,
+                width,
+                radius,
+                scale as f32,
+                1.,
+            );
+            push(element.clone().with_location(rect.loc).into());
         }
-        frame[0].update(size, fill);
-        push(SolidColorRenderElement::from_buffer(
-            &frame[0],
-            loc,
-            1.,
-            Kind::Unspecified,
-        ));
     }
 }
 

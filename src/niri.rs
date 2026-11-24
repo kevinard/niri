@@ -4815,7 +4815,7 @@ impl Niri {
         }
 
         if mon.has_framed_overview() {
-            mon.render_overview_frames(&mut |elem| push(elem.into()));
+            mon.render_overview_frames(ctx.renderer, &mut |elem| push(elem.into()));
         } else {
             mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
         }
