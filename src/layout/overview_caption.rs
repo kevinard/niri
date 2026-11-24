@@ -28,7 +28,7 @@ pub(super) enum LabelKind {
     GroupHeading,
     Preview,
     Button { align_right: bool },
-    WindowNavigation { left: bool },
+    WindowNavigation { left: bool, count: usize },
     EdgeFade { height: u32, from_left: bool },
 }
 
@@ -351,12 +351,12 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::WindowNavigation { .. } => 14.,
         _ => height / 2.,
     };
-    let left_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: true }) {
+    let left_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: true, .. }) {
         0.
     } else {
         radius
     };
-    let right_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: false }) {
+    let right_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: false, .. }) {
         0.
     } else {
         radius
@@ -409,7 +409,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         cr.fill()?;
     }
 
-    if let LabelKind::WindowNavigation { left } = key.kind {
+    if let LabelKind::WindowNavigation { left, count } = key.kind {
         let title = layout(&cr, key);
         title.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         let align = |w: i32| {
@@ -425,11 +425,14 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
         let heading = layout(&cr, key);
         heading.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
-        heading.set_text(if left {
-            "←  Show previous window"
-        } else {
-            "Show next window  →"
-        });
+        let text = match (left, count > 1) {
+            (true, false) => "←  Show previous window".into(),
+            (false, false) => "Show next window  →".into(),
+            (true, true) => format!("←  Previous · {count} columns"),
+            (false, true) => format!("{count} columns · Next  →"),
+        };
+        heading.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
+        heading.set_text(&text);
         cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.76);
         cr.move_to(align(heading.pixel_size().0), 12.);
         pangocairo::functions::show_layout(&cr, &heading);
