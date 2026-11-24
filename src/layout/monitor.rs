@@ -16,7 +16,7 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
     LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_RANGE_HEIGHT, STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
+    STRIP_BUTTON_HEIGHT, STRIP_HINT_HEIGHT, STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
     STRIP_VIEWPORT_BAND_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
@@ -95,7 +95,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_projection_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    strip_hint_label: PreviewLabel,
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
@@ -191,7 +191,7 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
-    projections: Vec<(Rectangle<f64, Logical>, bool)>,
+    hint: Option<(Rectangle<f64, Logical>, Vec<&'a W>)>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -480,7 +480,7 @@ impl<W: LayoutElement> Monitor<W> {
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
             strip_viewport_labels: Default::default(),
-            strip_projection_labels: Default::default(),
+            strip_hint_label: PreviewLabel::default(),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
@@ -2244,18 +2244,6 @@ impl<W: LayoutElement> Monitor<W> {
         let layer_action = layer_destination.and_then(|window| {
             button(start + tabs_width + action_gap, action_width).map(|rect| (rect, window))
         });
-        let destination_columns = |window: &W| {
-            scrolling
-                .columns_after_activating(window.id())
-                .map(|columns| {
-                    columns
-                        .filter(|(column, x)| {
-                            *x >= bounds.start - pixel && *x + column.width() <= bounds.end + pixel
-                        })
-                        .map(|(column, _)| column.active_window().id())
-                        .collect::<Vec<_>>()
-                })
-        };
         let column_band = |span: Range<f64>| {
             uncovered(Rectangle::new(
                 Point::from((span.start - 2., y - 2.)),
@@ -2290,30 +2278,44 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             Vec::new()
         };
-        let preview = pointer.and_then(|point| {
-            titles
+        let hint = pointer.and_then(|point| {
+            let title = titles
                 .iter()
-                .find(|title| title.direction.is_some() && title.rect.contains(point))
+                .find(|title| title.direction.is_some() && title.rect.contains(point))?;
+            let hint_y = top + STRIP_TRAY_HEIGHT + 5.;
+            let tile_top = top + NAVIGATION_STRIP_HEIGHT + ws.options.layout.gaps;
+            if hint_y + STRIP_HINT_HEIGHT > tile_top {
+                return None;
+            }
+            let neighbors = scrolling
+                .columns_after_activating(title.window.id())?
+                .filter_map(|(column, x)| {
+                    let current = positions[&column.id()].x;
+                    let width = column.width();
+                    let window = column.active_window();
+                    let in_view = x >= bounds.start - pixel && x + width <= bounds.end + pixel;
+                    let already_visible =
+                        current >= visible.start - pixel && current + width <= visible.end + pixel;
+                    (in_view && !already_visible && window.id() != title.window.id())
+                        .then_some(window)
+                })
+                .collect::<Vec<_>>();
+            let hint_width: f64 = if neighbors.is_empty() { 118. } else { 364. };
+            let width = available.min(hint_width);
+            let center = title.rect.loc.x + title.rect.size.w / 2.;
+            let x = (center - width / 2.)
+                .min(bounds.end - inset - width)
+                .max(bounds.start + inset);
+            let rect = Rectangle::new(
+                Point::from((x, hint_y)),
+                Size::from((width, STRIP_HINT_HEIGHT)),
+            );
+            uncovered(rect).map(|rect| (rect, neighbors))
         });
-        let projections = preview
-            .and_then(|title| destination_columns(title.window))
-            .filter(|ids| ids.len() > 1)
-            .map(|ids| groups(&|title| ids.contains(&title.window.id())))
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|span| {
-                let rect = uncovered(Rectangle::new(
-                    Point::from((span.start - 2., y - 2.)),
-                    Size::from((span.end - span.start + 4., STRIP_RANGE_HEIGHT)),
-                ))?;
-                let labeled = preview.is_some_and(|title| span.contains(&title.rect.loc.x));
-                Some((rect, labeled))
-            })
-            .collect();
         Some(NavigationStrip {
             tray,
             viewports,
-            projections,
+            hint,
             titles,
             layer_action,
         })
@@ -2516,22 +2518,11 @@ impl<W: LayoutElement> Monitor<W> {
                 .iter()
                 .map(|title| navigation_title(title.window, target, "Window"))
                 .collect();
-            let nearest_left = strip
-                .titles
-                .iter()
-                .rposition(|title| title.direction == Some(true));
-            let nearest_right = strip
-                .titles
-                .iter()
-                .position(|title| title.direction == Some(false));
             for (index, (title, label)) in
                 strip.titles.into_iter().zip(&self.strip_labels).enumerate()
             {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let offscreen = title.direction.is_some();
-                let projected = strip.projections.iter().any(|(rect, _)| {
-                    rect.contains(title.rect.loc + Point::from((title.rect.size.w / 2., 0.)))
-                });
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2564,11 +2555,6 @@ impl<W: LayoutElement> Monitor<W> {
                 } else if offscreen {
                     if hovered {
                         tint_caption(direction_background, accent)
-                    } else if projected {
-                        Color {
-                            a: 0.,
-                            ..direction_background
-                        }
                     } else {
                         tint_caption(surface, accent)
                     }
@@ -2580,13 +2566,7 @@ impl<W: LayoutElement> Monitor<W> {
                     surface
                 };
                 let kind = if let Some(left) = title.direction {
-                    let nearest = if left { nearest_left } else { nearest_right };
-                    LabelKind::ScrollWindow {
-                        left,
-                        hovered,
-                        projected,
-                        labeled: hovered || nearest == Some(index),
-                    }
+                    LabelKind::ScrollWindow { left, hovered }
                 } else {
                     LabelKind::StripButton {
                         status,
@@ -2633,22 +2613,29 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            for ((rect, labeled), label) in strip
-                .projections
-                .into_iter()
-                .zip(&self.strip_projection_labels)
-            {
-                if let Some(label) = label.render(
+            if let Some((rect, neighbors)) = strip.hint {
+                let text = if neighbors.is_empty() {
+                    "Scroll & focus".into()
+                } else {
+                    let names = neighbors
+                        .iter()
+                        .map(|window| navigation_title(*window, target, "window"))
+                        .map(|name| window_title_suffix(&name).to_owned())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("Scroll & focus · Also shows {names}")
+                };
+                if let Some(hint) = self.strip_hint_label.render(
                     renderer.as_gles_renderer(),
-                    String::new(),
-                    direction_background,
-                    LabelKind::StripRange { labeled },
+                    text,
+                    surface,
+                    LabelKind::ScrollHint,
                     rect.size.w,
                     scale,
                     rect.loc,
                     1.,
                 ) {
-                    draw(label);
+                    draw(hint);
                 }
             }
             for (rect, label) in strip.viewports.into_iter().zip(&self.strip_viewport_labels) {
