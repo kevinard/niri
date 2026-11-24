@@ -2052,9 +2052,14 @@ impl<W: LayoutElement> Monitor<W> {
                     && exposed > 0.
                     && exposed < peek_width;
                 let clip_progress = if strip_peek {
-                    ((peek_width - exposed) / (peek_width * 0.36))
+                    let progress = ((peek_width - exposed) / (peek_width * 0.36))
                         .max(card_progress)
-                        .min(1.)
+                        .min(1.);
+                    if exposed * (1. - progress) < 64. {
+                        1.
+                    } else {
+                        progress
+                    }
                 } else if card {
                     card_progress
                 } else {
