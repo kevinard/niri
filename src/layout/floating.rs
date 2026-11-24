@@ -18,13 +18,13 @@ use super::{
 use crate::animation::{Animation, Clock};
 use crate::layout::RenderLayer;
 use crate::niri_render_elements;
-use crate::render_helpers::RenderCtx;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::xray::XrayPos;
+use crate::render_helpers::RenderCtx;
 use crate::utils::transaction::TransactionBlocker;
 use crate::utils::{
-    ResizeEdge, center_preferring_top_left_in_area, clamp_preferring_top_left_in_area,
-    ensure_min_max_size, ensure_min_max_size_maybe_zero,
+    center_preferring_top_left_in_area, clamp_preferring_top_left_in_area, ensure_min_max_size,
+    ensure_min_max_size_maybe_zero, ResizeEdge,
 };
 use crate::window::ResolvedWindowRules;
 
@@ -1066,10 +1066,13 @@ impl<W: LayoutElement> FloatingSpace<W> {
             // opposite edge, and deliberately off-screen windows retain their position.
             let area = data.working_area;
             let mut next = Rectangle::new(data.logical_pos, data.size);
-            if area.intersection(previous) == Some(previous)
-                && next.size.w <= area.size.w
-                && next.size.h <= area.size.h
-            {
+            let previous_end = previous.loc + previous.size.to_point();
+            let area_end = area.loc + area.size.to_point();
+            let was_visible = previous.loc.x >= area.loc.x
+                && previous.loc.y >= area.loc.y
+                && previous_end.x <= area_end.x
+                && previous_end.y <= area_end.y;
+            if was_visible && next.size.w <= area.size.w && next.size.h <= area.size.h {
                 clamp_preferring_top_left_in_area(area, &mut next);
                 if next.loc != data.logical_pos {
                     data.set_logical_pos(next.loc);
