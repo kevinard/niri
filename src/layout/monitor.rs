@@ -172,6 +172,7 @@ struct ScrollCue<'a, W> {
     destination: &'a W,
     clipped_column_edge: Option<f64>,
     opacity: f32,
+    offscreen_columns: usize,
 }
 
 #[derive(Debug)]
@@ -1804,12 +1805,11 @@ impl<W: LayoutElement> Monitor<W> {
                 .columns_with_render_positions()
                 .filter(|(column, _)| column.id() != active.id())
         };
-        let left = columns()
-            .filter(|(_, pos)| pos.x < bounds.start - tolerance)
-            .max_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
-        let right = columns()
-            .filter(|(column, pos)| pos.x + column.width() > bounds.end + tolerance)
-            .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
+        let left_columns = || columns().filter(|(_, pos)| pos.x < bounds.start - tolerance);
+        let right_columns =
+            || columns().filter(|(column, pos)| pos.x + column.width() > bounds.end + tolerance);
+        let left = left_columns().max_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
+        let right = right_columns().min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x));
         let fully_visible = columns()
             .filter(|(column, pos)| {
                 pos.x >= bounds.start - tolerance
@@ -1892,6 +1892,11 @@ impl<W: LayoutElement> Monitor<W> {
                         boundary + (edge - boundary) * card_progress
                     }),
                     opacity: if card { card_progress as f32 } else { 1. },
+                    offscreen_columns: if left {
+                        left_columns().count()
+                    } else {
+                        right_columns().count()
+                    },
                 }
             };
         [
@@ -2039,7 +2044,10 @@ impl<W: LayoutElement> Monitor<W> {
                 text,
                 color,
                 if card {
-                    LabelKind::WindowNavigation { left }
+                    LabelKind::WindowNavigation {
+                        left,
+                        count: cue.offscreen_columns,
+                    }
                 } else {
                     LabelKind::Button { align_right: !left }
                 },
