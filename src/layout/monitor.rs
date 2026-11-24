@@ -1677,6 +1677,13 @@ impl<W: LayoutElement> Monitor<W> {
             Some((win, hit.to_activate()))
         } else {
             let (win, hit) = ws.window_under(pos_within_output - geo.loc)?;
+            if self
+                .scroll_clip(ws)
+                .is_some_and(|bounds| !bounds.contains(&pos_within_output.x))
+                && !ws.is_floating(win.id())
+            {
+                return None;
+            }
             Some((win, hit.offset_win_pos(geo.loc)))
         }
     }
@@ -1687,7 +1694,31 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let (ws, geo) = self.workspace_under(pos_within_output)?;
+        if self
+            .scroll_clip(ws)
+            .is_some_and(|bounds| !bounds.contains(&pos_within_output.x))
+        {
+            self.window_under(pos_within_output)?;
+        }
         ws.resize_edges_under(pos_within_output - geo.loc)
+    }
+
+    /// Clip normal tiled windows at exclusive side panels, while leaving the
+    /// floating layer and maximized or full-screen window behavior intact.
+    fn scroll_clip(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
+        let area = self.working_area;
+        let right = area.loc.x + area.size.w;
+        if !ws.options.layout.clip_scroll_to_work_area
+            || self.overview_progress.is_some()
+            || (area.loc.x <= 0. && right >= self.view_size.w)
+            || !ws
+                .scrolling()
+                .active_window()
+                .is_some_and(|window| window.sizing_mode().is_normal())
+        {
+            return None;
+        }
+        Some(area.loc.x..right)
     }
 
     pub(super) fn insert_position(
@@ -2047,7 +2078,7 @@ impl<W: LayoutElement> Monitor<W> {
                 };
 
             for (ws, geo) in self.workspaces_with_render_geo_cull(cull) {
-                let crop_bounds = if cull
+                let mut crop_bounds = if cull
                     && self.options.overview.framed_workspaces
                     && self.overview_progress.is_some()
                 {
@@ -2055,6 +2086,12 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     crop_bounds
                 };
+                if pass == 3 && let Some(bounds) = self.scroll_clip(ws) {
+                    let left = ((bounds.start - geo.loc.x) * scale).ceil() as i32;
+                    let right = ((bounds.end - geo.loc.x) * scale).floor() as i32;
+                    crop_bounds.loc.x = left;
+                    crop_bounds.size.w = right.saturating_sub(left).max(0);
+                }
                 // Macro instead of closure because ws and insert hint have different elem types.
                 macro_rules! push {
                     () => {{
