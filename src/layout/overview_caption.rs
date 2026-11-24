@@ -24,7 +24,7 @@ pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GroupStyle {
     Desktop,
     Offscreen,
@@ -66,7 +66,7 @@ pub(super) enum LabelKind {
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
     pub(super) desktop_labels: [PreviewLabel; 3],
-    desktop_groups: [RefCell<[BorderRenderElement; 2]>; 3],
+    group_rules: [RefCell<SolidColorBuffer>; 3],
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
@@ -77,9 +77,7 @@ impl Default for OverviewCaption {
         Self {
             title: PreviewLabel::default(),
             desktop_labels: Default::default(),
-            desktop_groups: std::array::from_fn(|_| {
-                RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty()))
-            }),
+            group_rules: Default::default(),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
@@ -201,62 +199,28 @@ impl OverviewCaption {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_desktop_group(
+    pub(super) fn render_group_rule(
         &self,
-        renderer: &mut impl NiriRenderer,
         index: usize,
         rect: Rectangle<f64, Logical>,
         style: GroupStyle,
         backdrop: Color,
         accent: Color,
         alpha: f32,
-        scale: f64,
         push: &mut dyn FnMut(FocusRingRenderElement),
     ) {
-        if rect.size.w < 12.
-            || rect.size.h < 12.
-            || alpha == 0.
-            || !BorderRenderElement::has_shader(renderer)
-        {
-            return;
-        }
-        let surface = caption_background(accent, backdrop, false);
-        let (tint, opacity, edge) = match style {
-            GroupStyle::Desktop => (0.12, 0.76, 0.34),
-            GroupStyle::Offscreen => (0., 0.34, 0.18),
-            GroupStyle::Hidden => (0., 0.51, 0.26),
+        let ink = if is_light(backdrop) { 0.16 } else { 0.88 };
+        let color = match style {
+            GroupStyle::Desktop => Color {
+                a: alpha * 0.54,
+                ..accent
+            },
+            GroupStyle::Offscreen => Color::new_unpremul(ink, ink, ink, alpha * 0.28),
+            GroupStyle::Hidden => Color::new_unpremul(ink, ink, ink, alpha * 0.18),
         };
-        let mix = |base, highlight| base * (1. - tint) + highlight * tint;
-        let light = is_light(backdrop);
-        let color = Color::new_unpremul(
-            mix(surface.r, accent.r),
-            mix(surface.g, accent.g),
-            mix(surface.b, accent.b),
-            alpha * opacity,
-        );
-        let geometry = Rectangle::from_size(rect.size);
-        let border_ink = if light { 0.18 } else { 0.85 };
-        let outline = Color::new_unpremul(border_ink, border_ink, border_ink, alpha * edge);
-        let mut group = self.desktop_groups[index].borrow_mut();
-        for (element, (color, width)) in group
-            .iter_mut()
-            .zip([(outline, (1. / scale) as f32), (color, 0.)])
-        {
-            element.update(
-                rect.size,
-                geometry,
-                Default::default(),
-                color,
-                color,
-                0.,
-                geometry,
-                width,
-                frame_radius(rect, 1.),
-                scale as f32,
-                1.,
-            );
-            push(element.clone().with_location(rect.loc).into());
-        }
+        let mut rule = self.group_rules[index].borrow_mut();
+        rule.update(rect.size, color);
+        push(SolidColorRenderElement::from_buffer(&rule, rect.loc, 1., Kind::Unspecified).into());
     }
 
     #[allow(clippy::too_many_arguments)]
