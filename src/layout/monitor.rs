@@ -2228,7 +2228,7 @@ impl<W: LayoutElement> Monitor<W> {
             .min(MAX_NAVIGATION_TITLES);
         let action_width = 188.;
         let action_gap = 16.;
-        let floating_visible = ws.is_floating_visible();
+        let floating_visible = ws.is_floating_visible() && !floating.is_empty();
         let layer_destination = match (scrolling.active_window(), ws.floating().active_window()) {
             (Some(tiled), Some(floating))
                 if available >= action_width + action_gap + (150. + gap) * count as f64 =>
@@ -2614,7 +2614,7 @@ impl<W: LayoutElement> Monitor<W> {
             let direction_background = tint_caption(tint_caption(surface, accent), accent);
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
-            let floating_visible = ws.is_floating_visible();
+            let floating_visible = ws.is_floating_visible() && !ws.floating().is_empty();
             if let Some(rect) = strip.moving_viewport {
                 let mut buffer = self.strip_viewport_motion.borrow_mut();
                 buffer.update(rect.size, accent);
