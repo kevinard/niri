@@ -18,6 +18,7 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
+const TRACK_WIDTH: f64 = 72.;
 
 #[derive(Debug)]
 pub(super) struct OverviewCaption {
@@ -40,7 +41,9 @@ impl Default for OverviewCaption {
 struct Key {
     renderer: ContextId<GlesTexture>,
     text: String,
-    active: bool,
+    background: Color,
+    ink: Color,
+    viewport: Option<(u8, u8)>,
     width: u32,
     scale: f64,
 }
@@ -54,6 +57,9 @@ impl OverviewCaption {
         name: Option<&str>,
         empty: bool,
         active: bool,
+        accent: Color,
+        backdrop: Color,
+        viewport: Option<(u8, u8)>,
         width: f64,
         scale: f64,
         location: Point<f64, Logical>,
@@ -61,10 +67,25 @@ impl OverviewCaption {
     ) -> Option<PrimaryGpuTextureRenderElement> {
         // Round the width down in steps so a zoom redraw does not repeatedly
         // rasterize the same short caption.
+        let viewport = viewport.filter(|_| width >= 255.);
+        let background = if active {
+            Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
+        } else if is_light(backdrop) {
+            Color::new_unpremul(0.92, 0.95, 0.93, 0.97)
+        } else {
+            Color::new_unpremul(0.08, 0.14, 0.15, 0.96)
+        };
+        let ink = if is_light(background) {
+            Color::new_unpremul(0.07, 0.16, 0.13, 1.)
+        } else {
+            Color::new_unpremul(0.94, 0.98, 0.95, 1.)
+        };
         let key = Key {
             renderer: renderer.context_id(),
-            text: caption(index, name, empty),
-            active,
+            text: caption(index, name, empty, viewport.is_some()),
+            background,
+            ink,
+            viewport,
             width: (width as u32 / 8) * 8,
             scale,
         };
@@ -102,7 +123,8 @@ impl OverviewCaption {
         if rect.size.w <= 0. || rect.size.h <= 0. {
             return;
         }
-        let opacity = background.a + (1. - background.a) * progress * 0.24;
+        let strength = if is_light(background) { 0.52 } else { 0.32 };
+        let opacity = background.a + (1. - background.a) * progress * strength;
         let fill = Color::new_unpremul(background.r, background.g, background.b, opacity);
         if !BorderRenderElement::has_shader(renderer) {
             let mut fallback = self.fallback_fill.borrow_mut();
@@ -114,12 +136,8 @@ impl OverviewCaption {
             return;
         }
 
-        let ink = if background.r + background.g + background.b > 1.5 {
-            0.08
-        } else {
-            0.94
-        };
-        let outline_alpha = if active { 0.36 } else { 0.26 };
+        let ink = if is_light(background) { 0.08 } else { 0.94 };
+        let outline_alpha = if active { 0.51 } else { 0.32 };
         let outline = Color::new_unpremul(ink, ink, ink, outline_alpha * progress);
         let geo = Rectangle::from_size(rect.size);
         let radius =
@@ -147,7 +165,11 @@ impl OverviewCaption {
     }
 }
 
-fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
+fn is_light(color: Color) -> bool {
+    0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b >= 0.55
+}
+
+fn caption(index: usize, name: Option<&str>, empty: bool, has_viewport: bool) -> String {
     let name: String = name
         .unwrap_or_default()
         .chars()
@@ -155,11 +177,15 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let name = name.trim();
-    match (name.is_empty(), empty) {
+    let mut title = match (name.is_empty(), empty) {
         (true, true) => format!("{index}   Empty workspace"),
-        (true, false) => format!("{index}"),
+        (true, false) => format!("Workspace {index}"),
         (false, _) => format!("{index}   {name}"),
+    };
+    if has_viewport {
+        title.push_str("   ·   Visible area");
     }
+    title
 }
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
@@ -178,7 +204,8 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let cr = cairo::Context::new(&probe)?;
     cr.scale(key.scale, key.scale);
     let label = layout(&cr, key);
-    let width = (f64::from(label.pixel_size().0) + 2. * PADDING)
+    let track_space = key.viewport.map_or(0., |_| TRACK_WIDTH + PADDING);
+    let width = (f64::from(label.pixel_size().0) + 2. * PADDING + track_space)
         .max(30.)
         .min(f64::from(key.width));
     let pixel_width = (width * key.scale).ceil() as i32;
@@ -203,26 +230,37 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         std::f64::consts::FRAC_PI_2,
     );
     cr.close_path();
-    if key.active {
-        cr.set_source_rgb(0.72, 0.88, 0.80);
-    } else {
-        cr.set_source_rgba(0.08, 0.14, 0.15, 0.92);
-    }
+    let color = key.background;
+    cr.set_source_rgba(
+        color.r.into(),
+        color.g.into(),
+        color.b.into(),
+        color.a.into(),
+    );
     cr.fill()?;
 
     let label = layout(&cr, key);
-    label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
-    let (w, h) = label.pixel_size();
-    cr.move_to(
-        ((width - f64::from(w)) / 2.).max(PADDING),
-        (HEIGHT - f64::from(h)) / 2.,
-    );
-    if key.active {
-        cr.set_source_rgb(0.09, 0.19, 0.16);
-    } else {
-        cr.set_source_rgb(0.91, 0.96, 0.93);
-    }
+    label.set_width(((width - 2. * PADDING - track_space) * f64::from(pango::SCALE)) as i32);
+    let (_, h) = label.pixel_size();
+    let ink = key.ink;
+    cr.move_to(PADDING, (HEIGHT - f64::from(h)) / 2.);
+    cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
     pangocairo::functions::show_layout(&cr, &label);
+    if let Some((start, end)) = key.viewport {
+        let x = width - PADDING - TRACK_WIDTH;
+        let y = HEIGHT / 2.;
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_line_width(4.);
+        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.28);
+        cr.move_to(x, y);
+        cr.line_to(x + TRACK_WIDTH, y);
+        cr.stroke()?;
+        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+        let at = |percent: u8| x + TRACK_WIDTH * f64::from(percent) / 100.;
+        cr.move_to(at(start), y);
+        cr.line_to(at(end), y);
+        cr.stroke()?;
+    }
     drop(cr);
 
     Ok(TextureBuffer::from_memory(
@@ -243,9 +281,12 @@ mod tests {
 
     #[test]
     fn captions_use_the_workspace_index_and_plain_names() {
-        assert_eq!(caption(2, None, false), "2");
-        assert_eq!(caption(3, Some("  "), false), "3");
-        assert_eq!(caption(4, Some("Field\nnotes"), false), "4   Field notes");
-        assert_eq!(caption(1, Some(&"x".repeat(160)), false).len(), 132);
+        assert_eq!(caption(2, None, false, false), "Workspace 2");
+        assert_eq!(caption(3, Some("  "), false, false), "Workspace 3");
+        assert_eq!(
+            caption(4, Some("Field\nnotes"), false, false),
+            "4   Field notes"
+        );
+        assert_eq!(caption(1, Some(&"x".repeat(160)), false, false).len(), 132);
     }
 }
