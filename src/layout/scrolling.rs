@@ -3662,7 +3662,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             if visible_x.is_some_and(|bounds| {
                 col_pos.x >= bounds.end || col_pos.x + col.width() <= bounds.start
             }) {
-                first = false;
                 continue;
             }
 
