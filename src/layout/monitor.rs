@@ -1737,7 +1737,6 @@ impl<W: LayoutElement> Monitor<W> {
         let right = area.loc.x + area.size.w;
         if !ws.options.layout.clip_scroll_to_work_area
             || self.overview_progress.is_some()
-            || (area.loc.x <= 0. && right >= self.view_size.w)
             || !ws
                 .scrolling()
                 .active_window()
@@ -2124,7 +2123,8 @@ impl<W: LayoutElement> Monitor<W> {
             let x = |x: f64| (geo.loc.x + zoom * x).clamp(left, right);
             x(range.start)..x(range.end)
         };
-        Some((project(extent), project(visible)))
+        let visible = project(visible);
+        (visible.end - visible.start >= pixel).then(|| (project(extent), visible))
     }
 
     fn render_overview_captions<R: NiriRenderer>(
@@ -2195,12 +2195,10 @@ impl<W: LayoutElement> Monitor<W> {
                     && track_width >= VIEWPORT_TRACK_HEIGHT
                     && start < end
                 {
-                    let track =
-                        niri_config::Color::new_unpremul(surface.r, surface.g, surface.b, 0.78);
                     if let Some(track) = ws.overview_caption.desktop_track.render(
                         renderer.as_gles_renderer(),
                         String::new(),
-                        track,
+                        caption_background(accent, backdrop, true),
                         LabelKind::Viewport { start, end },
                         track_width,
                         scale,
@@ -2211,7 +2209,8 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 }
                 let caption_end = x + if ws.name().is_some() { width } else { 116. };
-                let label_x = visible.start.max(caption_end).min(right - 143.);
+                let centered = (visible.start + visible.end - 144.) / 2.;
+                let label_x = centered.max(caption_end).min(right - 144.);
                 if contains_y(top, 28.) && label_x >= caption_end {
                     if let Some(caption) = ws.overview_caption.desktop_view.render(
                         renderer.as_gles_renderer(),
