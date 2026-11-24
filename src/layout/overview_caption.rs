@@ -22,6 +22,7 @@ const PADDING: f64 = 10.;
 #[derive(Debug)]
 pub(super) struct OverviewCaption {
     title: PreviewLabel,
+    pub(super) desktop_view: PreviewLabel,
     outside_view: RefCell<[SolidColorBuffer; 2]>,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
@@ -31,6 +32,7 @@ impl Default for OverviewCaption {
     fn default() -> Self {
         Self {
             title: PreviewLabel::default(),
+            desktop_view: PreviewLabel::default(),
             outside_view: RefCell::default(),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
@@ -42,7 +44,6 @@ impl Default for OverviewCaption {
 struct Key {
     renderer: ContextId<GlesTexture>,
     text: String,
-    status: Option<&'static str>,
     background: Color,
     ink: Color,
     thumbnail: bool,
@@ -61,8 +62,7 @@ impl PreviewLabel {
         &self,
         renderer: &mut GlesRenderer,
         text: String,
-        status: Option<&'static str>,
-        background: Color,
+            background: Color,
         thumbnail: bool,
         width: f64,
         scale: f64,
@@ -77,7 +77,6 @@ impl PreviewLabel {
         let key = Key {
             renderer: renderer.context_id(),
             text,
-            status,
             background,
             ink,
             thumbnail,
@@ -136,7 +135,6 @@ impl OverviewCaption {
         self.title.render(
             renderer,
             caption(index, name, empty),
-            None,
             background,
             false,
             width,
@@ -154,7 +152,7 @@ impl OverviewCaption {
         alpha: f32,
         push: &mut dyn FnMut(SolidColorRenderElement),
     ) {
-        let shade = Color::new_unpremul(0., 0.035, 0.025, 0.29 * alpha);
+        let shade = Color::new_unpremul(0., 0.035, 0.025, 0.19 * alpha);
         let height = vertical.end - vertical.start;
         if height <= 0. {
             return;
@@ -331,26 +329,13 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     );
     cr.fill()?;
 
-    let status = key.status.filter(|_| width >= 178.).map(|text| {
-        let layout = pangocairo::functions::create_layout(&cr);
-        layout.set_font_description(Some(&FontDescription::from_string("sans-serif Medium 12px")));
-        layout.set_text(text);
-        let (width, height) = layout.pixel_size();
-        (layout, f64::from(width), f64::from(height))
-    });
-    let reserved = status.as_ref().map_or(0., |(_, width, _)| width + PADDING);
     let label = layout(&cr, key);
-    label.set_width(((width - 2. * PADDING - reserved) * f64::from(pango::SCALE)) as i32);
+    label.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
     let (_, h) = label.pixel_size();
     let ink = key.ink;
     cr.move_to(PADDING, (height - f64::from(h)) / 2.);
     cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
     pangocairo::functions::show_layout(&cr, &label);
-    if let Some((status, w, h)) = status {
-        cr.move_to(width - PADDING - w, (height - h) / 2.);
-        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.83);
-        pangocairo::functions::show_layout(&cr, &status);
-    }
     drop(cr);
 
     Ok(TextureBuffer::from_memory(
