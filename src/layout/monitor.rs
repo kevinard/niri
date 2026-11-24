@@ -3175,7 +3175,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let surface = caption_background(accent, backdrop, false);
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
                 let (shortcuts, width) = if mixed_layers {
-                    ("← →  Select     Tab  Change window layer", 306.)
+                    ("← →  Select     Tab  Choose tiled or floating", 326.)
                 } else {
                     ("← →  Select window", 154.)
                 };
