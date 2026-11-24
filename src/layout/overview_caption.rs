@@ -10,6 +10,7 @@ use smithay::backend::renderer::{ContextId, Renderer};
 use smithay::utils::{Logical, Point, Rectangle, Transform};
 
 use super::focus_ring::FocusRingRenderElement;
+use super::shadow::Shadow;
 use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
@@ -35,6 +36,7 @@ pub(super) struct OverviewCaption {
     pub(super) desktop_track: PreviewLabel,
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
+    pub(super) shadow: RefCell<Shadow>,
 }
 
 impl Default for OverviewCaption {
@@ -45,6 +47,7 @@ impl Default for OverviewCaption {
             desktop_track: PreviewLabel::default(),
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
+            shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
         }
     }
 }
@@ -185,8 +188,7 @@ impl OverviewCaption {
         let outline_alpha = if active { 0.22 } else { 0.32 };
         let outline = Color::new_unpremul(ink, ink, ink, outline_alpha * progress);
         let geo = Rectangle::from_size(rect.size);
-        let radius =
-            CornerRadius::from(18. * progress).fit_to(rect.size.w as f32, rect.size.h as f32);
+        let radius = frame_radius(rect, progress);
         let mut frame = self.frame.borrow_mut();
         for (element, (color, width)) in frame
             .iter_mut()
@@ -208,6 +210,10 @@ impl OverviewCaption {
             push(element.clone().with_location(rect.loc).into());
         }
     }
+}
+
+pub(super) fn frame_radius(rect: Rectangle<f64, Logical>, progress: f32) -> CornerRadius {
+    CornerRadius::from(18. * progress).fit_to(rect.size.w as f32, rect.size.h as f32)
 }
 
 fn is_light(color: Color) -> bool {
