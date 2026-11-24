@@ -322,6 +322,30 @@ fn fit_overview_strip(
     Some(center - (extent.start + extent.end) / 2. * zoom)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::fit_overview_strip;
+
+    #[test]
+    fn overview_strip_centers_within_the_area_beside_the_rail() {
+        let viewport = 100. ..1300.;
+        let extent = -512. ..1408.;
+        let zoom = 0.5;
+        let x = fit_overview_strip(extent.clone(), &viewport, zoom, zoom).unwrap();
+
+        let left_gap = x + extent.start * zoom - viewport.start;
+        let right_gap = viewport.end - (x + extent.end * zoom);
+        assert_eq!(left_gap, 120.);
+        assert_eq!(left_gap, right_gap);
+    }
+
+    #[test]
+    fn overview_strip_retains_the_scroll_position_if_it_cannot_fit() {
+        let viewport = 100. ..1300.;
+        assert_eq!(fit_overview_strip(0. ..2500., &viewport, 0.5, 0.5), None);
+    }
+}
+
 impl<W: LayoutElement> Monitor<W> {
     pub fn new(
         output: Output,
