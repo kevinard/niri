@@ -94,6 +94,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    strip_projection_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
@@ -189,7 +190,7 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
-    projected_viewport: bool,
+    projections: Vec<(Rectangle<f64, Logical>, Option<u32>)>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -478,6 +479,7 @@ impl<W: LayoutElement> Monitor<W> {
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
             strip_viewport_labels: Default::default(),
+            strip_projection_labels: Default::default(),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
@@ -2247,55 +2249,72 @@ impl<W: LayoutElement> Monitor<W> {
                 STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_TRAY_HEADER_HEIGHT,
             )),
         ));
-        let projected = pointer
-            .and_then(|point| {
-                titles
-                    .iter()
-                    .find(|title| title.direction.is_some() && title.rect.contains(point))
-            })
-            .and_then(|title| scrolling.columns_after_activating(title.window.id()))
-            .map(|columns| {
-                columns
-                    .filter(|(column, x)| {
-                        *x >= bounds.start - pixel && *x + column.width() <= bounds.end + pixel
-                    })
-                    .map(|(column, _)| column.active_window().id())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|windows| !windows.is_empty());
-        let visible = |title: &&NavigationTitle<'_, W>| {
-            projected
-                .as_ref()
-                .map_or(!title.floating && title.direction.is_none(), |ids| {
-                    ids.contains(&title.window.id())
-                })
-        };
-        let mut spans: Vec<Range<f64>> = Vec::new();
-        for title in titles.iter().filter(visible) {
-            let start = title.rect.loc.x;
-            let end = start + title.rect.size.w;
-            if let Some(span) = spans
-                .last_mut()
-                .filter(|span| start <= span.end + gap + 0.001)
-            {
-                span.end = end;
-            } else {
-                spans.push(start..end);
+        let groups = |matches: &dyn Fn(&NavigationTitle<'_, W>) -> bool| {
+            let mut spans: Vec<Range<f64>> = Vec::new();
+            for title in titles.iter().filter(|title| matches(title)) {
+                let start = title.rect.loc.x;
+                let end = start + title.rect.size.w;
+                if let Some(span) = spans
+                    .last_mut()
+                    .filter(|span| start <= span.end + gap + 0.001)
+                {
+                    span.end = end;
+                } else {
+                    spans.push(start..end);
+                }
             }
-        }
-        let viewports = spans
+            spans
+        };
+        let band_y = y - STRIP_TRAY_HEADER_HEIGHT + 4.;
+        let viewports = groups(&|title| !title.floating && title.direction.is_none())
             .into_iter()
             .filter_map(|span| {
                 uncovered(Rectangle::new(
-                    Point::from((span.start - 3., y - STRIP_TRAY_HEADER_HEIGHT + 4.)),
+                    Point::from((span.start - 3., band_y)),
                     Size::from((span.end - span.start + 6., STRIP_VIEWPORT_BAND_HEIGHT)),
                 ))
             })
             .collect();
+        let projections = pointer
+            .and_then(|point| {
+                let target = titles
+                    .iter()
+                    .find(|title| title.direction.is_some() && title.rect.contains(point))?;
+                let ids: Vec<_> = scrolling
+                    .columns_after_activating(target.window.id())?
+                    .filter(|(column, x)| {
+                        *x >= bounds.start - pixel && *x + column.width() <= bounds.end + pixel
+                    })
+                    .map(|(column, _)| column.active_window().id())
+                    .collect();
+                if !ids.contains(&target.window.id()) {
+                    return None;
+                }
+                let target_x = target.rect.loc.x;
+                Some(
+                    groups(&|title| ids.contains(&title.window.id()))
+                        .into_iter()
+                        .filter_map(|span| {
+                            let rect = uncovered(Rectangle::new(
+                                Point::from((span.start - 2., band_y + 2.)),
+                                Size::from((
+                                    span.end - span.start + 4.,
+                                    STRIP_VIEWPORT_BAND_HEIGHT,
+                                )),
+                            ))?;
+                            let heading_offset = span
+                                .contains(&target_x)
+                                .then(|| (target_x - rect.loc.x).round() as u32);
+                            Some((rect, heading_offset))
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
         Some(NavigationStrip {
             tray,
             viewports,
-            projected_viewport: projected.is_some(),
+            projections,
             titles,
             layer_action,
         })
@@ -2578,15 +2597,28 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
+            for ((rect, heading_offset), label) in strip
+                .projections
+                .into_iter()
+                .zip(&self.strip_projection_labels)
+            {
+                if let Some(projection) = label.render(
+                    renderer.as_gles_renderer(),
+                    heading_offset.map_or("", |_| "After switch").into(),
+                    Color { a: 0., ..surface },
+                    LabelKind::StripProjected { heading_offset },
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(projection);
+                }
+            }
             for (rect, label) in strip.viewports.into_iter().zip(&self.strip_viewport_labels) {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
-                    if strip.projected_viewport {
-                        "Tiled after switch"
-                    } else {
-                        "Tiled in view"
-                    }
-                    .into(),
+                    "Tiled in view".into(),
                     tint_caption(tint_caption(surface, accent), accent),
                     LabelKind::StripViewport,
                     rect.size.w,

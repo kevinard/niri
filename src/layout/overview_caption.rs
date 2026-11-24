@@ -43,6 +43,9 @@ pub(super) enum LabelKind {
     OverviewCommand,
     StripTray,
     StripViewport,
+    StripProjected {
+        heading_offset: Option<u32>,
+    },
     StripButton {
         status: Option<&'static str>,
         outlined: bool,
@@ -429,7 +432,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             max_width,
             STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_TRAY_HEADER_HEIGHT,
         ),
-        LabelKind::StripViewport => (max_width, STRIP_VIEWPORT_BAND_HEIGHT),
+        LabelKind::StripViewport | LabelKind::StripProjected { .. } => {
+            (max_width, STRIP_VIEWPORT_BAND_HEIGHT)
+        }
         LabelKind::StripButton {
             direction: Some(_), ..
         } => (max_width, STRIP_BUTTON_HEIGHT - 6.),
@@ -473,7 +478,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
-        LabelKind::StripViewport => 11.,
+        LabelKind::StripViewport | LabelKind::StripProjected { .. } => 11.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton {
             direction: Some(_), ..
@@ -530,6 +535,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             key.kind,
             LabelKind::StripTray
                 | LabelKind::StripViewport
+                | LabelKind::StripProjected { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint
                 | LabelKind::StripButton { outlined: true, .. }
@@ -540,15 +546,18 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::StripViewport => 0.65,
+                LabelKind::StripViewport | LabelKind::StripProjected { .. } => 0.65,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            cr.set_line_width(if key.kind == LabelKind::StripViewport {
-                1.5
-            } else {
-                1.
-            });
+            let viewport = matches!(
+                key.kind,
+                LabelKind::StripViewport | LabelKind::StripProjected { .. }
+            );
+            cr.set_line_width(if viewport { 1.5 } else { 1. });
+            if matches!(key.kind, LabelKind::StripProjected { .. }) {
+                cr.set_dash(&[5., 3.], 0.);
+            }
             cr.stroke()?;
         } else {
             cr.fill()?;
@@ -601,8 +610,19 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let label = layout(&cr, key);
         let mut title_width = width - 2. * PADDING;
         let mut title_x = PADDING;
-        if key.kind == LabelKind::StripViewport {
+        let viewport = matches!(
+            key.kind,
+            LabelKind::StripViewport | LabelKind::StripProjected { .. }
+        );
+        if viewport {
             label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
+        }
+        if let LabelKind::StripProjected {
+            heading_offset: Some(offset),
+        } = key.kind
+        {
+            title_x += f64::from(offset);
+            title_width -= f64::from(offset);
         }
         if key.kind == LabelKind::OverviewCommand {
             let keycap = layout(&cr, key);
@@ -741,11 +761,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let x = match key.kind {
             LabelKind::NavigationHint => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
-            LabelKind::LayerAction { .. } => title_x,
+            LabelKind::LayerAction { .. } | LabelKind::StripProjected { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        let y = if key.kind == LabelKind::StripViewport {
+        let y = if viewport {
             3.
         } else if status.is_some() {
             if offscreen {
