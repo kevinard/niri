@@ -45,7 +45,9 @@ pub(super) enum FocusMarker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
     Caption,
-    NavigationHint,
+    NavigationHint {
+        tab: Option<&'static str>,
+    },
     GroupTitle,
     OverviewCommand,
     StripTray,
@@ -57,6 +59,7 @@ pub(super) enum LabelKind {
         left: bool,
         hovered: bool,
         projected: bool,
+        labeled: bool,
     },
     StripButton {
         status: Option<&'static str>,
@@ -140,11 +143,7 @@ impl PreviewLabel {
         location: Point<f64, Logical>,
         alpha: f32,
     ) -> Option<PrimaryGpuTextureRenderElement> {
-        let ink = if is_light(background) {
-            Color::new_unpremul(0.06, 0.13, 0.11, 1.)
-        } else {
-            Color::new_unpremul(0.95, 0.98, 0.95, 1.)
-        };
+        let ink = caption_ink(background);
         let key = Key {
             renderer: renderer.context_id(),
             text,
@@ -185,6 +184,14 @@ pub(super) fn caption_background(accent: Color, backdrop: Color, active: bool) -
         Color::new_unpremul(0.92, 0.95, 0.93, 1.)
     } else {
         Color::new_unpremul(0.08, 0.14, 0.15, 1.)
+    }
+}
+
+pub(super) fn caption_ink(background: Color) -> Color {
+    if is_light(background) {
+        Color::new_unpremul(0.06, 0.13, 0.11, 1.)
+    } else {
+        Color::new_unpremul(0.95, 0.98, 0.95, 1.)
     }
 }
 
@@ -436,7 +443,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let max_width = f64::from(key.width);
     let (width, height) = match key.kind {
         LabelKind::GroupTitle => (max_width.min(4096.), HEIGHT),
-        LabelKind::NavigationHint | LabelKind::OverviewCommand => {
+        LabelKind::NavigationHint { .. } | LabelKind::OverviewCommand => {
             (max_width.min(4096.), OVERVIEW_CONTROL_HEIGHT)
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
@@ -534,7 +541,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     }
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
-        LabelKind::OverviewCommand | LabelKind::NavigationHint => 9.,
+        LabelKind::OverviewCommand | LabelKind::NavigationHint { .. } => 9.,
         LabelKind::StripViewport => 10.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton { .. } | LabelKind::ScrollWindow { .. } => 9.,
@@ -594,7 +601,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                     ..
                 }
                 | LabelKind::OverviewCommand
-                | LabelKind::NavigationHint
+                | LabelKind::NavigationHint { .. }
                 | LabelKind::StripButton { outlined: true, .. }
                 | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
@@ -625,7 +632,49 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         return upload_texture(renderer, surface, pixel_width, pixel_height, key.scale);
     }
 
-    if matches!(
+    if let LabelKind::NavigationHint { tab } = key.kind {
+        let keycap = layout(&cr, key);
+        keycap.set_font_description(Some(&FontDescription::from_string(
+            "sans-serif Medium 12px",
+        )));
+        let detail = layout(&cr, key);
+        detail.set_font_description(Some(&FontDescription::from_string(
+            "sans-serif Medium 13px",
+        )));
+        let hints = [
+            Some(("← →", key.text.as_str())),
+            tab.map(|text| ("Tab", text)),
+        ];
+        let widths = hints.map(|hint| {
+            hint.map(|(key, text)| {
+                keycap.set_text(key);
+                detail.set_text(text);
+                f64::from(keycap.pixel_size().0 + detail.pixel_size().0) + 18.
+            })
+        });
+        let total =
+            widths.into_iter().flatten().sum::<f64>() + if tab.is_some() { 12. } else { 0. };
+        let mut x = ((width - total) / 2.).max(6.);
+        for (hint, hint_width) in hints.into_iter().zip(widths) {
+            let (Some((key, text)), Some(hint_width)) = (hint, hint_width) else {
+                continue;
+            };
+            keycap.set_text(key);
+            detail.set_text(text);
+            let (key_width, key_height) = keycap.pixel_size();
+            let (_, text_height) = detail.pixel_size();
+            let key_width = f64::from(key_width);
+            cr.rectangle(x, 5., key_width + 12., height - 10.);
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.17);
+            cr.fill()?;
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            cr.move_to(x + 6., (height - f64::from(key_height)) / 2.);
+            pangocairo::functions::show_layout(&cr, &keycap);
+            cr.move_to(x + key_width + 18., (height - f64::from(text_height)) / 2.);
+            pangocairo::functions::show_layout(&cr, &detail);
+            x += hint_width + 12.;
+        }
+    } else if matches!(
         key.kind,
         LabelKind::ScrollWindow {
             projected: true,
@@ -644,7 +693,13 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         cr.move_to(PADDING, (height - f64::from(text_height)) / 2.);
         pangocairo::functions::show_layout(&cr, &label);
-    } else if let LabelKind::ScrollWindow { left, hovered, .. } = key.kind {
+    } else if let LabelKind::ScrollWindow {
+        left,
+        hovered,
+        labeled,
+        projected,
+    } = key.kind
+    {
         let arrow_x = if left { 14. } else { width - 14. };
         let arrow_y = height / 2.;
         let sign = if left { -1. } else { 1. };
@@ -674,15 +729,26 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_font_description(Some(&FontDescription::from_string(
             "sans-serif Medium 12px",
         )));
-        label.set_text("Scroll & focus");
-        let instruction_alpha = if hovered { 1. } else { 0.83 };
-        cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), instruction_alpha);
-        cr.move_to(x, 3.);
-        pangocairo::functions::show_layout(&cr, &label);
+        if labeled {
+            label.set_text(if projected {
+                "Focus after scroll"
+            } else {
+                "Scroll & focus"
+            });
+            let alpha = if hovered { 1. } else { 0.83 };
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), alpha);
+            cr.move_to(x, 3.);
+            pangocairo::functions::show_layout(&cr, &label);
+        }
         label.set_font_description(Some(&FontDescription::from_string("sans-serif Bold 13px")));
         label.set_text(&key.text);
         cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-        cr.move_to(x, 18.);
+        let y = if labeled {
+            18.
+        } else {
+            (height - f64::from(label.pixel_size().1)) / 2.
+        };
+        cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
     } else if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
@@ -837,7 +903,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::NavigationHint => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),

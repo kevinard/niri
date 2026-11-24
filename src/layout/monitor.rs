@@ -14,8 +14,8 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
-    caption_background, frame_radius, tint_caption, FocusMarker, GroupStyle, LabelKind,
-    PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
+    caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
+    LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
     STRIP_BUTTON_HEIGHT, STRIP_RANGE_HEIGHT, STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
     STRIP_VIEWPORT_BAND_HEIGHT,
 };
@@ -2516,6 +2516,14 @@ impl<W: LayoutElement> Monitor<W> {
                 .iter()
                 .map(|title| navigation_title(title.window, target, "Window"))
                 .collect();
+            let nearest_left = strip
+                .titles
+                .iter()
+                .rposition(|title| title.direction == Some(true));
+            let nearest_right = strip
+                .titles
+                .iter()
+                .position(|title| title.direction == Some(false));
             for (index, (title, label)) in
                 strip.titles.into_iter().zip(&self.strip_labels).enumerate()
             {
@@ -2572,10 +2580,12 @@ impl<W: LayoutElement> Monitor<W> {
                     surface
                 };
                 let kind = if let Some(left) = title.direction {
+                    let nearest = if left { nearest_left } else { nearest_right };
                     LabelKind::ScrollWindow {
                         left,
                         hovered,
                         projected,
+                        labeled: hovered || nearest == Some(index),
                     }
                 } else {
                     LabelKind::StripButton {
@@ -3175,19 +3185,17 @@ impl<W: LayoutElement> Monitor<W> {
             if active && ws.active_window().is_some() && contains_y(top, OVERVIEW_CONTROL_HEIGHT) {
                 let surface = caption_background(accent, backdrop, false);
                 let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
-                let (shortcuts, width) = if mixed_layers {
+                let tab = mixed_layers.then(|| {
                     let selected_is_floating = self
                         .overview_selected_window()
                         .is_some_and(|window| ws.is_floating(window.id()));
-                    let shortcuts = if selected_is_floating {
-                        "← →  Select     Tab  Select a tiled window"
+                    if selected_is_floating {
+                        "Select a tiled window"
                     } else {
-                        "← →  Select     Tab  Select a floating window"
-                    };
-                    (shortcuts, 326.)
-                } else {
-                    ("← →  Select window", 154.)
-                };
+                        "Select a floating window"
+                    }
+                });
+                let width = if mixed_layers { 350. } else { 154. };
                 let header = Point::from((right - OVERVIEW_INSET - width, top));
                 let position = command
                     .map(|(rect, _)| Point::from((rect.loc.x - 12. - width, rect.loc.y)))
@@ -3196,9 +3204,9 @@ impl<W: LayoutElement> Monitor<W> {
                 if let Some(position) = position {
                     if let Some(label) = self.overview_shortcuts_label.render(
                         renderer.as_gles_renderer(),
-                        shortcuts.into(),
+                        "Select window".into(),
                         surface,
-                        LabelKind::NavigationHint,
+                        LabelKind::NavigationHint { tab },
                         width,
                         scale,
                         position,
@@ -3282,11 +3290,17 @@ impl<W: LayoutElement> Monitor<W> {
                 let hidden = !hidden_group_labeled
                     && !ws.is_floating_visible()
                     && ws.is_floating(window.id());
-                let current = active
-                    && !selected
+                let desktop_focus = active
                     && ws
                         .active_window()
-                        .is_some_and(|window| window.id() == tile.window().id());
+                        .is_some_and(|active_window| active_window.id() == window.id());
+                let current = desktop_focus && !selected;
+                let surface = caption_background(accent, backdrop, false);
+                let selection_color = if desktop_focus {
+                    accent
+                } else {
+                    caption_ink(surface)
+                };
                 let badge = if hidden {
                     Some("Hidden")
                 } else if current {
@@ -3302,7 +3316,7 @@ impl<W: LayoutElement> Monitor<W> {
                     ws.overview_caption.render_selection(
                         renderer,
                         rect,
-                        accent,
+                        selection_color,
                         label_alpha,
                         scale,
                         &mut |outline| draw(MonitorInnerRenderElement::Decoration(outline)),
@@ -3317,7 +3331,7 @@ impl<W: LayoutElement> Monitor<W> {
                     if title.trim().is_empty() {
                         return;
                     }
-                    let background = caption_background(accent, backdrop, selected);
+                    let background = if selected { selection_color } else { surface };
                     if let Some(label) = tile.overview_label.render(
                         renderer.as_gles_renderer(),
                         title,
