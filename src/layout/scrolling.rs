@@ -2046,6 +2046,29 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         true
     }
 
+    pub(super) fn columns_after_activating(
+        &self,
+        window: &W::Id,
+    ) -> Option<impl Iterator<Item = (&Column<W>, f64)> + '_> {
+        let idx = self
+            .columns
+            .iter()
+            .position(|column| column.contains(window))?;
+        if !self.columns[idx].sizing_mode().is_normal() {
+            return None;
+        }
+        let view_pos = if idx == self.active_column_idx {
+            self.target_view_pos()
+        } else {
+            self.view_anchor_x(idx)
+                + self.compute_new_view_offset_for_column(None, idx, Some(self.active_column_idx))
+        };
+        Some(
+            zip(&self.columns, self.column_render_xs(view_pos))
+                .map(move |(column, x)| (column, x - view_pos)),
+        )
+    }
+
     pub fn start_close_animation_for_window(
         &mut self,
         renderer: &mut GlesRenderer,

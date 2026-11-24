@@ -189,6 +189,7 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
+    projected_viewport: bool,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -2114,7 +2115,10 @@ impl<W: LayoutElement> Monitor<W> {
 
     /// Normal tiled windows leave a row for the strip, so the same controls
     /// remain available in each position without painting over a client surface.
-    fn navigation_strip(&self) -> Option<NavigationStrip<'_, W>> {
+    fn navigation_strip(
+        &self,
+        pointer: Option<Point<f64, Logical>>,
+    ) -> Option<NavigationStrip<'_, W>> {
         let ws = self.active_workspace_ref();
         if self.workspace_switch.is_some()
             || self.overview_progress.is_some()
@@ -2149,7 +2153,7 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     None
                 };
-                (column.active_window(), direction, false)
+                (column.active_window(), direction, false, column.width())
             })
             .collect::<Vec<_>>();
         let mut floating = ws
@@ -2157,11 +2161,15 @@ impl<W: LayoutElement> Monitor<W> {
             .tiles_with_render_positions()
             .collect::<Vec<_>>();
         floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-        windows.extend(floating.iter().map(|(tile, _)| (tile.window(), None, true)));
+        windows.extend(
+            floating
+                .iter()
+                .map(|(tile, _)| (tile.window(), None, true, tile.tile_size().w)),
+        );
 
         let active_index = windows
             .iter()
-            .position(|(window, _, _)| window.id() == active.id())?;
+            .position(|(window, ..)| window.id() == active.id())?;
         let gap = 8.;
         let inset = 16.;
         let available = bounds.end - bounds.start - 2. * inset;
@@ -2187,10 +2195,14 @@ impl<W: LayoutElement> Monitor<W> {
             .min(windows.len() - count);
         let windows = &windows[first..first + count];
         let gaps = (count - 1) as f64 * gap;
-        let width = ((available - action_space - gaps) / count as f64)
-            .floor()
-            .min(194.);
-        let tabs_width = width * count as f64 + gaps;
+        let button_space = (available - action_space - gaps).min(194. * count as f64);
+        let widest_window = windows
+            .iter()
+            .map(|(_, _, _, width)| *width)
+            .fold(1., f64::max);
+        let weight = |width: f64| width.max(widest_window * 0.55);
+        let total_weight: f64 = windows.iter().map(|(_, _, _, width)| weight(*width)).sum();
+        let tabs_width = button_space + gaps;
         let tray_width = tabs_width + action_space;
         let start = (bounds.start + bounds.end - tray_width) / 2.;
         let y = top + NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT - STRIP_TRAY_PADDING;
@@ -2208,11 +2220,14 @@ impl<W: LayoutElement> Monitor<W> {
                 Size::from((width, STRIP_BUTTON_HEIGHT)),
             ))
         };
+        let mut next_x = start;
         let titles: Vec<_> = windows
             .iter()
-            .enumerate()
-            .filter_map(|(index, &(window, direction, floating))| {
-                let rect = button(start + index as f64 * (width + gap), width)?;
+            .filter_map(|&(window, direction, floating, window_width)| {
+                let width = button_space * weight(window_width) / total_weight;
+                let x = next_x;
+                next_x += width + gap;
+                let rect = button(x, width)?;
                 Some(NavigationTitle {
                     rect,
                     window,
@@ -2232,11 +2247,31 @@ impl<W: LayoutElement> Monitor<W> {
                 STRIP_BUTTON_HEIGHT + STRIP_TRAY_PADDING + STRIP_TRAY_HEADER_HEIGHT,
             )),
         ));
+        let projected = pointer
+            .and_then(|point| {
+                titles
+                    .iter()
+                    .find(|title| title.direction.is_some() && title.rect.contains(point))
+            })
+            .and_then(|title| scrolling.columns_after_activating(title.window.id()))
+            .map(|columns| {
+                columns
+                    .filter(|(column, x)| {
+                        *x >= bounds.start - pixel && *x + column.width() <= bounds.end + pixel
+                    })
+                    .map(|(column, _)| column.active_window().id())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|windows| !windows.is_empty());
+        let visible = |title: &&NavigationTitle<'_, W>| {
+            projected
+                .as_ref()
+                .map_or(!title.floating && title.direction.is_none(), |ids| {
+                    ids.contains(&title.window.id())
+                })
+        };
         let mut spans: Vec<Range<f64>> = Vec::new();
-        for title in titles
-            .iter()
-            .filter(|title| !title.floating && title.direction.is_none())
-        {
+        for title in titles.iter().filter(visible) {
             let start = title.rect.loc.x;
             let end = start + title.rect.size.w;
             if let Some(span) = spans
@@ -2260,6 +2295,7 @@ impl<W: LayoutElement> Monitor<W> {
         Some(NavigationStrip {
             tray,
             viewports,
+            projected_viewport: projected.is_some(),
             titles,
             layer_action,
         })
@@ -2351,7 +2387,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .map(|(_, window)| window);
         }
 
-        if let Some(strip) = self.navigation_strip() {
+        if let Some(strip) = self.navigation_strip(None) {
             return strip
                 .titles
                 .into_iter()
@@ -2382,7 +2418,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
             || self
-                .navigation_strip()
+                .navigation_strip(None)
                 .is_some_and(|strip| strip.titles.iter().any(|title| title.window.id() == id))
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
@@ -2440,7 +2476,7 @@ impl<W: LayoutElement> Monitor<W> {
         pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
-        if let Some(strip) = self.navigation_strip() {
+        if let Some(strip) = self.navigation_strip(pointer) {
             let ws = self.active_workspace_ref();
             let accent = ws.options.layout.border.active_color;
             let surface = caption_background(accent, ws.options.layout.background_color, false);
@@ -2545,7 +2581,12 @@ impl<W: LayoutElement> Monitor<W> {
             for (rect, label) in strip.viewports.into_iter().zip(&self.strip_viewport_labels) {
                 if let Some(viewport) = label.render(
                     renderer.as_gles_renderer(),
-                    "On desktop".into(),
+                    if strip.projected_viewport {
+                        "Tiled after switch"
+                    } else {
+                        "Tiled in view"
+                    }
+                    .into(),
                     tint_caption(tint_caption(surface, accent), accent),
                     LabelKind::StripViewport,
                     rect.size.w,
