@@ -1926,22 +1926,27 @@ impl<W: LayoutElement> Monitor<W> {
         )
     }
 
-    fn scroll_viewport(
+    fn desktop_window_extent(
         &self,
         ws: &Workspace<W>,
         geo: Rectangle<f64, Logical>,
     ) -> Option<(Range<f64>, Range<f64>)> {
-        let extent = visible_extent(ws.scrolling().tiles_with_render_positions())?;
+        let tiles = || ws.scrolling().tiles_with_render_positions();
+        let extent = visible_extent(tiles())?;
         let view = ws.working_area();
-        let start = extent.start.max(view.loc.x);
-        let end = extent.end.min(view.loc.x + view.size.w);
-        if start >= end || (start <= extent.start && end >= extent.end) {
+        let left_edge = view.loc.x;
+        let right_edge = left_edge + view.size.w;
+        let pixel = 1. / self.scale.fractional_scale();
+        let visible = visible_extent(tiles().filter(|(tile, pos, _)| {
+            pos.x < right_edge - pixel && pos.x + tile.tile_size().w > left_edge + pixel
+        }))?;
+        if visible == extent {
             return None;
         }
         let (left, right) = self.overview_horizontal_bounds();
         let zoom = self.overview_zoom();
         let x = |x: f64| (geo.loc.x + zoom * x).clamp(left, right);
-        Some((x(extent.start)..x(extent.end), x(start)..x(end)))
+        Some((x(extent.start)..x(extent.end), x(visible.start)..x(visible.end)))
     }
 
     fn render_overview_captions<R: NiriRenderer>(
@@ -1998,7 +2003,7 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            let desktop_view = active.then(|| self.scroll_viewport(ws, geo)).flatten();
+            let desktop_view = active.then(|| self.desktop_window_extent(ws, geo)).flatten();
             if let Some((strip, visible)) = &desktop_view {
                 let caption_end = x + if ws.name().is_some() { width } else { 125. };
                 let label_x = (visible.start + 10.).max(caption_end);
@@ -2292,9 +2297,9 @@ impl<W: LayoutElement> Monitor<W> {
                 continue;
             };
             if index == self.active_workspace_idx {
-                if let Some((_, desktop)) = self.scroll_viewport(ws, geo) {
-                    // The tray is behind the windows, so it connects the visible part of
-                    // the strip without drawing across the previews.
+                if let Some((_, desktop)) = self.desktop_window_extent(ws, geo) {
+                    // Include whole previews for any windows visible on the desktop.
+                    // This keeps the tray edge in a gap between windows.
                     let inset = 8. * progress;
                     let right = rect.loc.x + rect.size.w;
                     let start = (desktop.start - inset).max(rect.loc.x);
