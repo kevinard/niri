@@ -16,7 +16,7 @@ use super::overview_caption::{
     caption_background, frame_radius, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
     SCROLL_CARD_HEIGHT, VIEWPORT_TRACK_HEIGHT,
 };
-use super::scrolling::{Column, ColumnWidth, ViewOffset};
+use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
 use super::workspace::{
     compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
@@ -1835,14 +1835,9 @@ impl<W: LayoutElement> Monitor<W> {
                 .floor()
                 .clamp(32., width)
         });
-        let card_progress = match scrolling.view_offset() {
-            ViewOffset::Static(_) if !scrolling.are_transitions_ongoing() => 1.,
-            ViewOffset::Animation(animation) => {
-                let distance = (animation.to() - animation.clamped_value()).abs();
-                (1. - distance / SCROLL_CARD_HEIGHT).clamp(0., 1.).powi(2)
-            }
-            _ => 0.,
-        };
+        let card_progress = scrolling.distance_to_stationary_view().map_or(0., |distance| {
+            (1. - distance / SCROLL_CARD_HEIGHT).clamp(0., 1.).powi(2)
+        });
         let make_cue =
             |(column, pos): (&'a Column<W>, Point<f64, Logical>), x, width: f64, left| {
                 let edge = if left { pos.x + column.width() } else { pos.x };
