@@ -22,7 +22,10 @@ use super::workspace::{
     compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
     WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
 };
-use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
+use super::{
+    compute_overview_zoom, ActivateWindow, HitType, LayoutElement, LayoutElementRenderElement,
+    Options,
+};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
@@ -210,6 +213,7 @@ niri_render_elements! {
         Shadow = ShadowRenderElement,
         SolidColor = SolidColorRenderElement,
         Caption = PrimaryGpuTextureRenderElement,
+        WindowPreview = CropRenderElement<LayoutElementRenderElement<R>>,
     }
 }
 
@@ -1830,9 +1834,7 @@ impl<W: LayoutElement> Monitor<W> {
         });
         let card_progress = scrolling
             .distance_to_stationary_view()
-            .map_or(0., |distance| {
-                (1. - distance / SCROLL_CARD_HEIGHT).clamp(0., 1.).powi(2)
-            });
+            .map_or(0., |distance| (1. - distance / 62.).clamp(0., 1.).powi(2));
         let make_cue =
             |(column, pos): (&'a Column<W>, Point<f64, Logical>), x, width: f64, left| {
                 let edge = if left { pos.x + column.width() } else { pos.x };
@@ -1915,6 +1917,49 @@ impl<W: LayoutElement> Monitor<W> {
                 .any(|cue| cue.destination.id() == id)
     }
 
+    fn render_scroll_preview<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        target: RenderTarget,
+        cue: &ScrollCue<'_, W>,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        if cue.opacity < 1. || target.should_block_out(cue.destination.rules().block_out_from) {
+            return;
+        }
+        let source = cue.destination.size().to_f64();
+        if source.w <= 0. || source.h <= 0. {
+            return;
+        }
+        let width = cue.rect.size.w - 20.;
+        let height = cue.rect.size.h - 72.;
+        let scale = self.scale.fractional_scale();
+        let zoom = (width / source.w).min(1.);
+        let crop = Rectangle::from_size(Size::from((
+            (width / zoom * scale).floor() as i32,
+            (height / zoom * scale).floor() as i32,
+        )));
+        let location = cue.rect.loc + Point::from((10., 62.));
+        let location = location.to_physical_precise_round(scale);
+        let ctx = RenderCtx {
+            renderer,
+            target,
+            xray: None,
+        };
+        cue.destination
+            .render_normal(ctx, Point::default(), scale.into(), 1., &mut |elem| {
+                if let Some(elem) = CropRenderElement::from_element(elem, scale, crop) {
+                    let elem = MonitorInnerRenderElement::WindowPreview(elem);
+                    let elem = RescaleRenderElement::from_element(elem, Point::default(), zoom);
+                    push(RelocateRenderElement::from_element(
+                        elem,
+                        location,
+                        Relocate::Relative,
+                    ));
+                }
+            });
+    }
+
     fn render_scroll_cues<R: NiriRenderer>(
         &self,
         renderer: &mut R,
@@ -1935,15 +1980,6 @@ impl<W: LayoutElement> Monitor<W> {
             return;
         };
         let scale = self.scale.fractional_scale();
-        let mut draw = |label| {
-            let elem = MonitorInnerRenderElement::Caption(label);
-            let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
-            push(RelocateRenderElement::from_element(
-                elem,
-                Point::default(),
-                Relocate::Relative,
-            ));
-        };
         for (((label, fade), cue), left) in self
             .scroll_cue_labels
             .iter()
@@ -1953,6 +1989,18 @@ impl<W: LayoutElement> Monitor<W> {
         {
             let Some(cue) = cue else { continue };
             let card = cue.clipped_column_edge.is_some();
+            if card {
+                self.render_scroll_preview(renderer, target, &cue, push);
+            }
+            let mut draw = |label| {
+                let elem = MonitorInnerRenderElement::Caption(label);
+                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                push(RelocateRenderElement::from_element(
+                    elem,
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            };
             let fallback = if left {
                 "Previous window"
             } else {
@@ -2283,9 +2331,9 @@ impl<W: LayoutElement> Monitor<W> {
                 let y = geo.loc.y - 33.;
                 if contains_y(y, 28.) {
                     let labels = [
-                        ("Offscreen to the left", 160.),
-                        ("On desktop", 102.),
-                        ("Offscreen to the right", 169.),
+                        ("Offscreen to the left", 172.),
+                        ("On desktop", 114.),
+                        ("Offscreen to the right", 180.),
                     ];
                     let surface = caption_background(accent, backdrop, false);
                     for ((range, (title, min_width)), label) in groups
@@ -2301,10 +2349,10 @@ impl<W: LayoutElement> Monitor<W> {
                             renderer.as_gles_renderer(),
                             title.into(),
                             surface,
-                            LabelKind::Caption,
-                            min_width,
+                            LabelKind::GroupHeading,
+                            width,
                             scale,
-                            Point::from(((range.start + range.end - min_width) / 2., y)),
+                            Point::from((range.start, y)),
                             label_alpha,
                         ) {
                             draw(MonitorInnerRenderElement::Caption(caption));
