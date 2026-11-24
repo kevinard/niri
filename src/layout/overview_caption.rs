@@ -27,9 +27,18 @@ pub(super) enum LabelKind {
     Caption,
     GroupHeading,
     Preview,
-    Button { align_right: bool },
-    WindowNavigation { left: bool, count: usize },
-    EdgeFade { height: u32, from_left: bool },
+    Button {
+        align_right: bool,
+    },
+    WindowNavigation {
+        left: bool,
+        offset: usize,
+        more: usize,
+    },
+    EdgeFade {
+        height: u32,
+        from_left: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -40,6 +49,7 @@ pub(super) struct OverviewCaption {
     frame: RefCell<[BorderRenderElement; 2]>,
     fallback_fill: RefCell<SolidColorBuffer>,
     pub(super) shadow: RefCell<Shadow>,
+    pub(super) group_shadows: [RefCell<Shadow>; 3],
 }
 
 impl Default for OverviewCaption {
@@ -51,6 +61,9 @@ impl Default for OverviewCaption {
             frame: RefCell::new(std::array::from_fn(|_| BorderRenderElement::empty())),
             fallback_fill: RefCell::default(),
             shadow: RefCell::new(Shadow::new(niri_config::Shadow::default())),
+            group_shadows: std::array::from_fn(|_| {
+                RefCell::new(Shadow::new(niri_config::Shadow::default()))
+            }),
         }
     }
 }
@@ -351,27 +364,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::WindowNavigation { .. } => 14.,
         _ => height / 2.,
     };
-    let left_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: true, .. }) {
-        0.
-    } else {
-        radius
-    };
-    let right_radius = if matches!(key.kind, LabelKind::WindowNavigation { left: false, .. }) {
-        0.
-    } else {
-        radius
-    };
     cr.arc(
-        left_radius,
-        left_radius,
-        left_radius,
+        radius,
+        radius,
+        radius,
         std::f64::consts::PI,
         1.5 * std::f64::consts::PI,
     );
     cr.arc(
-        width - right_radius,
-        right_radius,
-        right_radius,
+        width - radius,
+        radius,
+        radius,
         -std::f64::consts::FRAC_PI_2,
         0.,
     );
@@ -380,16 +383,16 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         cr.line_to(0., height);
     } else {
         cr.arc(
-            width - right_radius,
-            height - right_radius,
-            right_radius,
+            width - radius,
+            height - radius,
+            radius,
             0.,
             std::f64::consts::FRAC_PI_2,
         );
         cr.arc(
-            left_radius,
-            height - left_radius,
-            left_radius,
+            radius,
+            height - radius,
+            radius,
             std::f64::consts::FRAC_PI_2,
             std::f64::consts::PI,
         );
@@ -409,8 +412,11 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         cr.fill()?;
     }
 
-    if let LabelKind::WindowNavigation { left, count } = key.kind {
+    if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
+        title.set_single_paragraph_mode(false);
+        title.set_wrap(pango::WrapMode::WordChar);
+        title.set_height(-2);
         title.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         let align = |w: i32| {
             if left {
@@ -425,11 +431,17 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
         let heading = layout(&cr, key);
         heading.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
-        let text = match (left, count > 1) {
-            (true, false) => "←  Show previous window".into(),
-            (false, false) => "Show next window  →".into(),
-            (true, true) => format!("←  Previous · {count} columns"),
-            (false, true) => format!("{count} columns · Next  →"),
+        let action = match (offset, left) {
+            (1, true) => "Previous window",
+            (1, false) => "Next window",
+            (_, true) => "Two windows back",
+            (_, false) => "Two windows ahead",
+        };
+        let text = match (left, more) {
+            (true, 0) => format!("←  {action}"),
+            (false, 0) => format!("{action}  →"),
+            (true, more) => format!("←  {action} · +{more}"),
+            (false, more) => format!("+{more} · {action}  →"),
         };
         heading.set_width(((width - 2. * PADDING) * f64::from(pango::SCALE)) as i32);
         heading.set_text(&text);

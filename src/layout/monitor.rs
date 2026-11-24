@@ -1906,8 +1906,8 @@ impl<W: LayoutElement> Monitor<W> {
                     )),
                     Size::from((width, height)),
                 );
-                let additional_top = y + height + 8.;
-                let has_space = additional_top + SCROLL_BUTTON_HEIGHT
+                let additional_top = y + height + 10.;
+                let has_space = additional_top + SCROLL_CARD_HEIGHT
                     <= self.working_area.loc.y + self.working_area.size.h;
                 let additional = if card && has_space {
                     let id = column.id();
@@ -1924,7 +1924,7 @@ impl<W: LayoutElement> Monitor<W> {
                         (
                             Rectangle::new(
                                 Point::from((rect.loc.x, additional_top)),
-                                Size::from((width, SCROLL_BUTTON_HEIGHT)),
+                                Size::from((width, SCROLL_CARD_HEIGHT)),
                             ),
                             column.active_window(),
                         )
@@ -1982,43 +1982,44 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         renderer: &mut R,
         target: RenderTarget,
-        cue: &ScrollCue<'_, W>,
+        rect: Rectangle<f64, Logical>,
+        destination: &W,
+        opacity: f32,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
-        if cue.opacity < 1. || target.should_block_out(cue.destination.rules().block_out_from) {
+        if opacity < 1. || target.should_block_out(destination.rules().block_out_from) {
             return;
         }
-        let source = cue.destination.size().to_f64();
+        let source = destination.size().to_f64();
         if source.w <= 0. || source.h <= 0. {
             return;
         }
-        let width = cue.rect.size.w - 20.;
-        let height = cue.rect.size.h - 72.;
+        let width = rect.size.w - 20.;
+        let height = rect.size.h - 88.;
         let scale = self.scale.fractional_scale();
         let zoom = (width / source.w).min(1.);
         let crop = Rectangle::from_size(Size::from((
             (width / zoom * scale).floor() as i32,
             (height / zoom * scale).floor() as i32,
         )));
-        let location = cue.rect.loc + Point::from((10., 62.));
+        let location = rect.loc + Point::from((10., 78.));
         let location = location.to_physical_precise_round(scale);
         let ctx = RenderCtx {
             renderer,
             target,
             xray: None,
         };
-        cue.destination
-            .render_normal(ctx, Point::default(), scale.into(), 1., &mut |elem| {
-                if let Some(elem) = CropRenderElement::from_element(elem, scale, crop) {
-                    let elem = MonitorInnerRenderElement::WindowPreview(elem);
-                    let elem = RescaleRenderElement::from_element(elem, Point::default(), zoom);
-                    push(RelocateRenderElement::from_element(
-                        elem,
-                        location,
-                        Relocate::Relative,
-                    ));
-                }
-            });
+        destination.render_normal(ctx, Point::default(), scale.into(), 1., &mut |elem| {
+            if let Some(elem) = CropRenderElement::from_element(elem, scale, crop) {
+                let elem = MonitorInnerRenderElement::WindowPreview(elem);
+                let elem = RescaleRenderElement::from_element(elem, Point::default(), zoom);
+                push(RelocateRenderElement::from_element(
+                    elem,
+                    location,
+                    Relocate::Relative,
+                ));
+            }
+        });
     }
 
     fn render_scroll_cues<R: NiriRenderer>(
@@ -2047,7 +2048,11 @@ impl<W: LayoutElement> Monitor<W> {
             let label = &self.scroll_cue_labels[index];
             let card = cue.clipped_column_edge.is_some();
             if card {
-                self.render_scroll_preview(renderer, target, &cue, push);
+                for (rect, window) in
+                    std::iter::once((cue.rect, cue.destination)).chain(cue.additional)
+                {
+                    self.render_scroll_preview(renderer, target, rect, window, cue.opacity, push);
+                }
             }
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
@@ -2085,10 +2090,11 @@ impl<W: LayoutElement> Monitor<W> {
                 if card {
                     LabelKind::WindowNavigation {
                         left,
-                        count: if cue.additional.is_some() && cue.offscreen_columns == 2 {
-                            1
+                        offset: 1,
+                        more: if cue.additional.is_some() {
+                            0
                         } else {
-                            cue.offscreen_columns
+                            cue.offscreen_columns.saturating_sub(1)
                         },
                     }
                 } else {
@@ -2102,17 +2108,15 @@ impl<W: LayoutElement> Monitor<W> {
                 draw(label);
             }
             if let Some((rect, window)) = cue.additional {
-                let title = navigation_title(window, target, "Another window");
-                let text = if left {
-                    format!("←  {title}")
-                } else {
-                    format!("{title}  →")
-                };
                 if let Some(label) = self.additional_scroll_cue_labels[index].render(
                     renderer.as_gles_renderer(),
-                    text,
-                    surface,
-                    LabelKind::Button { align_right: !left },
+                    navigation_title(window, target, "Another window"),
+                    color,
+                    LabelKind::WindowNavigation {
+                        left,
+                        offset: 2,
+                        more: cue.offscreen_columns.saturating_sub(2),
+                    },
                     rect.size.w,
                     scale,
                     rect.loc,
@@ -2302,6 +2306,9 @@ impl<W: LayoutElement> Monitor<W> {
         ws: &Workspace<W>,
         geo: Rectangle<f64, Logical>,
     ) -> Option<[Range<f64>; 3]> {
+        if !ws.floating().is_empty() {
+            return None;
+        }
         let tiles = || ws.scrolling().tiles_with_render_positions();
         let extent = visible_extent(tiles())?;
         let view = ws.working_area();
@@ -2720,22 +2727,27 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
-            if let Some(groups) = groups.as_ref().filter(|_| group_alpha > 0.) {
-                for (index, range) in groups.iter().enumerate() {
+            let groups = groups.filter(|_| group_alpha > 0.).map(|groups| {
+                groups.map(|range| {
                     if range.is_empty() {
-                        continue;
+                        return None;
                     }
-                    let group = Rectangle::new(
+                    Rectangle::new(
                         Point::from((range.start - 2., geo.loc.y - 37.)),
                         Size::from((range.end - range.start + 4., geo.size.h + 37.)),
-                    );
-                    let Some(group) = group.intersection(self.overview_content()) else {
-                        continue;
-                    };
+                    )
+                    .intersection(self.overview_content())
+                    .map(|rect| rect.to_physical_precise_round(scale).to_logical(scale))
+                })
+            });
+
+            if let Some(groups) = &groups {
+                for (index, group) in groups.iter().enumerate() {
+                    let Some(group) = group else { continue };
                     ws.overview_caption.render_desktop_group(
                         renderer,
                         index,
-                        group.to_physical_precise_round(scale).to_logical(scale),
+                        *group,
                         ws.options.layout.background_color,
                         ws.options.layout.border.active_color,
                         group_alpha,
@@ -2744,26 +2756,36 @@ impl<W: LayoutElement> Monitor<W> {
                     );
                 }
             }
-            if groups.is_none() || group_alpha < 1. {
+            let frame_alpha =
+                progress as f32 * (1. - if groups.is_some() { group_alpha } else { 0. });
+            if frame_alpha > 0. {
                 ws.overview_caption.render_frame(
                     renderer,
                     rect,
                     ws.options.layout.background_color,
                     active,
-                    progress as f32,
+                    frame_alpha,
                     scale,
                     &mut draw,
                 );
             }
-            if shadow_config.on {
-                let mut shadow = ws.overview_caption.shadow.borrow_mut();
+            if !shadow_config.on {
+                continue;
+            }
+            let mut draw_shadow = |shadow: &std::cell::RefCell<super::shadow::Shadow>,
+                                   rect: Rectangle<f64, Logical>,
+                                   alpha| {
+                if alpha == 0. {
+                    return;
+                }
+                let mut shadow = shadow.borrow_mut();
                 shadow.update_config(shadow_config);
                 shadow.update_render_elements(
                     rect.size,
-                    index == self.active_workspace_idx,
+                    active,
                     frame_radius(rect, progress as f32),
                     scale,
-                    progress as f32,
+                    alpha,
                 );
                 shadow.render(renderer, rect.loc, &mut |elem| {
                     let elem = MonitorInnerRenderElement::Shadow(elem);
@@ -2774,7 +2796,15 @@ impl<W: LayoutElement> Monitor<W> {
                         Relocate::Relative,
                     ));
                 });
+            };
+            if let Some(groups) = groups {
+                for (rect, shadow) in groups.into_iter().zip(&ws.overview_caption.group_shadows) {
+                    if let Some(rect) = rect {
+                        draw_shadow(shadow, rect, group_alpha);
+                    }
+                }
             }
+            draw_shadow(&ws.overview_caption.shadow, rect, frame_alpha);
         }
     }
 
