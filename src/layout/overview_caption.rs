@@ -23,6 +23,13 @@ pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 36.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum GroupStyle {
+    Desktop,
+    Offscreen,
+    Hidden,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LabelKind {
     Caption,
@@ -30,6 +37,9 @@ pub(super) enum LabelKind {
     StripButton {
         direction: Option<bool>,
         status: Option<&'static str>,
+    },
+    LayerAction {
+        show: bool,
     },
     Preview {
         show_action: bool,
@@ -156,6 +166,14 @@ pub(super) fn caption_background(accent: Color, backdrop: Color, active: bool) -
     }
 }
 
+pub(super) fn preview_hover_ink(backdrop: Color) -> Color {
+    if is_light(backdrop) {
+        Color::new_unpremul(0.17, 0.24, 0.29, 1.)
+    } else {
+        Color::new_unpremul(0.84, 0.92, 0.97, 1.)
+    }
+}
+
 pub(super) fn tint_caption(background: Color, accent: Color) -> Color {
     let mix = |base, highlight| base * 0.76 + highlight * 0.24;
     Color::new_unpremul(
@@ -198,7 +216,7 @@ impl OverviewCaption {
         renderer: &mut impl NiriRenderer,
         index: usize,
         rect: Rectangle<f64, Logical>,
-        emphasized: bool,
+        style: GroupStyle,
         backdrop: Color,
         accent: Color,
         alpha: f32,
@@ -213,10 +231,13 @@ impl OverviewCaption {
             return;
         }
         let surface = caption_background(accent, backdrop, false);
-        let tint = if emphasized { 0.12 } else { 0. };
+        let (tint, opacity, edge) = match style {
+            GroupStyle::Desktop => (0.12, 0.76, 0.34),
+            GroupStyle::Offscreen => (0., 0.34, 0.18),
+            GroupStyle::Hidden => (0., 0.51, 0.26),
+        };
         let mix = |base, highlight| base * (1. - tint) + highlight * tint;
         let light = is_light(backdrop);
-        let opacity = if light { 0.56 } else { 0.62 };
         let color = Color::new_unpremul(
             mix(surface.r, accent.r),
             mix(surface.g, accent.g),
@@ -225,7 +246,7 @@ impl OverviewCaption {
         );
         let geometry = Rectangle::from_size(rect.size);
         let border_ink = if light { 0.18 } else { 0.85 };
-        let outline = Color::new_unpremul(border_ink, border_ink, border_ink, alpha * 0.25);
+        let outline = Color::new_unpremul(border_ink, border_ink, border_ink, alpha * edge);
         let mut group = self.desktop_groups[index].borrow_mut();
         for (element, (color, width)) in group
             .iter_mut()
@@ -385,7 +406,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let (width, height) = match key.kind {
         LabelKind::GroupHeading => (max_width.min(4096.), HEIGHT),
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
-        LabelKind::StripButton { .. } => (max_width, STRIP_BUTTON_HEIGHT),
+        LabelKind::StripButton { .. } | LabelKind::LayerAction { .. } => {
+            (max_width, STRIP_BUTTON_HEIGHT)
+        }
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
@@ -473,6 +496,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripButton { .. }
+                | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
                 | LabelKind::WindowNavigation { .. }
         ) {
@@ -526,6 +550,25 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let label = layout(&cr, key);
         let mut title_width = width - 2. * PADDING;
         let mut title_x = PADDING;
+        if let LabelKind::LayerAction { show } = key.kind {
+            let x = 13.5;
+            let y = height / 2. - 6.5;
+            cr.set_line_width(1.25);
+            cr.rectangle(x, y + 4., 11., 8.);
+            cr.stroke()?;
+            cr.rectangle(x + 4., y, 11., 8.);
+            cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
+            cr.fill_preserve()?;
+            let front_alpha = if show { 0.62 } else { 1. };
+            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), front_alpha);
+            cr.stroke()?;
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            title_x = 37.;
+            title_width = width - title_x - PADDING;
+            label.set_font_description(Some(&FontDescription::from_string(
+                "sans-serif Medium 13px",
+            )));
+        }
         if let LabelKind::StripButton {
             direction: Some(left),
             ..
@@ -611,6 +654,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         let x = match key.kind {
             LabelKind::GroupHeading => (width - f64::from(w)) / 2.,
             LabelKind::StripButton { .. } => title_x + (title_width - f64::from(w)) / 2.,
+            LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };

@@ -14,8 +14,8 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
-    caption_background, frame_radius, tint_caption, LabelKind, PreviewLabel, SCROLL_BUTTON_HEIGHT,
-    SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
+    caption_background, frame_radius, preview_hover_ink, tint_caption, GroupStyle, LabelKind,
+    PreviewLabel, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT, STRIP_BUTTON_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -90,6 +90,7 @@ pub struct Monitor<W: LayoutElement> {
     /// Insert hint element for rendering.
     insert_hint_element: InsertHintElement,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    layer_action_label: PreviewLabel,
     overview_action_label: PreviewLabel,
     scroll_cue_labels: [PreviewLabel; 2],
     additional_scroll_cue_labels: [PreviewLabel; 2],
@@ -176,7 +177,12 @@ struct OverviewGroup {
     range: Range<f64>,
     title: &'static str,
     minimum_width: f64,
-    emphasized: bool,
+    style: GroupStyle,
+}
+
+struct NavigationStrip<'a, W> {
+    titles: Vec<NavigationTitle<'a, W>>,
+    layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
 
 struct NavigationTitle<'a, W> {
@@ -453,6 +459,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint: None,
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             strip_labels: Default::default(),
+            layer_action_label: PreviewLabel::default(),
             overview_action_label: PreviewLabel::default(),
             scroll_cue_labels: Default::default(),
             additional_scroll_cue_labels: Default::default(),
@@ -2058,7 +2065,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     /// Normal tiled windows leave a footer for the strip, so the same controls
     /// remain available in each position without painting over a client surface.
-    fn navigation_titles(&self) -> Option<Vec<NavigationTitle<'_, W>>> {
+    fn navigation_strip(&self) -> Option<NavigationStrip<'_, W>> {
         let ws = self.active_workspace_ref();
         if self.workspace_switch.is_some()
             || self.overview_progress.is_some()
@@ -2112,47 +2119,80 @@ impl<W: LayoutElement> Monitor<W> {
             .len()
             .min(capacity.max(1))
             .min(MAX_NAVIGATION_TITLES);
+        let action_width = 188.;
+        let action_gap = 16.;
+        let floating_visible = ws.is_floating_visible();
+        let layer_destination = match (scrolling.active_window(), ws.floating().active_window()) {
+            (Some(tiled), Some(floating))
+                if available >= action_width + action_gap + (156. + gap) * count as f64 =>
+            {
+                Some(if floating_visible { tiled } else { floating })
+            }
+            _ => None,
+        };
+        let title_space = if layer_destination.is_some() {
+            available - action_width - action_gap
+        } else {
+            available
+        };
         let first = active_index
             .saturating_sub(count / 2)
             .min(windows.len() - count);
-        let width = ((available - gap * (count - 1) as f64) / count as f64)
+        let width = ((title_space - gap * (count - 1) as f64) / count as f64)
             .floor()
             .min(236.);
-        let strip_width = count as f64 * (width + gap) - gap;
+        let titles_width = count as f64 * (width + gap) - gap;
+        let strip_width = titles_width + (available - title_space);
         let x = (bounds.start + bounds.end - strip_width) / 2.;
         let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
-        Some(
-            windows[first..first + count]
-                .iter()
-                .enumerate()
-                .filter_map(|(index, &(window, direction, floating_window))| {
-                    let rect = Rectangle::new(
-                        Point::from((x + index as f64 * (width + gap), y)),
-                        Size::from((width, STRIP_BUTTON_HEIGHT)),
-                    );
-                    let covered = ws.is_floating_visible()
-                        && floating.iter().any(|(tile, position)| {
-                            rect.intersection(Rectangle::new(*position, tile.tile_size()))
-                                .is_some()
-                        });
-                    (!covered).then_some(NavigationTitle {
-                        rect,
-                        window,
-                        active: window.id() == active.id(),
-                        direction,
-                        floating: floating_window,
-                    })
+        let uncovered_button = |x: f64, width: f64| {
+            let rect = Rectangle::new(
+                Point::from((x, y)),
+                Size::from((width, STRIP_BUTTON_HEIGHT)),
+            );
+            let covered = floating_visible
+                && floating.iter().any(|(tile, position)| {
+                    rect.intersection(Rectangle::new(*position, tile.tile_size()))
+                        .is_some()
+                });
+            (!covered).then_some(rect)
+        };
+        let titles = windows[first..first + count]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &(window, direction, floating))| {
+                let rect = uncovered_button(x + index as f64 * (width + gap), width)?;
+                Some(NavigationTitle {
+                    rect,
+                    window,
+                    active: window.id() == active.id(),
+                    direction,
+                    floating,
                 })
-                .collect(),
-        )
+            })
+            .collect();
+        let layer_action = layer_destination.and_then(|window| {
+            uncovered_button(x + titles_width + action_gap, action_width).map(|rect| (rect, window))
+        });
+        Some(NavigationStrip {
+            titles,
+            layer_action,
+        })
     }
 
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
-        if let Some(titles) = self.navigation_titles() {
-            return titles
+        if let Some(strip) = self.navigation_strip() {
+            return strip
+                .titles
                 .into_iter()
                 .find(|title| title.rect.contains(position))
-                .map(|title| title.window);
+                .map(|title| title.window)
+                .or_else(|| {
+                    strip
+                        .layer_action
+                        .filter(|(rect, _)| rect.contains(position))
+                        .map(|(_, window)| window)
+                });
         }
         self.scroll_cues()
             .into_iter()
@@ -2172,8 +2212,8 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
             || self
-                .navigation_titles()
-                .is_some_and(|titles| titles.iter().any(|title| title.window.id() == id))
+                .navigation_strip()
+                .is_some_and(|strip| strip.titles.iter().any(|title| title.window.id() == id))
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
                     || cue.additional.is_some_and(|(_, window)| window.id() == id)
@@ -2231,28 +2271,39 @@ impl<W: LayoutElement> Monitor<W> {
         pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
-        if let Some(titles) = self.navigation_titles() {
+        if let Some(strip) = self.navigation_strip() {
             let ws = self.active_workspace_ref();
             let accent = ws.options.layout.border.active_color;
             let surface = caption_background(accent, ws.options.layout.background_color, false);
             let scale = self.scale.fractional_scale();
-            for (title, label) in titles.into_iter().zip(&self.strip_labels) {
+            let has_layer_action = strip.layer_action.is_some();
+            let floating_visible = ws.is_floating_visible();
+            let mut draw = |label| {
+                let elem = MonitorInnerRenderElement::Caption(label);
+                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                push(RelocateRenderElement::from_element(
+                    elem,
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            };
+            for (title, label) in strip.titles.into_iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let status = if title.floating {
-                    Some(if !ws.is_floating_visible() {
-                        "Hidden · Select to show"
-                    } else if ws.scrolling().is_empty() {
-                        "Floating"
+                    Some(if !floating_visible {
+                        "Hidden"
                     } else {
-                        "Floating · Above tiles"
+                        "Floating"
                     })
-                } else if !ws.floating().is_empty() && ws.is_floating_visible() {
+                } else if !has_layer_action && !ws.floating().is_empty() && floating_visible {
                     Some("Hides floating windows")
                 } else {
                     match title.direction {
                         Some(true) => Some("Offscreen left"),
                         Some(false) => Some("Offscreen right"),
-                        None if !ws.floating().is_empty() => Some("Tiled"),
+                        None if hovered && has_layer_action && floating_visible => {
+                            Some("Reveal tiled windows")
+                        }
                         None => None,
                     }
                 };
@@ -2276,13 +2327,33 @@ impl<W: LayoutElement> Monitor<W> {
                     title.rect.loc,
                     1.,
                 ) {
-                    let elem = MonitorInnerRenderElement::Caption(label);
-                    let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
-                    push(RelocateRenderElement::from_element(
-                        elem,
-                        Point::default(),
-                        Relocate::Relative,
-                    ));
+                    draw(label);
+                }
+            }
+            if let Some((rect, _)) = strip.layer_action {
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let text = if floating_visible {
+                    "Hide floating windows"
+                } else {
+                    "Show floating windows"
+                };
+                if let Some(label) = self.layer_action_label.render(
+                    renderer.as_gles_renderer(),
+                    text.into(),
+                    if hovered {
+                        tint_caption(surface, accent)
+                    } else {
+                        surface
+                    },
+                    LabelKind::LayerAction {
+                        show: !floating_visible,
+                    },
+                    rect.size.w,
+                    scale,
+                    rect.loc,
+                    1.,
+                ) {
+                    draw(label);
                 }
             }
             return;
@@ -2627,7 +2698,11 @@ impl<W: LayoutElement> Monitor<W> {
                     range,
                     title: titles[index],
                     minimum_width: widths[index],
-                    emphasized: index == 1,
+                    style: if index == 1 {
+                        GroupStyle::Desktop
+                    } else {
+                        GroupStyle::Offscreen
+                    },
                 })
             }));
         }
@@ -2655,17 +2730,21 @@ impl<W: LayoutElement> Monitor<W> {
                     "Some offscreen · Tiled"
                 },
                 minimum_width: 168.,
-                emphasized: !ws.floating_is_active(),
+                style: if on_desktop {
+                    GroupStyle::Desktop
+                } else {
+                    GroupStyle::Offscreen
+                },
             }
         });
         let floating = visible_extent(
             ws.tiles_with_overview_positions(&positions)
                 .filter(|(tile, _, _)| ws.is_floating(tile.window().id())),
         )?;
-        let (title, minimum_width) = if ws.is_floating_visible() {
-            ("On desktop · Floating", 172.)
+        let (title, minimum_width, style) = if ws.is_floating_visible() {
+            ("On desktop · Floating", 172., GroupStyle::Desktop)
         } else {
-            ("Hidden on desktop · Floating", 228.)
+            ("Hidden on desktop · Floating", 228., GroupStyle::Hidden)
         };
         Some([
             tiled,
@@ -2673,7 +2752,7 @@ impl<W: LayoutElement> Monitor<W> {
                 range: project(floating),
                 title,
                 minimum_width,
-                emphasized: ws.floating_is_active(),
+                style,
             }),
             None,
         ])
@@ -2829,11 +2908,12 @@ impl<W: LayoutElement> Monitor<W> {
 
                 let selected = focused.is_some_and(|focused| focused.id() == window.id());
                 let hovered = hovered.is_some_and(|id| id == window.id());
+                let hover_ink = preview_hover_ink(backdrop);
                 if hovered && contains_y(rect.loc.y, rect.size.h) {
                     if let Some(outline) = ws.overview_caption.render_preview_hover(
                         renderer,
                         rect,
-                        accent * label_alpha,
+                        hover_ink * label_alpha,
                         scale,
                     ) {
                         draw(MonitorInnerRenderElement::Decoration(outline));
@@ -2850,7 +2930,7 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                     let background = caption_background(accent, backdrop, selected);
                     let background = if hovered && !selected {
-                        tint_caption(background, accent)
+                        tint_caption(background, hover_ink)
                     } else {
                         background
                     };
@@ -3179,7 +3259,7 @@ impl<W: LayoutElement> Monitor<W> {
                     .map(|rect| {
                         (
                             rect.to_physical_precise_round(scale).to_logical(scale),
-                            group.emphasized,
+                            group.style,
                         )
                     })
                 })
@@ -3187,14 +3267,14 @@ impl<W: LayoutElement> Monitor<W> {
 
             if let Some(groups) = &groups {
                 for (index, group) in groups.iter().enumerate() {
-                    let Some((group, emphasized)) = group else {
+                    let Some((group, style)) = group else {
                         continue;
                     };
                     ws.overview_caption.render_desktop_group(
                         renderer,
                         index,
                         *group,
-                        *emphasized,
+                        *style,
                         ws.options.layout.background_color,
                         ws.options.layout.border.active_color,
                         group_alpha,
