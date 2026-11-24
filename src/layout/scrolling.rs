@@ -426,6 +426,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             || !self.closing_windows.is_empty()
     }
 
+    pub(super) fn distance_to_stationary_view(&self) -> Option<f64> {
+        match &self.view_offset {
+            ViewOffset::Static(_) if !self.are_transitions_ongoing() => Some(0.),
+            ViewOffset::Animation(animation) => {
+                Some((animation.to() - animation.clamped_value()).abs())
+            }
+            _ => None,
+        }
+    }
+
     pub fn update_render_elements(&mut self, is_active: bool, layer: RenderLayer) {
         let view_pos = Point::from((self.view_pos(), 0.));
         let view_size = self.view_size;
