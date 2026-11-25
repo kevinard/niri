@@ -101,6 +101,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_viewport_outlines: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    strip_leaving_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_edge_labels: [PreviewLabel; 2],
@@ -573,6 +574,7 @@ impl<W: LayoutElement> Monitor<W> {
                 RefCell::new(BorderRenderElement::empty())
             }),
             strip_viewport_labels: Default::default(),
+            strip_leaving_labels: Default::default(),
             strip_forecast_label: PreviewLabel::default(),
             strip_forecast_titles: Default::default(),
             strip_edge_labels: Default::default(),
@@ -2898,12 +2900,27 @@ impl<W: LayoutElement> Monitor<W> {
             });
             let viewports = forecast_viewports.as_deref().unwrap_or(&strip.viewports);
             let preview_window = inline_forecast.filter(|_| forecast_viewports.is_some());
+            let in_view = |title: &NavigationTitle<'_, W>| {
+                preview_window.map_or(title.direction.is_none() && !title.floating, |forecast| {
+                    forecast
+                        .visible_after
+                        .iter()
+                        .any(|window| window.id() == title.window.id())
+                })
+            };
+            let leaving = |title: &NavigationTitle<'_, W>| {
+                preview_window.is_some()
+                    && title.fully_visible
+                    && !title.floating
+                    && !in_view(title)
+            };
             let ink = caption_ink(surface);
             let gray = (ink.r + ink.g + ink.b) / 3.;
             let viewport_color = tint_caption(
                 tint_caption(Color::new_unpremul(gray, gray, gray, 1.), surface),
                 surface,
             );
+            let current_view_background = tint_caption(surface, viewport_color);
             let viewport_color = if preview_window.is_some() {
                 tint_caption(viewport_color, accent)
             } else {
@@ -2923,12 +2940,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let referenced = edge_target == Some(title.window.id());
                 let offscreen = title.direction.is_some();
-                let in_view = preview_window.map_or(!offscreen && !title.floating, |forecast| {
-                    forecast
-                        .visible_after
-                        .iter()
-                        .any(|window| window.id() == title.window.id())
-                });
+                let in_view = in_view(title);
                 let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
                 let step_target = strip.edge_actions.iter().flatten().any(|arrow| {
                     arrow
@@ -2964,6 +2976,8 @@ impl<W: LayoutElement> Monitor<W> {
                     direction_background
                 } else if in_view {
                     viewport_background
+                } else if leaving(title) {
+                    current_view_background
                 } else {
                     surface
                 };
@@ -3044,6 +3058,35 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(label);
+                }
+            }
+            if let Some(preview) = preview_window {
+                let leaving_spans = navigation_spans(
+                    strip
+                        .titles
+                        .iter()
+                        .filter(|title| leaving(title))
+                        .map(|title| title.rect),
+                );
+                for (span, label) in leaving_spans.iter().zip(&self.strip_leaving_labels) {
+                    let width = (span.end - span.start).min(104.);
+                    let x = (span.start + span.end - width) / 2.;
+                    let y = preview.rect.loc.y + STRIP_GROUP_BUTTON_HEIGHT;
+                    if let Some(caption) = label.render(
+                        renderer.as_gles_renderer(),
+                        "Leaves view".into(),
+                        Color {
+                            a: 0.,
+                            ..current_view_background
+                        },
+                        LabelKind::StripViewportLabel,
+                        width,
+                        scale,
+                        Point::from((x, y)),
+                        1.,
+                    ) {
+                        draw(caption);
+                    }
                 }
             }
             for (line, label) in viewports.iter().zip(&self.strip_viewport_labels) {
