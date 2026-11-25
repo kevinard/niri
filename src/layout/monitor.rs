@@ -35,6 +35,7 @@ use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::RenderLayer;
 use crate::niri_render_elements;
+use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
@@ -97,6 +98,8 @@ pub struct Monitor<W: LayoutElement> {
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_viewport_marks: [RefCell<SolidColorBuffer>; 3 * MAX_NAVIGATION_TITLES],
+    strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
+    strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_status_label: PreviewLabel,
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
@@ -508,6 +511,10 @@ impl<W: LayoutElement> Monitor<W> {
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
             strip_viewport_marks: Default::default(),
+            strip_viewport_backings: std::array::from_fn(|_| {
+                RefCell::new(BorderRenderElement::empty())
+            }),
+            strip_viewport_labels: Default::default(),
             strip_status_label: PreviewLabel::default(),
             strip_forecast_label: PreviewLabel::default(),
             strip_forecast_titles: Default::default(),
@@ -2725,7 +2732,7 @@ impl<W: LayoutElement> Monitor<W> {
             let ws = self.active_workspace_ref();
             let accent = ws.options.layout.border.active_color;
             let surface = caption_background(accent, ws.options.layout.background_color, false);
-            let direction_background = tint_caption(tint_caption(surface, accent), accent);
+            let direction_background = tint_caption(surface, accent);
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible() && !ws.floating().is_empty();
@@ -2761,6 +2768,8 @@ impl<W: LayoutElement> Monitor<W> {
                 tint_caption(Color::new_unpremul(gray, gray, gray, 1.), surface),
                 surface,
             );
+            let viewport_background =
+                tint_caption(tint_caption(surface, viewport_color), viewport_color);
             let marks = strip.viewports.iter().flat_map(|line| {
                 let cap_width = line.size.w.min(2.);
                 let cap = Rectangle::new(
@@ -2861,13 +2870,13 @@ impl<W: LayoutElement> Monitor<W> {
                 } else if offscreen || hovered || referenced {
                     direction_background
                 } else if !title.floating {
-                    tint_caption(surface, accent)
+                    viewport_background
                 } else {
                     surface
                 };
                 let kind = LabelKind::StripButton {
                     status,
-                    outlined: !title.active,
+                    outlined: !title.active && (offscreen || hovered || title.floating),
                     hovered: hovered && !moving,
                     focus,
                     direction: title.direction.filter(|_| title.hidden),
@@ -2981,6 +2990,57 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(caption);
                 }
             }
+            if !moving {
+                for (line, label) in strip.viewports.iter().zip(&self.strip_viewport_labels) {
+                    if line.size.w < 104. {
+                        continue;
+                    }
+                    if let Some(caption) = label.render(
+                        renderer.as_gles_renderer(),
+                        "In view".into(),
+                        Color {
+                            a: 0.,
+                            ..viewport_background
+                        },
+                        LabelKind::StripViewportLabel,
+                        line.size.w,
+                        scale,
+                        line.loc - Point::from((0., 12.)),
+                        1.,
+                    ) {
+                        draw(caption);
+                    }
+                }
+            }
+            if BorderRenderElement::has_shader(renderer) {
+                for (line, backing) in strip.viewports.iter().zip(&self.strip_viewport_backings) {
+                    let size = Size::from((line.size.w, 44.));
+                    let location = line.loc - Point::from((0., 42.));
+                    let geometry = Rectangle::from_size(size);
+                    let mut backing = backing.borrow_mut();
+                    backing.update(
+                        size,
+                        geometry,
+                        Default::default(),
+                        viewport_background,
+                        viewport_background,
+                        0.,
+                        geometry,
+                        0.,
+                        CornerRadius::from(11.).fit_to(size.w as f32, size.h as f32),
+                        scale as f32,
+                        1.,
+                    );
+                    let element = MonitorInnerRenderElement::Decoration(
+                        backing.clone().with_location(location).into(),
+                    );
+                    push(RelocateRenderElement::from_element(
+                        RescaleRenderElement::from_element(element, Point::default(), 1.),
+                        Point::default(),
+                        Relocate::Relative,
+                    ));
+                }
+            }
             // Put the shared surface behind the window targets.
             if let Some(rect) = strip.tray {
                 let background = Color { a: 0.73, ..surface };
@@ -2994,7 +3054,12 @@ impl<W: LayoutElement> Monitor<W> {
                     rect.loc,
                     1.,
                 ) {
-                    draw(tray);
+                    let element = MonitorInnerRenderElement::Caption(tray);
+                    push(RelocateRenderElement::from_element(
+                        RescaleRenderElement::from_element(element, Point::default(), 1.),
+                        Point::default(),
+                        Relocate::Relative,
+                    ));
                 }
             }
             return;
