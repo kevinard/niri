@@ -23,7 +23,6 @@ pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 28.;
 pub(super) const STRIP_FORECAST_HEIGHT: f64 = 126.;
-pub(super) const STRIP_STATUS_HEIGHT: f64 = 20.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 52.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
@@ -51,7 +50,6 @@ pub(super) enum LabelKind {
     GroupTitle,
     OverviewCommand,
     StripTray,
-    StripStatus,
     StripViewportLabel,
     StripForecast,
     ScrollWindow {
@@ -409,12 +407,8 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
     let font = if key.kind == LabelKind::StripViewportLabel {
         "sans-serif Bold 12px"
-    } else if key.kind == LabelKind::StripStatus {
-        "sans-serif Bold 13px"
-    } else if matches!(
-        key.kind,
-        LabelKind::StripButton { .. } | LabelKind::ScrollWindow { .. }
-    ) || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
+    } else if matches!(key.kind, LabelKind::StripButton { .. })
+        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
     {
         "sans-serif Medium 13px"
     } else {
@@ -453,7 +447,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         }
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
-        LabelKind::StripStatus => (max_width, STRIP_STATUS_HEIGHT),
         LabelKind::StripViewportLabel => (max_width, 16.),
         LabelKind::StripForecast => (max_width, STRIP_FORECAST_HEIGHT),
         LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
@@ -629,18 +622,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     } else if let LabelKind::ScrollWindow { left, .. } = key.kind {
         cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         cr.set_line_width(2.);
-        let arrow_x = if left { 15. } else { width - 15. };
-        draw_arrow(&cr, arrow_x, height / 2., left, 7.)?;
-        let title = layout(&cr, key);
-        title.set_width(((width - 36.) * f64::from(pango::SCALE)) as i32);
-        let (w, h) = title.pixel_size();
-        let x = if left {
-            28.
-        } else {
-            width - 28. - f64::from(w)
-        };
-        cr.move_to(x, (height - f64::from(h)) / 2.);
-        pangocairo::functions::show_layout(&cr, &title);
+        draw_arrow(&cr, width / 2., height / 2., left, 7.)?;
     } else if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
         title.set_single_paragraph_mode(false);
@@ -795,9 +777,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::StripButton { .. }
-            | LabelKind::StripStatus
-            | LabelKind::StripViewportLabel => title_x + (title_width - f64::from(w)) / 2.,
+            LabelKind::StripButton { .. } | LabelKind::StripViewportLabel => {
+                title_x + (title_width - f64::from(w)) / 2.
+            }
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,

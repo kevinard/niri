@@ -17,8 +17,8 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
     LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_FORECAST_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_STATUS_HEIGHT,
-    STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
+    STRIP_BUTTON_HEIGHT, STRIP_FORECAST_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_TRAY_HEIGHT,
+    STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -53,7 +53,8 @@ const OVERVIEW_INSET: f64 = 20.;
 const OVERVIEW_HEADER_OFFSET: f64 = 67.;
 const OVERVIEW_FRAME_MARGIN: f64 = 12.;
 const MAX_NAVIGATION_TITLES: usize = 5;
-const STRIP_ARROW_WIDTH: f64 = 120.;
+const STRIP_ARROW_WIDTH: f64 = STRIP_BUTTON_HEIGHT;
+const STRIP_TITLE_GAP: f64 = 8.;
 const STRIP_ARROW_GAP: f64 = 6.;
 
 const WORKSPACE_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
@@ -100,7 +101,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_viewport_outlines: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_status_label: PreviewLabel,
+    strip_forecast_bands: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_edge_labels: [PreviewLabel; 2],
@@ -206,6 +207,23 @@ struct NavigationStrip<'a, W> {
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
 
+fn navigation_spans(rects: impl Iterator<Item = Rectangle<f64, Logical>>) -> Vec<Range<f64>> {
+    let mut spans: Vec<Range<f64>> = Vec::new();
+    for rect in rects {
+        let start = rect.loc.x;
+        let end = start + rect.size.w;
+        if let Some(span) = spans
+            .last_mut()
+            .filter(|span| start <= span.end + STRIP_TITLE_GAP + 0.001)
+        {
+            span.end = end;
+        } else {
+            spans.push(start..end);
+        }
+    }
+    spans
+}
+
 struct NavigationArrow<'a, W> {
     rect: Rectangle<f64, Logical>,
     target: Option<&'a W>,
@@ -214,7 +232,6 @@ struct NavigationArrow<'a, W> {
 struct NavigationTitle<'a, W> {
     rect: Rectangle<f64, Logical>,
     window: &'a W,
-    companions: Vec<&'a W>,
     visible_after: Vec<&'a W>,
     active: bool,
     direction: Option<bool>,
@@ -557,7 +574,7 @@ impl<W: LayoutElement> Monitor<W> {
                 RefCell::new(BorderRenderElement::empty())
             }),
             strip_viewport_labels: Default::default(),
-            strip_status_label: PreviewLabel::default(),
+            strip_forecast_bands: Default::default(),
             strip_forecast_label: PreviewLabel::default(),
             strip_forecast_titles: Default::default(),
             strip_edge_labels: Default::default(),
@@ -2284,7 +2301,7 @@ impl<W: LayoutElement> Monitor<W> {
         let active_index = windows
             .iter()
             .position(|(window, ..)| window.id() == active.id())?;
-        let gap = 8.;
+        let gap = STRIP_TITLE_GAP;
         // Keep room for stepping through tiled columns even when names fill the row.
         let inset = if floating.is_empty() {
             STRIP_TRAY_PADDING + STRIP_ARROW_GAP + STRIP_ARROW_WIDTH + 2.
@@ -2292,8 +2309,7 @@ impl<W: LayoutElement> Monitor<W> {
             16.
         };
         let available = bounds.end - bounds.start - 2. * inset;
-        let title_pitch = if floating.is_empty() { 126. } else { 160. };
-        let capacity = ((available + gap) / title_pitch).floor() as usize;
+        let capacity = ((available + gap) / 160.).floor() as usize;
         let count = windows
             .len()
             .min(capacity.max(1))
@@ -2369,7 +2385,6 @@ impl<W: LayoutElement> Monitor<W> {
                         }
                     }
                     let mut visible_after = Vec::new();
-                    let mut companions = Vec::new();
                     if decorate && !moving && direction.is_some() {
                         let columns = scrolling.columns_after_activating(window.id());
                         for (column, x) in columns.into_iter().flatten() {
@@ -2377,20 +2392,12 @@ impl<W: LayoutElement> Monitor<W> {
                             if x < bounds.start - pixel || x + width > bounds.end + pixel {
                                 continue;
                             }
-                            let neighbor = column.active_window();
-                            visible_after.push(neighbor);
-                            let current = positions[&column.id()];
-                            let already_visible = current >= visible.start - pixel
-                                && current + width <= visible.end + pixel;
-                            if !already_visible && neighbor.id() != window.id() {
-                                companions.push(neighbor);
-                            }
+                            visible_after.push(column.active_window());
                         }
                     }
                     Some(NavigationTitle {
                         rect,
                         window,
-                        companions,
                         visible_after,
                         active: window.id() == active.id(),
                         direction,
@@ -2441,20 +2448,15 @@ impl<W: LayoutElement> Monitor<W> {
                 .into_iter()
                 .collect()
         } else {
-            let mut spans: Vec<Range<f64>> = Vec::new();
-            for title in titles.iter().filter(|title| title.fully_visible) {
-                let start = title.rect.loc.x;
-                let end = start + title.rect.size.w;
-                if let Some(span) = spans
-                    .last_mut()
-                    .filter(|span| start <= span.end + gap + 0.001)
-                {
-                    span.end = end;
-                } else {
-                    spans.push(start..end);
-                }
-            }
-            spans.into_iter().filter_map(viewport_mark).collect()
+            navigation_spans(
+                titles
+                    .iter()
+                    .filter(|title| title.fully_visible)
+                    .map(|title| title.rect),
+            )
+            .into_iter()
+            .filter_map(viewport_mark)
+            .collect()
         };
         Some(NavigationStrip {
             tray,
@@ -2664,6 +2666,21 @@ impl<W: LayoutElement> Monitor<W> {
         });
     }
 
+    fn preview_overlaps_tile(&self, preview: Rectangle<f64, Logical>) -> bool {
+        self.active_workspace_ref()
+            .scrolling()
+            .tiles_with_render_positions()
+            .any(|(tile, position, visible)| {
+                visible
+                    && preview
+                        .intersection(Rectangle::new(
+                            position + tile.bob_offset(),
+                            tile.tile_size(),
+                        ))
+                        .is_some()
+            })
+    }
+
     fn render_navigation_forecast<'a, R: NiriRenderer>(
         &self,
         renderer: &mut R,
@@ -2675,7 +2692,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> bool {
         let ws = self.active_workspace_ref();
         let area = self.working_area;
-        let mut top = anchor.loc.y + STRIP_BUTTON_HEIGHT + 12.;
+        let top = anchor.loc.y + STRIP_BUTTON_HEIGHT + 12.;
         let Some(clip) = self.scroll_clip(ws) else {
             return false;
         };
@@ -2690,29 +2707,13 @@ impl<W: LayoutElement> Monitor<W> {
         let gap = 8.;
         let left = (anchor.loc.x + (anchor.size.w - width) / 2.)
             .clamp(clip.start + padding, clip.end - width - padding);
-        // Leave the desktop's window controls available while previewing another layout.
-        let mut titlebars = ws
-            .scrolling()
-            .tiles_with_render_positions()
-            .filter(|(_, _, visible)| *visible)
-            .map(|(tile, position, _)| {
-                Rectangle::new(
-                    position + tile.bob_offset(),
-                    Size::from((tile.tile_size().w, tile.window_loc().y)),
-                )
-            })
-            .filter(|rect| {
-                rect.size.h > 0. && rect.loc.x < left + width && left < rect.loc.x + rect.size.w
-            })
-            .collect::<Vec<_>>();
-        titlebars.sort_by(|a, b| a.loc.y.total_cmp(&b.loc.y));
-        for titlebar in titlebars {
-            let bottom = titlebar.loc.y + titlebar.size.h + 8.;
-            if top < bottom && titlebar.loc.y < top + STRIP_FORECAST_HEIGHT {
-                top = bottom;
-            }
-        }
-        if top + STRIP_FORECAST_HEIGHT > area.loc.y + area.size.h {
+        let preview = Rectangle::new(
+            Point::from((left, top)),
+            Size::from((width, STRIP_FORECAST_HEIGHT)),
+        );
+        if top + STRIP_FORECAST_HEIGHT > area.loc.y + area.size.h
+            || self.preview_overlaps_tile(preview)
+        {
             return false;
         }
         let accent = ws.options.layout.border.active_color;
@@ -2863,9 +2864,9 @@ impl<W: LayoutElement> Monitor<W> {
                         && (title.rect.contains(point) || edge_target == Some(title.window.id()))
                 })
             });
-            let forecast = forecast.filter(|title| {
+            let inline_forecast = forecast.filter(|title| {
                 let anchor = hovered_arrow.map_or(title.rect, |arrow| arrow.rect);
-                self.render_navigation_forecast(
+                !self.render_navigation_forecast(
                     renderer,
                     target,
                     title,
@@ -2890,14 +2891,54 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
-            let mut hover_status = None;
+            if let Some(forecast) = inline_forecast {
+                let members = strip.titles.iter().filter(|title| {
+                    forecast
+                        .visible_after
+                        .iter()
+                        .any(|window| window.id() == title.window.id())
+                });
+                if members.clone().count() == forecast.visible_after.len() {
+                    let top = forecast.rect.loc.y + STRIP_BUTTON_HEIGHT + 8.;
+                    let spans = navigation_spans(members.map(|title| title.rect));
+                    for (span, label) in spans.into_iter().zip(&self.strip_forecast_bands) {
+                        let rect = Rectangle::new(
+                            Point::from((span.start, top)),
+                            Size::from((span.end - span.start, 16.)),
+                        );
+                        if self.preview_overlaps_tile(rect) {
+                            continue;
+                        }
+                        let caption = if span.contains(&forecast.rect.loc.x) {
+                            "After switch"
+                        } else {
+                            ""
+                        };
+                        if let Some(caption) = label.render(
+                            renderer.as_gles_renderer(),
+                            caption.into(),
+                            direction_background,
+                            LabelKind::StripViewportLabel,
+                            rect.size.w,
+                            scale,
+                            rect.loc,
+                            1.,
+                        ) {
+                            draw(caption);
+                        }
+                    }
+                }
+            }
             for (title, label) in strip.titles.iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let referenced = edge_target == Some(title.window.id());
                 let offscreen = title.direction.is_some();
                 let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
-                let has_forecast =
-                    forecast.is_some_and(|forecast| forecast.window.id() == title.window.id());
+                let step_target = strip.edge_actions.iter().flatten().any(|arrow| {
+                    arrow
+                        .target
+                        .is_some_and(|window| window.id() == title.window.id())
+                });
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2922,6 +2963,8 @@ impl<W: LayoutElement> Monitor<W> {
                 let background = if title.active {
                     accent
                 } else if hovered || referenced {
+                    tint_caption(direction_background, accent)
+                } else if step_target {
                     direction_background
                 } else if offscreen || title.floating {
                     surface
@@ -2931,29 +2974,10 @@ impl<W: LayoutElement> Monitor<W> {
                 let kind = LabelKind::StripButton {
                     status,
                     outlined: !title.active && (offscreen || hovered || title.floating),
-                    hovered: hovered && !moving,
+                    hovered: (hovered || referenced) && !moving,
                     focus,
                     compact,
                 };
-                let preview_hovered = hovered && preview_pointer.is_some();
-                let companion_hint = if !has_forecast && (preview_hovered || referenced) {
-                    match title.companions.as_slice() {
-                        [] => None,
-                        [neighbor] => {
-                            let name = display_title(neighbor);
-                            Some(format!("Also reveals {name}"))
-                        }
-                        companions => Some(format!("Also reveals {} more tiles", companions.len())),
-                    }
-                } else {
-                    None
-                };
-                if let Some(hint) = companion_hint {
-                    let mut rect = title.rect;
-                    rect.loc.y += STRIP_BUTTON_HEIGHT + 8.;
-                    rect.size.h = STRIP_STATUS_HEIGHT;
-                    hover_status = Some((rect, hint));
-                }
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
                     name.to_owned(),
@@ -2974,13 +2998,12 @@ impl<W: LayoutElement> Monitor<W> {
                 .enumerate()
             {
                 let Some(arrow) = edge else { continue };
-                let destination = arrow.target.map(&display_title);
-                let enabled = destination.is_some();
+                let enabled = arrow.target.is_some();
                 let rect = arrow.rect;
                 let hovered = enabled && pointer.is_some_and(|point| rect.contains(point));
                 if let Some(arrow) = label.render(
                     renderer.as_gles_renderer(),
-                    destination.unwrap_or_default().into(),
+                    String::new(),
                     if !enabled {
                         surface
                     } else if hovered {
@@ -3024,20 +3047,6 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(label);
-                }
-            }
-            if let Some((rect, text)) = hover_status {
-                if let Some(caption) = self.strip_status_label.render(
-                    renderer.as_gles_renderer(),
-                    text,
-                    surface,
-                    LabelKind::StripStatus,
-                    rect.size.w,
-                    scale,
-                    rect.loc,
-                    1.,
-                ) {
-                    draw(caption);
                 }
             }
             for (line, label) in strip.viewports.iter().zip(&self.strip_viewport_labels) {
