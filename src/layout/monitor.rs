@@ -101,7 +101,6 @@ pub struct Monitor<W: LayoutElement> {
     strip_viewport_outlines: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_forecast_bands: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_edge_labels: [PreviewLabel; 2],
@@ -574,7 +573,6 @@ impl<W: LayoutElement> Monitor<W> {
                 RefCell::new(BorderRenderElement::empty())
             }),
             strip_viewport_labels: Default::default(),
-            strip_forecast_bands: Default::default(),
             strip_forecast_label: PreviewLabel::default(),
             strip_forecast_titles: Default::default(),
             strip_edge_labels: Default::default(),
@@ -2875,12 +2873,42 @@ impl<W: LayoutElement> Monitor<W> {
                     push,
                 )
             });
+            let forecast_viewports = inline_forecast.and_then(|forecast| {
+                let members = strip.titles.iter().filter(|title| {
+                    forecast
+                        .visible_after
+                        .iter()
+                        .any(|window| window.id() == title.window.id())
+                });
+                if members.clone().count() != forecast.visible_after.len() {
+                    return None;
+                }
+                let y = forecast.rect.loc.y + STRIP_BUTTON_HEIGHT + 4.;
+                Some(
+                    navigation_spans(members.map(|title| title.rect))
+                        .into_iter()
+                        .map(|span| {
+                            Rectangle::new(
+                                Point::from((span.start, y)),
+                                Size::from((span.end - span.start, 2.)),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let viewports = forecast_viewports.as_deref().unwrap_or(&strip.viewports);
+            let preview_window = inline_forecast.filter(|_| forecast_viewports.is_some());
             let ink = caption_ink(surface);
             let gray = (ink.r + ink.g + ink.b) / 3.;
             let viewport_color = tint_caption(
                 tint_caption(Color::new_unpremul(gray, gray, gray, 1.), surface),
                 surface,
             );
+            let viewport_color = if preview_window.is_some() {
+                tint_caption(viewport_color, accent)
+            } else {
+                viewport_color
+            };
             let viewport_background = tint_caption(surface, viewport_color);
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
@@ -2891,48 +2919,16 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
-            if let Some(forecast) = inline_forecast {
-                let members = strip.titles.iter().filter(|title| {
+            for (title, label) in strip.titles.iter().zip(&self.strip_labels) {
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let referenced = edge_target == Some(title.window.id());
+                let offscreen = title.direction.is_some();
+                let in_view = preview_window.map_or(!offscreen && !title.floating, |forecast| {
                     forecast
                         .visible_after
                         .iter()
                         .any(|window| window.id() == title.window.id())
                 });
-                if members.clone().count() == forecast.visible_after.len() {
-                    let top = forecast.rect.loc.y + STRIP_BUTTON_HEIGHT + 8.;
-                    let spans = navigation_spans(members.map(|title| title.rect));
-                    for (span, label) in spans.into_iter().zip(&self.strip_forecast_bands) {
-                        let rect = Rectangle::new(
-                            Point::from((span.start, top)),
-                            Size::from((span.end - span.start, 16.)),
-                        );
-                        if self.preview_overlaps_tile(rect) {
-                            continue;
-                        }
-                        let caption = if span.contains(&forecast.rect.loc.x) {
-                            "After switch"
-                        } else {
-                            ""
-                        };
-                        if let Some(caption) = label.render(
-                            renderer.as_gles_renderer(),
-                            caption.into(),
-                            direction_background,
-                            LabelKind::StripViewportLabel,
-                            rect.size.w,
-                            scale,
-                            rect.loc,
-                            1.,
-                        ) {
-                            draw(caption);
-                        }
-                    }
-                }
-            }
-            for (title, label) in strip.titles.iter().zip(&self.strip_labels) {
-                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
-                let referenced = edge_target == Some(title.window.id());
-                let offscreen = title.direction.is_some();
                 let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
                 let step_target = strip.edge_actions.iter().flatten().any(|arrow| {
                     arrow
@@ -2966,14 +2962,15 @@ impl<W: LayoutElement> Monitor<W> {
                     tint_caption(direction_background, accent)
                 } else if step_target {
                     direction_background
-                } else if offscreen || title.floating {
-                    surface
-                } else {
+                } else if in_view {
                     viewport_background
+                } else {
+                    surface
                 };
                 let kind = LabelKind::StripButton {
                     status,
-                    outlined: !title.active && (offscreen || hovered || title.floating),
+                    outlined: !title.active
+                        && ((offscreen && !in_view) || hovered || referenced || title.floating),
                     hovered: (hovered || referenced) && !moving,
                     focus,
                     compact,
@@ -3049,15 +3046,24 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(label);
                 }
             }
-            for (line, label) in strip.viewports.iter().zip(&self.strip_viewport_labels) {
+            for (line, label) in viewports.iter().zip(&self.strip_viewport_labels) {
                 let width = 104.;
                 if line.size.w < width {
                     continue;
                 }
+                let text = match preview_window {
+                    Some(title)
+                        if (line.loc.x..line.loc.x + line.size.w).contains(&title.rect.loc.x) =>
+                    {
+                        "After switch"
+                    }
+                    Some(_) => continue,
+                    None => "In view",
+                };
                 let center = line.loc + Point::from(((line.size.w - width) / 2., -16.));
                 if let Some(caption) = label.render(
                     renderer.as_gles_renderer(),
-                    "In view".into(),
+                    text.into(),
                     Color {
                         a: 0.,
                         ..viewport_background
@@ -3080,11 +3086,10 @@ impl<W: LayoutElement> Monitor<W> {
                     .strip_viewport_backings
                     .iter()
                     .map(|backing| (backing, viewport_background, 0.));
-                let pairs = strip
-                    .viewports
+                let pairs = viewports
                     .iter()
                     .zip(outlines)
-                    .chain(strip.viewports.iter().zip(backings));
+                    .chain(viewports.iter().zip(backings));
                 for (line, (element, color, width)) in pairs {
                     let size = Size::from((line.size.w, 48.));
                     let location = line.loc - Point::from((0., 46.));
