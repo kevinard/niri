@@ -2895,6 +2895,31 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
+            for (line, label) in viewports.iter().zip(&self.strip_viewport_labels) {
+                let previewing = preview_window.is_some();
+                let width = if previewing { 72. } else { 104. };
+                if line.size.w < width {
+                    continue;
+                }
+                // During hover the legend sits over the top edge of the current group.
+                let offset = if previewing { 52. } else { 16. };
+                let center = line.loc + Point::from(((line.size.w - width) / 2., -offset));
+                if let Some(caption) = label.render(
+                    renderer.as_gles_renderer(),
+                    "In view".into(),
+                    Color {
+                        a: if previewing { 1. } else { 0. },
+                        ..viewport_background
+                    },
+                    LabelKind::StripViewportLabel,
+                    width,
+                    scale,
+                    center,
+                    1.,
+                ) {
+                    draw(caption);
+                }
+            }
             for (title, label) in strip.titles.iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let referenced = edge_target == Some(title.window.id());
@@ -2988,8 +3013,16 @@ impl<W: LayoutElement> Monitor<W> {
                 {
                     let takes_focus = window.id() == preview.window.id();
                     let title = display_title(window);
+                    let stays = strip
+                        .titles
+                        .iter()
+                        .any(|title| title.fully_visible && title.window.id() == window.id());
                     let (text, background) = if takes_focus {
-                        (format!("Focus {title}"), accent)
+                        let pending =
+                            tint_caption(tint_caption(viewport_background, accent), accent);
+                        (format!("Focus {title}"), pending)
+                    } else if stays {
+                        (format!("{title} stays"), viewport_background)
                     } else {
                         (title.to_owned(), viewport_background)
                     };
@@ -3064,28 +3097,6 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(label);
-                }
-            }
-            for (line, label) in viewports.iter().zip(&self.strip_viewport_labels) {
-                let width = 104.;
-                if preview_window.is_some() || line.size.w < width {
-                    continue;
-                }
-                let center = line.loc + Point::from(((line.size.w - width) / 2., -16.));
-                if let Some(caption) = label.render(
-                    renderer.as_gles_renderer(),
-                    "In view".into(),
-                    Color {
-                        a: 0.,
-                        ..viewport_background
-                    },
-                    LabelKind::StripViewportLabel,
-                    width,
-                    scale,
-                    center,
-                    1.,
-                ) {
-                    draw(caption);
                 }
             }
             if BorderRenderElement::has_shader(renderer) {
