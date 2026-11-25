@@ -2400,7 +2400,7 @@ impl<W: LayoutElement> Monitor<W> {
         });
         let viewport_mark = |span: Range<f64>| {
             uncovered(Rectangle::new(
-                Point::from((span.start, y + STRIP_BUTTON_HEIGHT)),
+                Point::from((span.start, y + STRIP_BUTTON_HEIGHT + 4.)),
                 Size::from((span.end - span.start, 2.)),
             ))
         };
@@ -2650,7 +2650,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> bool {
         let ws = self.active_workspace_ref();
         let area = self.working_area;
-        let top = title.rect.loc.y + STRIP_BUTTON_HEIGHT + 8.;
+        let top = title.rect.loc.y + STRIP_BUTTON_HEIGHT + 12.;
         let Some(clip) = self.scroll_clip(ws) else {
             return false;
         };
@@ -2912,7 +2912,7 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 if let Some(hint) = companion_hint {
                     let mut rect = title.rect;
-                    rect.loc.y += STRIP_BUTTON_HEIGHT + 4.;
+                    rect.loc.y += STRIP_BUTTON_HEIGHT + 8.;
                     rect.size.h = STRIP_STATUS_HEIGHT;
                     hover_status = Some((rect, hint));
                 }
@@ -3001,32 +3001,32 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(caption);
                 }
             }
-            if !moving {
-                for (line, label) in strip.viewports.iter().zip(&self.strip_viewport_labels) {
-                    if line.size.w < 104. {
-                        continue;
-                    }
-                    if let Some(caption) = label.render(
-                        renderer.as_gles_renderer(),
-                        "In view".into(),
-                        Color {
-                            a: 0.,
-                            ..viewport_background
-                        },
-                        LabelKind::StripViewportLabel,
-                        line.size.w,
-                        scale,
-                        line.loc - Point::from((0., 12.)),
-                        1.,
-                    ) {
-                        draw(caption);
-                    }
+            for (line, label) in strip.viewports.iter().zip(&self.strip_viewport_labels) {
+                let width = 104.;
+                if line.size.w < width {
+                    continue;
+                }
+                let center = line.loc + Point::from(((line.size.w - width) / 2., -16.));
+                if let Some(caption) = label.render(
+                    renderer.as_gles_renderer(),
+                    "In view".into(),
+                    Color {
+                        a: 0.,
+                        ..viewport_background
+                    },
+                    LabelKind::StripViewportLabel,
+                    width,
+                    scale,
+                    center,
+                    1.,
+                ) {
+                    draw(caption);
                 }
             }
             if BorderRenderElement::has_shader(renderer) {
                 for (line, backing) in strip.viewports.iter().zip(&self.strip_viewport_backings) {
-                    let size = Size::from((line.size.w, 44.));
-                    let location = line.loc - Point::from((0., 42.));
+                    let size = Size::from((line.size.w, 48.));
+                    let location = line.loc - Point::from((0., 46.));
                     let geometry = Rectangle::from_size(size);
                     let mut backing = backing.borrow_mut();
                     backing.update(

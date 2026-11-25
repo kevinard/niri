@@ -24,7 +24,7 @@ pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 28.;
 pub(super) const STRIP_FORECAST_HEIGHT: f64 = 141.;
 pub(super) const STRIP_STATUS_HEIGHT: f64 = 20.;
-pub(super) const STRIP_TRAY_HEIGHT: f64 = 48.;
+pub(super) const STRIP_TRAY_HEIGHT: f64 = 52.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
@@ -409,7 +409,7 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
     let font = if key.kind == LabelKind::StripViewportLabel {
-        "sans-serif Medium 11px"
+        "sans-serif Bold 12px"
     } else if key.kind == LabelKind::StripStatus {
         "sans-serif Bold 13px"
     } else if matches!(key.kind, LabelKind::StripButton { .. })
@@ -453,7 +453,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
         LabelKind::StripStatus => (max_width, STRIP_STATUS_HEIGHT),
-        LabelKind::StripViewportLabel => (max_width, 14.),
+        LabelKind::StripViewportLabel => (max_width, 16.),
         LabelKind::StripForecast => (max_width, STRIP_FORECAST_HEIGHT),
         LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
         LabelKind::StripButton { .. }
