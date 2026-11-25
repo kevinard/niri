@@ -214,6 +214,7 @@ struct NavigationTitle<'a, W> {
     visible_after: Vec<&'a W>,
     active: bool,
     direction: Option<bool>,
+    hidden: bool,
     fully_visible: bool,
     floating: bool,
 }
@@ -2197,9 +2198,18 @@ impl<W: LayoutElement> Monitor<W> {
                 let clipped_left = (visible.start - x).max(0.);
                 let clipped_right = (x + column.width() - visible.end).max(0.);
                 let fully_visible = clipped_left.max(clipped_right) <= pixel;
+                let hidden = clipped_left.max(clipped_right) >= column.width() - pixel;
                 let direction = (!fully_visible && window.id() != active.id())
                     .then_some(clipped_left >= clipped_right);
-                (window, direction, fully_visible, false, column.width(), x)
+                (
+                    window,
+                    direction,
+                    fully_visible,
+                    hidden,
+                    false,
+                    column.width(),
+                    x,
+                )
             })
             .collect::<Vec<_>>();
         let mut floating = ws
@@ -2211,6 +2221,7 @@ impl<W: LayoutElement> Monitor<W> {
             (
                 tile.window(),
                 None,
+                false,
                 false,
                 true,
                 tile.tile_size().w,
@@ -2253,12 +2264,12 @@ impl<W: LayoutElement> Monitor<W> {
         let button_space = (available - action_space - gaps).min(194. * count as f64);
         let widest_window = windows
             .iter()
-            .map(|(_, _, _, _, width, _)| *width)
+            .map(|(_, _, _, _, _, width, _)| *width)
             .fold(1., f64::max);
         let weight = |width: f64| width.max(widest_window * 0.55);
         let total_weight: f64 = windows
             .iter()
-            .map(|(_, _, _, _, width, _)| weight(*width))
+            .map(|(_, _, _, _, _, width, _)| weight(*width))
             .sum();
         let tabs_width = button_space + gaps;
         let tray_width = tabs_width + action_space;
@@ -2283,7 +2294,7 @@ impl<W: LayoutElement> Monitor<W> {
         let titles: Vec<_> = windows
             .iter()
             .filter_map(
-                |&(window, direction, fully_visible, floating, window_width, column_x)| {
+                |&(window, direction, fully_visible, hidden, floating, window_width, column_x)| {
                     let width = button_space * weight(window_width) / total_weight;
                     let x = next_x;
                     next_x += width + gap;
@@ -2329,6 +2340,7 @@ impl<W: LayoutElement> Monitor<W> {
                         visible_after,
                         active: window.id() == active.id(),
                         direction,
+                        hidden,
                         fully_visible,
                         floating,
                     })
@@ -2858,7 +2870,7 @@ impl<W: LayoutElement> Monitor<W> {
                     outlined: !title.active,
                     hovered: hovered && !moving,
                     focus,
-                    direction: title.direction,
+                    direction: title.direction.filter(|_| title.hidden),
                     compact,
                 };
                 let companion_hint = if !has_forecast && (hovered || referenced) {
