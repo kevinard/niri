@@ -428,11 +428,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub(super) fn distance_to_stationary_view(&self) -> Option<f64> {
+        self.remaining_view_movement().map(f64::abs)
+    }
+
+    pub(super) fn remaining_view_movement(&self) -> Option<f64> {
         match &self.view_offset {
             ViewOffset::Static(_) if !self.are_transitions_ongoing() => Some(0.),
-            ViewOffset::Animation(animation) => {
-                Some((animation.to() - animation.clamped_value()).abs())
-            }
+            ViewOffset::Animation(animation) => Some(animation.to() - animation.clamped_value()),
             _ => None,
         }
     }
@@ -1507,6 +1509,27 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.activate_column(column_idx);
 
         true
+    }
+
+    pub(super) fn columns_after_activating(
+        &self,
+        window: &W::Id,
+    ) -> Option<impl Iterator<Item = (&Column<W>, f64)> + '_> {
+        let idx = self
+            .columns
+            .iter()
+            .position(|column| column.contains(window))?;
+        if !self.columns[idx].sizing_mode().is_normal() {
+            return None;
+        }
+        let view_pos = if idx == self.active_column_idx {
+            self.target_view_pos()
+        } else {
+            self.column_x(idx)
+                + self.compute_new_view_offset_for_column(None, idx, Some(self.active_column_idx))
+        };
+        let positions = self.column_xs(self.data.iter().copied());
+        Some(zip(&self.columns, positions).map(move |(column, x)| (column, x - view_pos)))
     }
 
     pub fn start_close_animation_for_window(
@@ -5693,19 +5716,10 @@ fn compute_new_view_offset(
     }
 }
 
-pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 64.;
-pub(super) const SCROLL_HANDLE_LANE: f64 = 58.;
+pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 56.;
 
 pub(super) fn navigation_strip_fits(area: Rectangle<f64, Logical>) -> bool {
     area.size.w >= 420. && area.size.h >= 400.
-}
-
-pub(super) fn scroll_handle_inset(area: Rectangle<f64, Logical>) -> f64 {
-    if navigation_strip_fits(area) && area.size.w >= 720. {
-        SCROLL_HANDLE_LANE
-    } else {
-        0.
-    }
 }
 
 fn compute_scrolling_area(
@@ -5715,10 +5729,7 @@ fn compute_scrolling_area(
 ) -> Rectangle<f64, Logical> {
     let mut struts = options.layout.struts;
     if options.layout.clip_scroll_to_work_area && navigation_strip_fits(parent_area) {
-        struts.bottom.0 = struts.bottom.0.max(NAVIGATION_STRIP_HEIGHT);
-        let inset = scroll_handle_inset(parent_area);
-        struts.left.0 += inset;
-        struts.right.0 += inset;
+        struts.top.0 = struts.top.0.max(NAVIGATION_STRIP_HEIGHT);
     }
     compute_working_area(parent_area, scale, struts)
 }
