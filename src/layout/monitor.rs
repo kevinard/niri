@@ -18,8 +18,8 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
     LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_FORECAST_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT,
-    STRIP_REVEAL_GROUP_HEIGHT, STRIP_STATUS_HEIGHT, STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
+    STRIP_BUTTON_HEIGHT, STRIP_FORECAST_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_STATUS_HEIGHT,
+    STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -96,7 +96,6 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_element: InsertHintElement,
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_reveal_labels: [PreviewLabel; MAX_NAVIGATION_TITLES / 2],
     strip_viewport_marks: [RefCell<SolidColorBuffer>; MAX_NAVIGATION_TITLES],
     strip_status_label: PreviewLabel,
     strip_forecast_label: PreviewLabel,
@@ -199,7 +198,6 @@ struct NavigationStrip<'a, W> {
     viewports: Vec<Rectangle<f64, Logical>>,
     motion_left: Option<bool>,
     edge_actions: [Option<NavigationArrow<'a, W>>; 2],
-    reveal_groups: Vec<NavigationRevealGroup>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -207,12 +205,6 @@ struct NavigationStrip<'a, W> {
 struct NavigationArrow<'a, W> {
     rect: Rectangle<f64, Logical>,
     target: Option<&'a W>,
-    reveal_count: usize,
-}
-
-struct NavigationRevealGroup {
-    rect: Rectangle<f64, Logical>,
-    named_action: bool,
 }
 
 struct NavigationTitle<'a, W> {
@@ -220,11 +212,9 @@ struct NavigationTitle<'a, W> {
     window: &'a W,
     companions: Vec<&'a W>,
     visible_after: Vec<&'a W>,
-    reveal_group: Option<usize>,
     active: bool,
     direction: Option<bool>,
     fully_visible: bool,
-    partly_visible: bool,
     floating: bool,
 }
 
@@ -516,7 +506,6 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
-            strip_reveal_labels: Default::default(),
             strip_viewport_marks: Default::default(),
             strip_status_label: PreviewLabel::default(),
             strip_forecast_label: PreviewLabel::default(),
@@ -2210,19 +2199,9 @@ impl<W: LayoutElement> Monitor<W> {
                 let clipped_left = (visible.start - x).max(0.);
                 let clipped_right = (x + column.width() - visible.end).max(0.);
                 let fully_visible = clipped_left.max(clipped_right) <= pixel;
-                let partly_visible =
-                    !fully_visible && clipped_left + clipped_right < column.width() - pixel;
                 let direction = (!fully_visible && window.id() != active.id())
                     .then_some(clipped_left >= clipped_right);
-                (
-                    window,
-                    direction,
-                    fully_visible,
-                    partly_visible,
-                    false,
-                    column.width(),
-                    x,
-                )
+                (window, direction, fully_visible, false, column.width(), x)
             })
             .collect::<Vec<_>>();
         let mut floating = ws
@@ -2234,7 +2213,6 @@ impl<W: LayoutElement> Monitor<W> {
             (
                 tile.window(),
                 None,
-                false,
                 false,
                 true,
                 tile.tile_size().w,
@@ -2277,12 +2255,12 @@ impl<W: LayoutElement> Monitor<W> {
         let button_space = (available - action_space - gaps).min(194. * count as f64);
         let widest_window = windows
             .iter()
-            .map(|(_, _, _, _, _, width, _)| *width)
+            .map(|(_, _, _, _, width, _)| *width)
             .fold(1., f64::max);
         let weight = |width: f64| width.max(widest_window * 0.55);
         let total_weight: f64 = windows
             .iter()
-            .map(|(_, _, _, _, _, width, _)| weight(*width))
+            .map(|(_, _, _, _, width, _)| weight(*width))
             .sum();
         let tabs_width = button_space + gaps;
         let tray_width = tabs_width + action_space;
@@ -2304,18 +2282,10 @@ impl<W: LayoutElement> Monitor<W> {
         };
         let mut next_x = start;
         let mut motion_extent = f64::INFINITY..f64::NEG_INFINITY;
-        let mut titles: Vec<_> = windows
+        let titles: Vec<_> = windows
             .iter()
             .filter_map(
-                |&(
-                    window,
-                    direction,
-                    fully_visible,
-                    partly_visible,
-                    floating,
-                    window_width,
-                    column_x,
-                )| {
+                |&(window, direction, fully_visible, floating, window_width, column_x)| {
                     let width = button_space * weight(window_width) / total_weight;
                     let x = next_x;
                     next_x += width + gap;
@@ -2337,7 +2307,7 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                     let mut visible_after = Vec::new();
                     let mut companions = Vec::new();
-                    if !moving && direction.is_some() {
+                    if decorate && !moving && direction.is_some() {
                         let columns = scrolling.columns_after_activating(window.id());
                         for (column, x) in columns.into_iter().flatten() {
                             let width = column.width();
@@ -2359,11 +2329,9 @@ impl<W: LayoutElement> Monitor<W> {
                         window,
                         companions,
                         visible_after,
-                        reveal_group: None,
                         active: window.id() == active.id(),
                         direction,
                         fully_visible,
-                        partly_visible,
                         floating,
                     })
                 },
@@ -2382,7 +2350,7 @@ impl<W: LayoutElement> Monitor<W> {
             Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
             Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
         ));
-        let mut edge_actions = if floating.is_empty() && has_offscreen_windows {
+        let edge_actions = if floating.is_empty() && has_offscreen_windows {
             [true, false].map(|left| {
                 let tray = tray?;
                 let mut targets = titles.iter().filter(|title| title.direction == Some(left));
@@ -2399,90 +2367,11 @@ impl<W: LayoutElement> Monitor<W> {
                 Some(NavigationArrow {
                     rect: button(x, width)?,
                     target: target.map(|title| title.window),
-                    reveal_count: 0,
                 })
             })
         } else {
             [None, None]
         };
-        for title in &mut titles {
-            if title
-                .direction
-                .is_some_and(|left| edge_actions[usize::from(!left)].is_none())
-            {
-                title.rect.size.h = STRIP_BUTTON_HEIGHT;
-            }
-        }
-        let mut reveal_groups = Vec::new();
-        if !moving && !floating_visible {
-            let mut first = 0;
-            while first < titles.len() {
-                let shared_destination = |other: &NavigationTitle<'_, W>| {
-                    let base = &titles[first];
-                    base.direction.is_some()
-                        && base.direction == other.direction
-                        && base.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT
-                        && other.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT
-                        && base
-                            .companions
-                            .iter()
-                            .any(|window| window.id() == other.window.id())
-                        && base
-                            .visible_after
-                            .iter()
-                            .map(|window| window.id())
-                            .eq(other.visible_after.iter().map(|window| window.id()))
-                };
-                let end = first
-                    + 1
-                    + titles[first + 1..]
-                        .iter()
-                        .take_while(|title| shared_destination(title))
-                        .count();
-                if end - first > 1 {
-                    let left = titles[first].rect.loc.x;
-                    let last = titles[end - 1].rect;
-                    let index = reveal_groups.len();
-                    reveal_groups.push(NavigationRevealGroup {
-                        rect: Rectangle::new(
-                            Point::from((left, y - 2.)),
-                            Size::from((
-                                last.loc.x + last.size.w - left,
-                                STRIP_REVEAL_GROUP_HEIGHT,
-                            )),
-                        ),
-                        named_action: false,
-                    });
-                    for title in &mut titles[first..end] {
-                        title.reveal_group = Some(index);
-                    }
-                }
-                first = end;
-            }
-        }
-        for (index, arrow) in edge_actions.iter_mut().enumerate() {
-            let Some(arrow) = arrow else { continue };
-            let Some(window) = arrow.target else { continue };
-            let Some(title) = titles.iter().find(|title| title.window.id() == window.id()) else {
-                continue;
-            };
-            let Some(group) = title.reveal_group else {
-                continue;
-            };
-            let width = 118.;
-            let x = if index == 0 {
-                arrow.rect.loc.x + arrow.rect.size.w - width
-            } else {
-                arrow.rect.loc.x
-            };
-            if x >= bounds.start && x + width <= bounds.end {
-                if let Some(rect) = button(x, width) {
-                    arrow.rect = rect;
-                    arrow.reveal_count = title.companions.len() + 1;
-                    reveal_groups[group].named_action = true;
-                }
-            }
-        }
         let viewports = if !decorate {
             Vec::new()
         } else if moving {
@@ -2512,7 +2401,6 @@ impl<W: LayoutElement> Monitor<W> {
             viewports,
             motion_left: moving_left,
             edge_actions,
-            reveal_groups,
             titles,
             layer_action,
         })
@@ -2908,13 +2796,10 @@ impl<W: LayoutElement> Monitor<W> {
             };
             let mut hover_status = None;
             for (index, (title, label)) in strip.titles.iter().zip(&self.strip_labels).enumerate() {
-                let hovered = pointer.is_some_and(|point| title.rect.contains(point))
-                    || edge_target == Some(title.window.id());
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let referenced = edge_target == Some(title.window.id());
                 let offscreen = title.direction.is_some();
                 let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
-                let named_reveal = title
-                    .reveal_group
-                    .is_some_and(|group| strip.reveal_groups[group].named_action);
                 let has_forecast =
                     forecast.is_some_and(|forecast| forecast.window.id() == title.window.id());
                 let status = if title.floating {
@@ -2943,34 +2828,24 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let background = if title.active {
                     accent
-                } else if offscreen && hovered {
+                } else if offscreen && (hovered || referenced) {
                     tint_caption(direction_background, accent)
-                } else if offscreen || hovered {
+                } else if offscreen || hovered || referenced {
                     direction_background
                 } else if !title.floating {
                     tint_caption(surface, accent)
                 } else {
                     surface
                 };
-                let fallback = title.direction.filter(|_| !compact);
-                let kind = if let Some(left) = fallback {
-                    LabelKind::ScrollWindow {
-                        left,
-                        hovered: hovered && !moving,
-                    }
-                } else {
-                    LabelKind::StripButton {
-                        status,
-                        outlined: !title.active && (title.reveal_group.is_none() || hovered),
-                        hovered: hovered && !moving,
-                        focus,
-                        compact,
-                    }
+                let kind = LabelKind::StripButton {
+                    status,
+                    outlined: !title.active,
+                    hovered: hovered && !moving,
+                    focus,
+                    direction: motion.or(title.direction),
+                    compact,
                 };
-                let companion_hint = if !has_forecast
-                    && !named_reveal
-                    && (hovered || fallback.is_some())
-                {
+                let companion_hint = if !has_forecast && (hovered || referenced) {
                     match title.companions.as_slice() {
                         [] => None,
                         [neighbor] => {
@@ -2987,42 +2862,15 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     None
                 };
-                let verb = if title.partly_visible {
-                    "Scroll to"
-                } else {
-                    "Reveal"
-                };
-                let text = if let Some(left) = motion {
-                    if left {
-                        format!("← Moving to {name}")
-                    } else {
-                        format!("Moving to {name} →")
-                    }
-                } else if moving && compact {
-                    name.to_owned()
-                } else if named_reveal {
-                    format!("Focus {name}")
-                } else if fallback.is_some() {
-                    let reveal = companion_hint.as_deref().unwrap_or("Moves into view");
-                    format!("{verb} {name}\n{reveal}")
-                } else if offscreen {
-                    if let Some(hint) = companion_hint {
-                        let mut rect = title.rect;
-                        rect.loc.y += STRIP_BUTTON_HEIGHT + 4.;
-                        rect.size.h = STRIP_STATUS_HEIGHT;
-                        hover_status = Some((rect, hint));
-                    }
-                    if title.reveal_group.is_some() {
-                        name.to_owned()
-                    } else {
-                        format!("{verb} {name}")
-                    }
-                } else {
-                    name.to_owned()
-                };
+                if let Some(hint) = companion_hint {
+                    let mut rect = title.rect;
+                    rect.loc.y += STRIP_BUTTON_HEIGHT + 4.;
+                    rect.size.h = STRIP_STATUS_HEIGHT;
+                    hover_status = Some((rect, hint));
+                }
                 if let Some(label) = label.render(
                     renderer.as_gles_renderer(),
-                    text,
+                    name.to_owned(),
                     background,
                     kind,
                     title.rect.size.w - 6.,
@@ -3045,11 +2893,7 @@ impl<W: LayoutElement> Monitor<W> {
                 let hovered = enabled && pointer.is_some_and(|point| rect.contains(point));
                 if let Some(arrow) = label.render(
                     renderer.as_gles_renderer(),
-                    if arrow.reveal_count > 0 {
-                        format!("Show {} tiles", arrow.reveal_count)
-                    } else {
-                        String::new()
-                    },
+                    String::new(),
                     if !enabled {
                         surface
                     } else if hovered {
@@ -3057,7 +2901,7 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         direction_background
                     },
-                    LabelKind::StripEdgeAction {
+                    LabelKind::ScrollWindow {
                         left: index == 0,
                         hovered: hovered && !moving,
                     },
@@ -3107,39 +2951,6 @@ impl<W: LayoutElement> Monitor<W> {
                     1.,
                 ) {
                     draw(caption);
-                }
-            }
-            for (group, label) in strip.reveal_groups.iter().zip(&self.strip_reveal_labels) {
-                let (text, kind, location) = if group.named_action {
-                    (
-                        "",
-                        LabelKind::StripButton {
-                            status: None,
-                            outlined: false,
-                            hovered: false,
-                            focus: FocusMarker::None,
-                            compact: true,
-                        },
-                        group.rect.loc + Point::from((0., 2.)),
-                    )
-                } else {
-                    (
-                        "Reveal together",
-                        LabelKind::StripRevealGroup,
-                        group.rect.loc,
-                    )
-                };
-                if let Some(group) = label.render(
-                    renderer.as_gles_renderer(),
-                    text.into(),
-                    tint_caption(surface, accent),
-                    kind,
-                    group.rect.size.w,
-                    scale,
-                    location,
-                    1.,
-                ) {
-                    draw(group);
                 }
             }
             // Put the shared surface behind the window targets.
