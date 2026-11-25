@@ -104,6 +104,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_edge_labels: [PreviewLabel; 2],
+    strip_step_labels: [PreviewLabel; 2],
     dismissed_preview_arrow: Cell<Option<Rectangle<f64, Logical>>>,
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
@@ -561,6 +562,7 @@ impl<W: LayoutElement> Monitor<W> {
             strip_forecast_label: PreviewLabel::default(),
             strip_forecast_titles: Default::default(),
             strip_edge_labels: Default::default(),
+            strip_step_labels: Default::default(),
             dismissed_preview_arrow: Cell::new(None),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
@@ -2668,12 +2670,13 @@ impl<W: LayoutElement> Monitor<W> {
         renderer: &mut R,
         target: RenderTarget,
         title: &NavigationTitle<'_, W>,
+        anchor: Rectangle<f64, Logical>,
         display_title: impl Fn(&W) -> &'a str,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) -> bool {
         let ws = self.active_workspace_ref();
         let area = self.working_area;
-        let mut top = title.rect.loc.y + STRIP_BUTTON_HEIGHT + 12.;
+        let mut top = anchor.loc.y + STRIP_BUTTON_HEIGHT + 12.;
         let Some(clip) = self.scroll_clip(ws) else {
             return false;
         };
@@ -2686,7 +2689,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let padding = 10.;
         let gap = 8.;
-        let left = (title.rect.loc.x + (title.rect.size.w - width) / 2.)
+        let left = (anchor.loc.x + (anchor.size.w - width) / 2.)
             .clamp(clip.start + padding, clip.end - width - padding);
         // Leave the desktop's window controls available while previewing another layout.
         let mut titlebars = ws
@@ -2727,7 +2730,8 @@ impl<W: LayoutElement> Monitor<W> {
         let mut x = left + padding;
         for (window, label) in windows.iter().zip(&self.strip_forecast_titles) {
             let width = available * weight(*window) / total;
-            let rect = Rectangle::new(Point::from((x, top + 32.)), Size::from((width, 99.)));
+            let height = STRIP_FORECAST_HEIGHT - 42.;
+            let rect = Rectangle::new(Point::from((x, top + 32.)), Size::from((width, height)));
             let focused = window.id() == title.window.id();
             if focused {
                 ws.overview_caption.render_selection(
@@ -2773,7 +2777,10 @@ impl<W: LayoutElement> Monitor<W> {
             self.render_scroll_preview(
                 renderer,
                 target,
-                Rectangle::new(rect.loc + Point::from((0., 22.)), Size::from((width, 77.))),
+                Rectangle::new(
+                    rect.loc + Point::from((0., 22.)),
+                    Size::from((width, height - 22.)),
+                ),
                 *window,
                 1.,
                 push,
@@ -2833,15 +2840,16 @@ impl<W: LayoutElement> Monitor<W> {
                     .position(|candidate| candidate.id() == window.id())
                     .map_or("Window", |index| names[index])
             };
-            let edge_target = preview_pointer.and_then(|point| {
+            let hovered_arrow = preview_pointer.and_then(|point| {
                 strip
                     .edge_actions
                     .iter()
                     .flatten()
-                    .find(|arrow| arrow.rect.contains(point))
-                    .and_then(|arrow| arrow.target)
-                    .map(|window| window.id())
+                    .find(|arrow| arrow.rect.contains(point) && arrow.target.is_some())
             });
+            let edge_target = hovered_arrow
+                .and_then(|arrow| arrow.target)
+                .map(|window| window.id());
             let forecast = preview_pointer.and_then(|point| {
                 strip.titles.iter().find(|title| {
                     !moving
@@ -2857,7 +2865,15 @@ impl<W: LayoutElement> Monitor<W> {
                 })
             });
             let forecast = forecast.filter(|title| {
-                self.render_navigation_forecast(renderer, target, title, &display_title, push)
+                let anchor = hovered_arrow.map_or(title.rect, |arrow| arrow.rect);
+                self.render_navigation_forecast(
+                    renderer,
+                    target,
+                    title,
+                    anchor,
+                    &display_title,
+                    push,
+                )
             });
             let ink = caption_ink(surface);
             let gray = (ink.r + ink.g + ink.b) / 3.;
@@ -2982,6 +2998,38 @@ impl<W: LayoutElement> Monitor<W> {
                     if enabled { 1. } else { 0.35 },
                 ) {
                     draw(arrow);
+                }
+            }
+            if !moving {
+                for (index, (arrow, label)) in strip
+                    .edge_actions
+                    .iter()
+                    .zip(&self.strip_step_labels)
+                    .enumerate()
+                {
+                    let Some(window) = arrow.as_ref().and_then(|arrow| arrow.target) else {
+                        continue;
+                    };
+                    let Some(title) = strip
+                        .titles
+                        .iter()
+                        .find(|title| title.window.id() == window.id())
+                    else {
+                        continue;
+                    };
+                    let location = title.rect.loc + Point::from((0., STRIP_GROUP_BUTTON_HEIGHT));
+                    if let Some(caption) = label.render(
+                        renderer.as_gles_renderer(),
+                        ["Previous", "Next"][index].into(),
+                        Color { a: 0., ..surface },
+                        LabelKind::StripViewportLabel,
+                        title.rect.size.w,
+                        scale,
+                        location,
+                        1.,
+                    ) {
+                        draw(caption);
+                    }
                 }
             }
             if let Some((rect, _)) = strip.layer_action {
