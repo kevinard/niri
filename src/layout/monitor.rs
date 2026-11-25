@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::iter::zip;
@@ -104,6 +104,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_edge_labels: [PreviewLabel; 2],
+    dismissed_preview_arrow: Cell<Option<Rectangle<f64, Logical>>>,
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
     overview_shortcuts_label: PreviewLabel,
@@ -560,6 +561,7 @@ impl<W: LayoutElement> Monitor<W> {
             strip_forecast_label: PreviewLabel::default(),
             strip_forecast_titles: Default::default(),
             strip_edge_labels: Default::default(),
+            dismissed_preview_arrow: Cell::new(None),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
             overview_shortcuts_label: PreviewLabel::default(),
@@ -2585,6 +2587,28 @@ impl<W: LayoutElement> Monitor<W> {
             })
     }
 
+    pub fn dismiss_navigation_preview(&self, position: Point<f64, Logical>) {
+        let arrow = self.navigation_strip(false).and_then(|strip| {
+            strip
+                .edge_actions
+                .into_iter()
+                .flatten()
+                .find(|arrow| arrow.rect.contains(position))
+                .map(|arrow| arrow.rect)
+        });
+        self.dismissed_preview_arrow.set(arrow);
+    }
+
+    pub fn update_navigation_preview_pointer(&self, position: Option<Point<f64, Logical>>) {
+        if self
+            .dismissed_preview_arrow
+            .get()
+            .is_some_and(|arrow| position.is_none_or(|point| !arrow.contains(point)))
+        {
+            self.dismissed_preview_arrow.set(None);
+        }
+    }
+
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
             || self
@@ -2649,7 +2673,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> bool {
         let ws = self.active_workspace_ref();
         let area = self.working_area;
-        let top = title.rect.loc.y + STRIP_BUTTON_HEIGHT + 12.;
+        let mut top = title.rect.loc.y + STRIP_BUTTON_HEIGHT + 12.;
         let Some(clip) = self.scroll_clip(ws) else {
             return false;
         };
@@ -2657,13 +2681,38 @@ impl<W: LayoutElement> Monitor<W> {
         let width = (188. * windows.len() as f64)
             .clamp(236., 480.)
             .min(clip.end - clip.start - 20.);
-        if width < 210. || top + STRIP_FORECAST_HEIGHT > area.loc.y + area.size.h {
+        if width < 210. {
             return false;
         }
         let padding = 10.;
         let gap = 8.;
         let left = (title.rect.loc.x + (title.rect.size.w - width) / 2.)
             .clamp(clip.start + padding, clip.end - width - padding);
+        // Leave the desktop's window controls available while previewing another layout.
+        let mut titlebars = ws
+            .scrolling()
+            .tiles_with_render_positions()
+            .filter(|(_, _, visible)| *visible)
+            .map(|(tile, position, _)| {
+                Rectangle::new(
+                    position + tile.bob_offset(),
+                    Size::from((tile.tile_size().w, tile.window_loc().y)),
+                )
+            })
+            .filter(|rect| {
+                rect.size.h > 0. && rect.loc.x < left + width && left < rect.loc.x + rect.size.w
+            })
+            .collect::<Vec<_>>();
+        titlebars.sort_by(|a, b| a.loc.y.total_cmp(&b.loc.y));
+        for titlebar in titlebars {
+            let bottom = titlebar.loc.y + titlebar.size.h + 8.;
+            if top < bottom && titlebar.loc.y < top + STRIP_FORECAST_HEIGHT {
+                top = bottom;
+            }
+        }
+        if top + STRIP_FORECAST_HEIGHT > area.loc.y + area.size.h {
+            return false;
+        }
         let accent = ws.options.layout.border.active_color;
         let surface = caption_background(accent, ws.options.layout.background_color, false);
         let scale = self.scale.fractional_scale();
@@ -2706,7 +2755,7 @@ impl<W: LayoutElement> Monitor<W> {
                     tint_caption(surface, accent)
                 },
                 LabelKind::Preview {
-                    badge: (focused && width >= 108.).then_some("Next focus"),
+                    badge: None,
                     current: false,
                 },
                 width,
@@ -2733,7 +2782,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
         if let Some(caption) = self.strip_forecast_label.render(
             renderer.as_gles_renderer(),
-            "In view after switch".into(),
+            format!("Switch to {}", display_title(title.window)),
             surface,
             LabelKind::StripForecast,
             width,
@@ -2758,6 +2807,11 @@ impl<W: LayoutElement> Monitor<W> {
         pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
+        let preview_pointer = pointer.filter(|point| {
+            self.dismissed_preview_arrow
+                .get()
+                .is_none_or(|arrow| !arrow.contains(*point))
+        });
         if let Some(strip) = self.navigation_strip(true) {
             let ws = self.active_workspace_ref();
             let accent = ws.options.layout.border.active_color;
@@ -2779,7 +2833,7 @@ impl<W: LayoutElement> Monitor<W> {
                     .position(|candidate| candidate.id() == window.id())
                     .map_or("Window", |index| names[index])
             };
-            let edge_target = pointer.and_then(|point| {
+            let edge_target = preview_pointer.and_then(|point| {
                 strip
                     .edge_actions
                     .iter()
@@ -2788,7 +2842,7 @@ impl<W: LayoutElement> Monitor<W> {
                     .and_then(|arrow| arrow.target)
                     .map(|window| window.id())
             });
-            let forecast = pointer.and_then(|point| {
+            let forecast = preview_pointer.and_then(|point| {
                 strip.titles.iter().find(|title| {
                     !moving
                         && !floating_visible
@@ -2866,7 +2920,8 @@ impl<W: LayoutElement> Monitor<W> {
                     focus,
                     compact,
                 };
-                let companion_hint = if !has_forecast && (hovered || referenced) {
+                let preview_hovered = hovered && preview_pointer.is_some();
+                let companion_hint = if !has_forecast && (preview_hovered || referenced) {
                     match title.companions.as_slice() {
                         [] => None,
                         [neighbor] => {

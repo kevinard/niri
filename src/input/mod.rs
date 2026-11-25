@@ -206,11 +206,11 @@ impl State {
             Keyboard { event } => self.on_keyboard::<I>(event, &mut consumed_by_a11y),
             PointerMotion { event } => {
                 self.on_pointer_motion::<I>(event);
-                self.update_overview_pointer_selection();
+                self.update_pointer_previews();
             }
             PointerMotionAbsolute { event } => {
                 self.on_pointer_motion_absolute::<I>(event);
-                self.update_overview_pointer_selection();
+                self.update_pointer_previews();
             }
             PointerButton { event } => self.on_pointer_button::<I>(event),
             PointerAxis { event } => self.on_pointer_axis::<I>(event),
@@ -3283,9 +3283,18 @@ impl State {
         find_configured_bind(bindings, mod_key, trigger, mods)
     }
 
-    fn update_overview_pointer_selection(&mut self) {
+    fn update_pointer_previews(&mut self) {
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        let pointer_output = self.niri.output_under(pointer.current_location());
+        for monitor in self.niri.layout.monitors() {
+            let position = pointer_output
+                .filter(|(output, _)| *output == monitor.output())
+                .map(|(_, point)| point);
+            monitor.update_navigation_preview_pointer(position);
+        }
+
         let under = &self.niri.pointer_contents;
-        if !under.overview || self.niri.seat.get_pointer().unwrap().is_grabbed() {
+        if !under.overview || pointer.is_grabbed() {
             return;
         }
 
@@ -3311,7 +3320,7 @@ impl State {
             return false;
         }
 
-        let window = self
+        let navigation = self
             .niri
             .output_under(location)
             .and_then(|(output, point)| {
@@ -3324,12 +3333,15 @@ impl State {
                         use smithay::wayland::shell::wlr_layer::Layer;
                         matches!(layer.layer(), Layer::Background | Layer::Bottom)
                     })
-                    .then(|| destination.window.clone())
+                    .then(|| (destination.window.clone(), output.clone(), point))
             });
-        let Some(window) = window else {
+        let Some((window, output, point)) = navigation else {
             return false;
         };
 
+        if let Some(monitor) = self.niri.layout.monitor_for_output(&output) {
+            monitor.dismiss_navigation_preview(point);
+        }
         self.niri.layer_shell_on_demand_focus = None;
         self.focus_window(&window);
         if let Some(workspace) = self.niri.layout.active_workspace_mut() {
