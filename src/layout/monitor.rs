@@ -96,7 +96,7 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_element: InsertHintElement,
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_viewport_marks: [RefCell<SolidColorBuffer>; MAX_NAVIGATION_TITLES],
+    strip_viewport_marks: [RefCell<SolidColorBuffer>; 3 * MAX_NAVIGATION_TITLES],
     strip_status_label: PreviewLabel,
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
@@ -2341,7 +2341,7 @@ impl<W: LayoutElement> Monitor<W> {
         let viewport_mark = |span: Range<f64>| {
             uncovered(Rectangle::new(
                 Point::from((span.start, y + STRIP_BUTTON_HEIGHT)),
-                Size::from((span.end - span.start, 3.)),
+                Size::from((span.end - span.start, 2.)),
             ))
         };
         let tray = uncovered(Rectangle::new(
@@ -2743,9 +2743,30 @@ impl<W: LayoutElement> Monitor<W> {
             });
             let forecast = forecast
                 .filter(|title| self.render_navigation_forecast(renderer, target, title, push));
-            for (rect, buffer) in strip.viewports.iter().zip(&self.strip_viewport_marks) {
+            let ink = caption_ink(surface);
+            let gray = (ink.r + ink.g + ink.b) / 3.;
+            let viewport_color = tint_caption(
+                tint_caption(Color::new_unpremul(gray, gray, gray, 1.), surface),
+                surface,
+            );
+            let marks = strip.viewports.iter().flat_map(|line| {
+                let cap_width = line.size.w.min(2.);
+                let cap = Rectangle::new(
+                    line.loc - Point::from((0., 3.)),
+                    Size::from((cap_width, 3.)),
+                );
+                [
+                    *line,
+                    cap,
+                    Rectangle::new(
+                        cap.loc + Point::from((line.size.w - cap_width, 0.)),
+                        cap.size,
+                    ),
+                ]
+            });
+            for (rect, buffer) in marks.zip(&self.strip_viewport_marks) {
                 let mut buffer = buffer.borrow_mut();
-                buffer.update(rect.size, accent);
+                buffer.update(rect.size, viewport_color);
                 let element =
                     SolidColorRenderElement::from_buffer(&buffer, rect.loc, 1., Kind::Unspecified);
                 let element = MonitorInnerRenderElement::SolidColor(element);
