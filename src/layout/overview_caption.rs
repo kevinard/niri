@@ -22,6 +22,7 @@ const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 28.;
+pub(super) const STRIP_REVEAL_GROUP_HEIGHT: f64 = 45.;
 pub(super) const STRIP_STATUS_HEIGHT: f64 = 20.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 48.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
@@ -450,7 +451,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
         LabelKind::StripStatus => (max_width, STRIP_STATUS_HEIGHT),
-        LabelKind::StripRevealGroup => (max_width, STRIP_BUTTON_HEIGHT + 2.),
+        LabelKind::StripRevealGroup => (max_width, STRIP_REVEAL_GROUP_HEIGHT),
         LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
         LabelKind::StripButton { .. }
         | LabelKind::ScrollWindow { .. }

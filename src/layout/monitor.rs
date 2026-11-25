@@ -18,8 +18,8 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
     LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_STATUS_HEIGHT, STRIP_TRAY_HEIGHT,
-    STRIP_TRAY_PADDING,
+    STRIP_BUTTON_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_REVEAL_GROUP_HEIGHT, STRIP_STATUS_HEIGHT,
+    STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -212,7 +212,7 @@ struct NavigationTitle<'a, W> {
     window: &'a W,
     companions: Vec<&'a W>,
     visible_after: Vec<&'a W>,
-    grouped_reveal: bool,
+    reveal_group_size: usize,
     active: bool,
     direction: Option<bool>,
     fully_visible: bool,
@@ -2349,7 +2349,7 @@ impl<W: LayoutElement> Monitor<W> {
                         window,
                         companions,
                         visible_after,
-                        grouped_reveal: false,
+                        reveal_group_size: 0,
                         active: window.id() == active.id(),
                         direction,
                         fully_visible,
@@ -2433,10 +2433,10 @@ impl<W: LayoutElement> Monitor<W> {
                     let last = titles[end - 1].rect;
                     reveal_groups.push(Rectangle::new(
                         Point::from((left, y - 2.)),
-                        Size::from((last.loc.x + last.size.w - left, STRIP_BUTTON_HEIGHT + 2.)),
+                        Size::from((last.loc.x + last.size.w - left, STRIP_REVEAL_GROUP_HEIGHT)),
                     ));
                     for title in &mut titles[first..end] {
-                        title.grouped_reveal = true;
+                        title.reveal_group_size = end - first;
                     }
                 }
                 first = end;
@@ -2777,13 +2777,17 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     LabelKind::StripButton {
                         status,
-                        outlined: !title.active && (!title.grouped_reveal || hovered),
+                        outlined: !title.active && (title.reveal_group_size == 0 || hovered),
                         hovered: hovered && !moving,
                         focus,
                         compact,
                     }
                 };
-                let companion_hint = if hovered || fallback.is_some() {
+                let companion_hint = if hovered
+                    && title.reveal_group_size == title.companions.len() + 1
+                {
+                    Some(format!("Focus {name}"))
+                } else if hovered || fallback.is_some() {
                     match title.companions.as_slice() {
                         [] => None,
                         [neighbor] => {
@@ -2821,7 +2825,7 @@ impl<W: LayoutElement> Monitor<W> {
                         rect.size.h = STRIP_STATUS_HEIGHT;
                         hover_status = Some((rect, hint));
                     }
-                    if title.grouped_reveal {
+                    if title.reveal_group_size > 0 {
                         name.to_owned()
                     } else {
                         format!("{verb} {name}")
