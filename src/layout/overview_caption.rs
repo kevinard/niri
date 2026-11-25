@@ -23,6 +23,7 @@ pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
 pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 28.;
 pub(super) const STRIP_REVEAL_GROUP_HEIGHT: f64 = 45.;
+pub(super) const STRIP_FORECAST_HEIGHT: f64 = 141.;
 pub(super) const STRIP_STATUS_HEIGHT: f64 = 20.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 48.;
 pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
@@ -53,6 +54,7 @@ pub(super) enum LabelKind {
     StripTray,
     StripStatus,
     StripRevealGroup,
+    StripForecast,
     StripEdgeAction {
         left: bool,
         hovered: bool,
@@ -456,6 +458,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
         LabelKind::StripStatus => (max_width, STRIP_STATUS_HEIGHT),
         LabelKind::StripRevealGroup => (max_width, STRIP_REVEAL_GROUP_HEIGHT),
+        LabelKind::StripForecast => (max_width, STRIP_FORECAST_HEIGHT),
         LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
         LabelKind::StripButton { .. }
         | LabelKind::StripEdgeAction { .. }
@@ -498,7 +501,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     let radius = match key.kind {
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint { .. } => 9.,
-        LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
+        LabelKind::StripTray | LabelKind::StripForecast | LabelKind::WindowNavigation { .. } => 14.,
         LabelKind::StripButton { .. }
         | LabelKind::StripEdgeAction { .. }
         | LabelKind::ScrollWindow { .. }
@@ -553,6 +556,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if matches!(
             key.kind,
             LabelKind::StripTray
+                | LabelKind::StripForecast
                 | LabelKind::StripEdgeAction { .. }
                 | LabelKind::ScrollWindow { .. }
                 | LabelKind::OverviewCommand
@@ -873,7 +877,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        let y = if key.kind == LabelKind::StripRevealGroup {
+        let y = if key.kind == LabelKind::StripForecast {
+            8.
+        } else if key.kind == LabelKind::StripRevealGroup {
             height - f64::from(h) - 2.
         } else if status.is_some() {
             3.

@@ -18,8 +18,8 @@ use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
     caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
     LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_REVEAL_GROUP_HEIGHT, STRIP_STATUS_HEIGHT,
-    STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
+    STRIP_BUTTON_HEIGHT, STRIP_FORECAST_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT,
+    STRIP_REVEAL_GROUP_HEIGHT, STRIP_STATUS_HEIGHT, STRIP_TRAY_HEIGHT, STRIP_TRAY_PADDING,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -99,6 +99,8 @@ pub struct Monitor<W: LayoutElement> {
     strip_reveal_labels: [PreviewLabel; MAX_NAVIGATION_TITLES / 2],
     strip_viewport_marks: [RefCell<SolidColorBuffer>; MAX_NAVIGATION_TITLES],
     strip_status_label: PreviewLabel,
+    strip_forecast_label: PreviewLabel,
+    strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_edge_labels: [PreviewLabel; 2],
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
@@ -517,6 +519,8 @@ impl<W: LayoutElement> Monitor<W> {
             strip_reveal_labels: Default::default(),
             strip_viewport_marks: Default::default(),
             strip_status_label: PreviewLabel::default(),
+            strip_forecast_label: PreviewLabel::default(),
+            strip_forecast_titles: Default::default(),
             strip_edge_labels: Default::default(),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
@@ -2690,6 +2694,128 @@ impl<W: LayoutElement> Monitor<W> {
         });
     }
 
+    fn render_navigation_forecast<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        target: RenderTarget,
+        title: &NavigationTitle<'_, W>,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) -> bool {
+        let ws = self.active_workspace_ref();
+        let area = self.working_area;
+        let top = title.rect.loc.y + STRIP_BUTTON_HEIGHT + 8.;
+        let Some(clip) = self.scroll_clip(ws) else {
+            return false;
+        };
+        let windows = title.visible_after.as_slice();
+        let width = (188. * windows.len() as f64)
+            .clamp(236., 480.)
+            .min(clip.end - clip.start - 20.);
+        if width < 210. || top + STRIP_FORECAST_HEIGHT > area.loc.y + area.size.h {
+            return false;
+        }
+        let padding = 10.;
+        let gap = 8.;
+        let left = (title.rect.loc.x + (title.rect.size.w - width) / 2.)
+            .clamp(clip.start + padding, clip.end - width - padding);
+        let accent = ws.options.layout.border.active_color;
+        let surface = caption_background(accent, ws.options.layout.background_color, false);
+        let scale = self.scale.fractional_scale();
+        let available = width - 2. * padding - gap * windows.len().saturating_sub(1) as f64;
+        let widest = windows
+            .iter()
+            .map(|window| window.size().w)
+            .max()
+            .unwrap_or(1);
+        let weight = |window: &W| f64::from(window.size().w.max(1)).max(f64::from(widest) * 0.55);
+        let total: f64 = windows.iter().map(|window| weight(*window)).sum();
+        let names = windows
+            .iter()
+            .map(|window| navigation_title(*window, target, "Window"))
+            .collect::<Vec<_>>();
+        let mut x = left + padding;
+        for (index, (window, label)) in windows.iter().zip(&self.strip_forecast_titles).enumerate()
+        {
+            let width = available * weight(*window) / total;
+            let rect = Rectangle::new(Point::from((x, top + 32.)), Size::from((width, 99.)));
+            let focused = window.id() == title.window.id();
+            if focused {
+                ws.overview_caption.render_selection(
+                    renderer,
+                    rect,
+                    accent,
+                    1.,
+                    scale,
+                    &mut |outline| {
+                        let element = MonitorInnerRenderElement::Decoration(outline);
+                        push(RelocateRenderElement::from_element(
+                            RescaleRenderElement::from_element(element, Point::default(), 1.),
+                            Point::default(),
+                            Relocate::Relative,
+                        ));
+                    },
+                );
+            }
+            let name = &names[index];
+            let suffix = window_title_suffix(name);
+            let short = names
+                .iter()
+                .enumerate()
+                .all(|(other, name)| other == index || window_title_suffix(name) != suffix);
+            if let Some(caption) = label.render(
+                renderer.as_gles_renderer(),
+                compact_window_title(name, short).to_owned(),
+                if focused {
+                    accent
+                } else {
+                    tint_caption(surface, accent)
+                },
+                LabelKind::Preview {
+                    badge: (focused && width >= 96.).then_some("Focus"),
+                    current: false,
+                },
+                width,
+                scale,
+                rect.loc,
+                1.,
+            ) {
+                let element = MonitorInnerRenderElement::Caption(caption);
+                push(RelocateRenderElement::from_element(
+                    RescaleRenderElement::from_element(element, Point::default(), 1.),
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            }
+            self.render_scroll_preview(
+                renderer,
+                target,
+                Rectangle::new(rect.loc + Point::from((0., 22.)), Size::from((width, 77.))),
+                *window,
+                1.,
+                push,
+            );
+            x += width + gap;
+        }
+        if let Some(caption) = self.strip_forecast_label.render(
+            renderer.as_gles_renderer(),
+            "In view after switch".into(),
+            surface,
+            LabelKind::StripForecast,
+            width,
+            scale,
+            Point::from((left, top)),
+            1.,
+        ) {
+            let element = MonitorInnerRenderElement::Caption(caption);
+            push(RelocateRenderElement::from_element(
+                RescaleRenderElement::from_element(element, Point::default(), 1.),
+                Point::default(),
+                Relocate::Relative,
+            ));
+        }
+        true
+    }
+
     fn render_scroll_cues<R: NiriRenderer>(
         &self,
         renderer: &mut R,
@@ -2715,6 +2841,22 @@ impl<W: LayoutElement> Monitor<W> {
                     .and_then(|arrow| arrow.target)
                     .map(|window| window.id())
             });
+            let forecast = pointer.and_then(|point| {
+                strip.titles.iter().find(|title| {
+                    !moving
+                        && !floating_visible
+                        && title.direction.is_some()
+                        && !title.visible_after.is_empty()
+                        && title.visible_after.len() <= self.strip_forecast_titles.len()
+                        && title
+                            .visible_after
+                            .iter()
+                            .any(|window| window.id() == title.window.id())
+                        && (title.rect.contains(point) || edge_target == Some(title.window.id()))
+                })
+            });
+            let forecast = forecast
+                .filter(|title| self.render_navigation_forecast(renderer, target, title, push));
             for (rect, buffer) in strip.viewports.iter().zip(&self.strip_viewport_marks) {
                 let mut buffer = buffer.borrow_mut();
                 buffer.update(rect.size, accent);
@@ -2773,6 +2915,8 @@ impl<W: LayoutElement> Monitor<W> {
                 let named_reveal = title
                     .reveal_group
                     .is_some_and(|group| strip.reveal_groups[group].named_action);
+                let has_forecast =
+                    forecast.is_some_and(|forecast| forecast.window.id() == title.window.id());
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2823,7 +2967,10 @@ impl<W: LayoutElement> Monitor<W> {
                         compact,
                     }
                 };
-                let companion_hint = if !named_reveal && (hovered || fallback.is_some()) {
+                let companion_hint = if !has_forecast
+                    && !named_reveal
+                    && (hovered || fallback.is_some())
+                {
                     match title.companions.as_slice() {
                         [] => None,
                         [neighbor] => {
