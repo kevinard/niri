@@ -4604,6 +4604,23 @@ impl Niri {
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
         let zoom = mon.overview_zoom();
+        let pointer = self.seat.get_pointer().unwrap();
+        let pointer = (mon.has_navigation_controls()
+            && self.pointer_visibility.is_visible()
+            && !pointer.is_grabbed())
+        .then(|| pointer.current_location())
+        .and_then(|location| {
+            let (under, point) = self.output_under(location)?;
+            if under != output
+                || self
+                    .contents_under(location)
+                    .layer
+                    .is_some_and(|layer| matches!(layer.layer(), Layer::Top | Layer::Overlay))
+            {
+                return None;
+            }
+            Some(point)
+        });
 
         // Get layer-shell elements.
         let layer_map = layer_map_for_output(output);
@@ -4675,7 +4692,7 @@ impl Niri {
 
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
-            mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            mon.render_workspaces(ctx.r(), focus_ring, pointer, &mut |elem| push(elem.into()));
 
             push_popups_from_layer!(Layer::Top);
             push_normal_from_layer!(Layer::Top);
@@ -4716,7 +4733,7 @@ impl Niri {
                 push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
             }
 
-            mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            mon.render_workspaces(ctx.r(), focus_ring, pointer, &mut |elem| push(elem.into()));
 
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 // The render element namespace. This will be set to the workspace index for
@@ -4732,11 +4749,17 @@ impl Niri {
                 push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
-                process!(geo)(ws.render_background());
+                if !mon.has_framed_overview() {
+                    process!(geo)(ws.render_background());
+                }
             }
         }
 
-        mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
+        if mon.has_framed_overview() {
+            mon.render_overview_frames(ctx.renderer, &mut |elem| push(elem.into()));
+        } else {
+            mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
+        }
 
         // Then the backdrop.
         push_popups_from_layer!(Layer::Background, true);

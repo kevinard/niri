@@ -189,8 +189,14 @@ impl State {
             DeviceAdded { device } => self.on_device_added(device),
             DeviceRemoved { device } => self.on_device_removed(device),
             Keyboard { event } => self.on_keyboard::<I>(event, &mut consumed_by_a11y),
-            PointerMotion { event } => self.on_pointer_motion::<I>(event),
-            PointerMotionAbsolute { event } => self.on_pointer_motion_absolute::<I>(event),
+            PointerMotion { event } => {
+                self.on_pointer_motion::<I>(event);
+                self.update_pointer_previews();
+            }
+            PointerMotionAbsolute { event } => {
+                self.on_pointer_motion_absolute::<I>(event);
+                self.update_pointer_previews();
+            }
             PointerButton { event } => self.on_pointer_button::<I>(event),
             PointerAxis { event } => self.on_pointer_axis::<I>(event),
             TabletToolAxis { event } => self.on_tablet_tool_axis::<I>(event),
@@ -714,9 +720,24 @@ impl State {
                 if matches!(res, ShouldInterceptResult::Forward) {
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
+                        let framed = this.niri.config.borrow().overview.framed_workspaces;
                         if let Some(bind) =
-                            modified.and_then(|key| hardcoded_overview_bind(key, modifiers))
+                            modified.and_then(|key| hardcoded_overview_bind(key, modifiers, framed))
                         {
+                            if framed && modified != Some(Keysym::Escape) {
+                                let layout = &mut this.niri.layout;
+                                let window = layout
+                                    .take_overview_pointer_selection()
+                                    .map(|mapped| mapped.window.clone());
+                                if let Some(window) = window {
+                                    layout.activate_window(&window);
+                                }
+                                if modified == Some(Keysym::Return) {
+                                    if let Some(workspace) = layout.active_workspace_mut() {
+                                        workspace.reveal_window_from_navigation();
+                                    }
+                                }
+                            }
                             this.niri.suppressed_keys.insert(key_code);
                             return ShouldInterceptResult::InterceptAndHandle(bind);
                         }
@@ -1114,6 +1135,7 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.focus_window(&window);
+                    self.niri.layer_shell_on_demand_focus = None;
                 }
             }
             Action::FocusWindowInColumn(index) => {
@@ -2511,12 +2533,21 @@ impl State {
             Action::StopCast(session_id) => {
                 self.niri.stop_cast(CastSessionId::from(session_id));
             }
-            Action::ToggleOverview => {
-                self.niri.layout.toggle_overview();
-                self.niri.queue_redraw_all();
-            }
-            Action::OpenOverview => {
-                if self.niri.layout.open_overview() {
+            Action::ToggleOverview | Action::OpenOverview => {
+                let changed = if matches!(action, Action::ToggleOverview) {
+                    self.niri.layout.toggle_overview();
+                    true
+                } else {
+                    self.niri.layout.open_overview()
+                };
+                if changed {
+                    // An on-demand rail can open Overview by IPC after the click
+                    // focused the rail. Hand the picker its keyboard controls.
+                    if self.niri.layout.is_overview_open()
+                        && self.niri.config.borrow().overview.framed_workspaces
+                    {
+                        self.niri.layer_shell_on_demand_focus = None;
+                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -3020,6 +3051,75 @@ impl State {
         find_configured_bind(bindings, mod_key, trigger, mods)
     }
 
+    fn update_pointer_previews(&mut self) {
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        let pointer_output = self.niri.output_under(pointer.current_location());
+        for monitor in self.niri.layout.monitors() {
+            let position = pointer_output
+                .filter(|(output, _)| *output == monitor.output())
+                .map(|(_, point)| point);
+            monitor.update_navigation_preview_pointer(position);
+        }
+
+        let under = &self.niri.pointer_contents;
+        if !under.overview || pointer.is_grabbed() {
+            return;
+        }
+
+        let (Some(output), Some((window, _))) = (&under.output, &under.window) else {
+            return;
+        };
+        if self
+            .niri
+            .layout
+            .monitor_for_output_mut(output)
+            .is_some_and(|mon| mon.select_overview_preview(window))
+        {
+            let output = output.clone();
+            self.niri.queue_redraw(&output);
+        }
+    }
+
+    fn activate_window_navigation(&mut self, location: Point<f64, Logical>) -> bool {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.exit_confirm_dialog.is_open()
+        {
+            return false;
+        }
+
+        let navigation = self
+            .niri
+            .output_under(location)
+            .and_then(|(output, point)| {
+                let monitor = self.niri.layout.monitor_for_output(output)?;
+                let destination = monitor.navigation_window_under(point)?;
+                self.niri
+                    .contents_under(location)
+                    .layer
+                    .is_none_or(|layer| {
+                        use smithay::wayland::shell::wlr_layer::Layer;
+                        matches!(layer.layer(), Layer::Background | Layer::Bottom)
+                    })
+                    .then(|| (destination.window.clone(), output.clone(), point))
+            });
+        let Some((window, output, point)) = navigation else {
+            return false;
+        };
+
+        if let Some(monitor) = self.niri.layout.monitor_for_output(&output) {
+            monitor.dismiss_navigation_preview(point);
+        }
+        self.niri.layer_shell_on_demand_focus = None;
+        self.focus_window(&window);
+        if let Some(workspace) = self.niri.layout.active_workspace_mut() {
+            workspace.reveal_window_from_navigation();
+        }
+        self.niri.layout.close_overview();
+        self.niri.queue_redraw_all();
+        true
+    }
+
     fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
         let pointer = self.niri.seat.get_pointer().unwrap();
 
@@ -3110,6 +3210,16 @@ impl State {
             self.niri.tablet_cursor_location = None;
 
             let is_overview_open = self.niri.layout.is_overview_open();
+
+            if button == Some(MouseButton::Left)
+                && !mod_down
+                && !pointer.is_grabbed()
+                && !is_mru_open
+                && self.activate_window_navigation(pointer.current_location())
+            {
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
 
             if is_overview_open && !pointer.is_grabbed() && button == Some(MouseButton::Right) {
                 if let Some((output, ws)) = self.niri.workspace_under_cursor(true) {
@@ -4573,6 +4683,10 @@ impl State {
                 }
             }
         } else if !handle.is_grabbed() {
+            if !mod_down && self.activate_window_navigation(pos) {
+                self.niri.pointer_visibility = PointerVisibility::Disabled;
+                return;
+            }
             if under.overview && !mod_down && under.output.is_some() {
                 let (output, pos_within_output) = self.niri.output_under(pos).unwrap();
                 let output = output.clone();
@@ -5268,7 +5382,7 @@ fn bind_allowed_during_screenshot(bind: &Bind, pressed: bool) -> bool {
     }
 }
 
-fn hardcoded_overview_bind(key: Keysym, mods: Modifiers) -> Option<Bind> {
+fn hardcoded_overview_bind(key: Keysym, mods: Modifiers, framed: bool) -> Option<Bind> {
     if !mods.is_empty() {
         return None;
     }
@@ -5281,6 +5395,10 @@ fn hardcoded_overview_bind(key: Keysym, mods: Modifiers) -> Option<Bind> {
         }
         Keysym::Left => Action::FocusColumnLeft,
         Keysym::Right => Action::FocusColumnRight,
+        Keysym::Tab if framed => {
+            repeat = false;
+            Action::SwitchFocusBetweenFloatingAndTiling
+        }
         Keysym::Up => Action::FocusWindowOrWorkspaceUp,
         Keysym::Down => Action::FocusWindowOrWorkspaceDown,
         _ => {

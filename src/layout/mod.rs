@@ -81,6 +81,7 @@ pub mod focus_ring;
 pub mod insert_hint_element;
 pub mod monitor;
 pub mod opening_window;
+mod overview_caption;
 pub mod scrolling;
 pub mod shadow;
 pub mod tab_indicator;
@@ -134,6 +135,10 @@ pub trait LayoutElement {
 
     /// Unique ID of this element.
     fn id(&self) -> &Self::Id;
+
+    fn with_overview_title<T>(&self, display: impl FnOnce(&str) -> T) -> T {
+        display("")
+    }
 
     /// Updates the config for the element.
     fn update_config(&mut self, blur_config: niri_config::Blur) {
@@ -1785,6 +1790,10 @@ impl<W: LayoutElement> Layout<W> {
         };
 
         Some(&mut monitors[*active_monitor_idx])
+    }
+
+    pub fn take_overview_pointer_selection(&mut self) -> Option<&W> {
+        self.active_monitor()?.take_overview_pointer_selection()
     }
 
     pub fn active_monitor_ref(&self) -> Option<&Monitor<W>> {
@@ -3867,6 +3876,9 @@ impl<W: LayoutElement> Layout<W> {
             .unwrap();
         let window_offset = tile.window_loc();
 
+        let tile_offset = mon
+            .floating_overview_position(ws, &window_id)
+            .unwrap_or(tile_offset);
         let tile_pos = ws_geo.loc + tile_offset.upscale(zoom);
 
         let pointer_offset_within_window =
@@ -3988,6 +4000,9 @@ impl<W: LayoutElement> Layout<W> {
                             .find(|(tile, _, _)| tile.window().id() == window)
                             .unwrap();
 
+                        let tile_offset = mon
+                            .floating_overview_position(ws, window)
+                            .unwrap_or(tile_offset);
                         let zoom = mon.overview_zoom();
                         tile_pos = Some((ws_geo.loc + tile_offset.upscale(zoom), zoom));
                     }

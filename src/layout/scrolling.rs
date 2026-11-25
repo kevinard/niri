@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 use std::iter::{self, zip};
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -320,7 +321,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         clock: Clock,
         options: Rc<Options>,
     ) -> Self {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let working_area = compute_scrolling_area(parent_area, scale, &options);
 
         Self {
             columns: Vec::new(),
@@ -347,7 +348,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         scale: f64,
         options: Rc<Options>,
     ) {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let working_area = compute_scrolling_area(parent_area, scale, &options);
 
         for (column, data) in zip(&mut self.columns, &mut self.data) {
             column.update_config(view_size, working_area, parent_area, scale, options.clone());
@@ -426,6 +427,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             || !self.closing_windows.is_empty()
     }
 
+    pub(super) fn distance_to_stationary_view(&self) -> Option<f64> {
+        self.remaining_view_movement().map(f64::abs)
+    }
+
+    pub(super) fn remaining_view_movement(&self) -> Option<f64> {
+        match &self.view_offset {
+            ViewOffset::Static(_) if !self.are_transitions_ongoing() => Some(0.),
+            ViewOffset::Animation(animation) => Some(animation.to() - animation.clamped_value()),
+            _ => None,
+        }
+    }
+
     pub fn update_render_elements(&mut self, is_active: bool, layer: RenderLayer) {
         let view_pos = Point::from((self.view_pos(), 0.));
         let view_size = self.view_size;
@@ -457,12 +470,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn active_window(&self) -> Option<&W> {
-        if self.columns.is_empty() {
-            return None;
-        }
-
-        let col = &self.columns[self.active_column_idx];
-        Some(col.tiles[col.active_tile_idx].window())
+        self.active_column().map(Column::active_window)
     }
 
     pub fn active_window_mut(&mut self) -> Option<&mut W> {
@@ -700,9 +708,37 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 } + self.options.layout.gaps * 2.;
 
                 // If it fits together, do a normal animation, otherwise center the new column.
-                if total_width <= self.working_area.size.w {
+                if columns_fit(total_width, self.working_area.size.w, self.scale) {
                     self.compute_new_view_offset_for_column_fit(target_x, idx)
                 } else {
+                    // When the source overflows, the target can still share the viewport
+                    // with its other neighbor. Fit that pair before isolating the target.
+                    let neighbor = if source_idx > idx {
+                        idx.checked_sub(1)
+                    } else {
+                        (idx + 1 < self.columns.len()).then_some(idx + 1)
+                    };
+                    if let Some(neighbor) = neighbor.filter(|&neighbor| {
+                        self.options.layout.clip_scroll_to_work_area
+                            && self.columns[idx].sizing_mode().is_normal()
+                            && self.columns[neighbor].sizing_mode().is_normal()
+                    }) {
+                        let neighbor_x = self.column_x(neighbor);
+                        let left = target_col_x.min(neighbor_x);
+                        let right = (target_col_x + target_col_width)
+                            .max(neighbor_x + self.columns[neighbor].width());
+                        let width = right - left;
+                        let gaps = self.options.layout.gaps;
+                        if columns_fit(width + gaps * 2., self.working_area.size.w, self.scale) {
+                            let offset = self.compute_new_view_offset_fit(
+                                target_x,
+                                left,
+                                width,
+                                SizingMode::Normal,
+                            );
+                            return offset + left - target_col_x;
+                        }
+                    }
                     self.compute_new_view_offset_for_column_centered(target_x, idx)
                 }
             }
@@ -1473,6 +1509,27 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.activate_column(column_idx);
 
         true
+    }
+
+    pub(super) fn columns_after_activating(
+        &self,
+        window: &W::Id,
+    ) -> Option<impl Iterator<Item = (&Column<W>, f64)> + '_> {
+        let idx = self
+            .columns
+            .iter()
+            .position(|column| column.contains(window))?;
+        if !self.columns[idx].sizing_mode().is_normal() {
+            return None;
+        }
+        let view_pos = if idx == self.active_column_idx {
+            self.target_view_pos()
+        } else {
+            self.column_x(idx)
+                + self.compute_new_view_offset_for_column(None, idx, Some(self.active_column_idx))
+        };
+        let positions = self.column_xs(self.data.iter().copied());
+        Some(zip(&self.columns, positions).map(move |(column, x)| (column, x - view_pos)))
     }
 
     pub fn start_close_animation_for_window(
@@ -2967,6 +3024,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        visible_x: Option<&Range<f64>>,
         push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
@@ -2990,6 +3048,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         for (col, col_pos) in self.columns_with_render_positions() {
             // Skip columns belonging to a different render layer.
             if layer.is_normal() == col.is_moving_between_workspaces() {
+                first = false;
+                continue;
+            }
+            // Skip the whole offscreen column, including its shadows, when
+            // the compositor substitutes a navigation control for a narrow peek.
+            if visible_x.is_some_and(|bounds| {
+                col_pos.x >= bounds.end || col_pos.x + col.width() <= bounds.start
+            }) {
                 first = false;
                 continue;
             }
@@ -3339,8 +3405,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                                         // NOTE: This logic won't work entirely correctly with small
                                         // fixed-size maximized windows (they have a different area
                                         // and padding).
-                                        center_on_overflow
-                                            && adj_col_w + 3.0 * gaps + col_w > area.size.w
+                                        !columns_fit(
+                                            adj_col_w + 3.0 * gaps + col_w,
+                                            area.size.w,
+                                            self.scale,
+                                        )
                                     })
                                     .is_some()
                         };
@@ -3812,7 +3881,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         assert_eq!(self.columns.len(), self.data.len());
         assert_eq!(
             self.working_area,
-            compute_working_area(self.parent_area, self.scale, self.options.layout.struts)
+            compute_scrolling_area(self.parent_area, self.scale, &self.options)
         );
 
         if !self.columns.is_empty() {
@@ -4067,6 +4136,10 @@ impl<W: LayoutElement> Column<W> {
 
     pub fn id(&self) -> ColumnId {
         self.id
+    }
+
+    pub(super) fn active_window(&self) -> &W {
+        self.tiles[self.active_tile_idx].window()
     }
 
     fn update_config(
@@ -4858,7 +4931,7 @@ impl<W: LayoutElement> Column<W> {
         }
     }
 
-    fn width(&self) -> f64 {
+    pub(super) fn width(&self) -> f64 {
         let mut tiles_width = self
             .data
             .iter()
@@ -5603,6 +5676,12 @@ impl<W: LayoutElement> Column<W> {
     }
 }
 
+/// Adjacent half-width columns can round up by one physical pixel in total.
+/// Keep their normal edge alignment when that pixel is the only overflow.
+fn columns_fit(width: f64, available: f64, scale: f64) -> bool {
+    width <= available + 1. / scale
+}
+
 fn compute_new_view_offset(
     cur_x: f64,
     view_width: f64,
@@ -5635,6 +5714,24 @@ fn compute_new_view_offset(
     } else {
         -(view_width - padding - new_col_width)
     }
+}
+
+pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 56.;
+
+pub(super) fn navigation_strip_fits(area: Rectangle<f64, Logical>) -> bool {
+    area.size.w >= 420. && area.size.h >= 400.
+}
+
+fn compute_scrolling_area(
+    parent_area: Rectangle<f64, Logical>,
+    scale: f64,
+    options: &Options,
+) -> Rectangle<f64, Logical> {
+    let mut struts = options.layout.struts;
+    if options.layout.clip_scroll_to_work_area && navigation_strip_fits(parent_area) {
+        struts.top.0 = struts.top.0.max(NAVIGATION_STRIP_HEIGHT);
+    }
+    compute_working_area(parent_area, scale, struts)
 }
 
 fn compute_working_area(
@@ -5720,6 +5817,12 @@ mod tests {
 
     use super::*;
     use crate::utils::round_logical_in_physical;
+
+    #[test]
+    fn fractional_rounding_keeps_neighboring_columns_in_view() {
+        assert!(columns_fit(936., 935.2, 1.25));
+        assert!(!columns_fit(937.6, 935.2, 1.25));
+    }
 
     #[test]
     fn working_area_starts_at_physical_pixel() {

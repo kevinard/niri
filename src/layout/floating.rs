@@ -31,6 +31,8 @@ use crate::window::ResolvedWindowRules;
 /// By how many logical pixels the directional move commands move floating windows.
 pub const DIRECTIONAL_MOVE_PX: f64 = 50.;
 
+pub(super) type OverviewPositions<I> = [(I, Point<f64, Logical>)];
+
 /// Space for floating windows.
 #[derive(Debug)]
 pub struct FloatingSpace<W: LayoutElement> {
@@ -318,6 +320,23 @@ impl<W: LayoutElement> FloatingSpace<W> {
             let pos = pos.to_physical_precise_round(scale).to_logical(scale);
             (tile, pos)
         })
+    }
+
+    pub(super) fn tiles_with_preview_positions<'tile, 'positions>(
+        &'tile self,
+        positions: &'positions OverviewPositions<W::Id>,
+    ) -> impl Iterator<Item = (&'tile Tile<W>, Point<f64, Logical>)> + 'positions
+    where
+        'tile: 'positions,
+    {
+        self.tiles_with_render_positions()
+            .map(move |(tile, current)| {
+                let position = positions
+                    .iter()
+                    .find_map(|(id, position)| (id == tile.window().id()).then_some(*position))
+                    .unwrap_or(current);
+                (tile, position)
+            })
     }
 
     pub fn tiles_with_render_positions_mut(
@@ -1045,7 +1064,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
             tile.window_mut().on_commit(serial);
         }
 
-        let prev_size = data.size;
+        let previous = Rectangle::new(data.logical_pos, data.size);
 
         tile.update_window();
         data.update(tile);
@@ -1054,17 +1073,45 @@ impl<W: LayoutElement> FloatingSpace<W> {
         if let Some(resize) = resize {
             let mut offset = Point::from((0., 0.));
             if resize.edges.contains(ResizeEdge::LEFT) {
-                offset.x += prev_size.w - data.size.w;
+                offset.x += previous.size.w - data.size.w;
             }
             if resize.edges.contains(ResizeEdge::TOP) {
-                offset.y += prev_size.h - data.size.h;
+                offset.y += previous.size.h - data.size.h;
             }
             data.set_logical_pos(data.logical_pos + offset);
+        } else if previous.size != data.size {
+            // Keep a visible window's titlebar and controls reachable when the client
+            // grows in response to a size action. Pointer resizing still anchors the
+            // opposite edge, and deliberately off-screen windows retain their position.
+            let area = data.working_area;
+            let mut position = data.logical_pos;
+            let previous_end = previous.loc + previous.size.to_point();
+            let area_end = area.loc + area.size.to_point();
+            let was_visible = previous.loc.x >= area.loc.x
+                && previous.loc.y >= area.loc.y
+                && previous_end.x <= area_end.x
+                && previous_end.y <= area_end.y;
+            if was_visible && data.size.w <= area.size.w && data.size.h <= area.size.h {
+                let gaps = self.options.layout.gaps.max(0.);
+                let next_end = position + data.size.to_point();
+                if next_end.x > area_end.x {
+                    let inset = gaps.min((area.size.w - data.size.w) / 2.);
+                    position.x = area_end.x - data.size.w - inset;
+                }
+                if next_end.y > area_end.y {
+                    let inset = gaps.min((area.size.h - data.size.h) / 2.);
+                    position.y = area_end.y - data.size.h - inset;
+                }
+                if position != data.logical_pos {
+                    data.set_logical_pos(position);
+                }
+            }
         }
 
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
@@ -1072,6 +1119,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
         layer: RenderLayer,
+        preview_positions: &OverviewPositions<W::Id>,
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
@@ -1087,7 +1135,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         }
 
         let active = self.active_window_id.clone();
-        for (tile, tile_pos) in self.tiles_with_render_positions() {
+        for (tile, tile_pos) in self.tiles_with_preview_positions(preview_positions) {
             // Skip tiles belonging to a different render layer.
             if layer.is_normal() == tile.is_moving_between_workspaces() {
                 continue;

@@ -1,4 +1,5 @@
 use std::cmp::max;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -17,12 +18,13 @@ use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
-use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
+use super::floating::{FloatingSpace, FloatingSpaceRenderElement, OverviewPositions};
+use super::overview_caption::OverviewCaption;
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
 use super::shadow::Shadow;
-use super::tile::{Tile, TileRenderSnapshot};
+use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
 use super::{
     ActivateWindow, HitType, InsertPosition, InteractiveResizeData, LayoutElement, Options,
     RemovedTile, SizeFrac,
@@ -92,6 +94,8 @@ pub struct Workspace<W: LayoutElement> {
     /// This workspace's shadow in the overview.
     shadow: Shadow,
 
+    pub(super) overview_caption: OverviewCaption,
+
     /// This workspace's background.
     background_buffer: SolidColorBuffer,
 
@@ -150,6 +154,17 @@ niri_render_elements! {
     }
 }
 
+impl<R: NiriRenderer> WorkspaceRenderElement<R> {
+    pub(super) fn is_window_shadow(&self) -> bool {
+        matches!(
+            self,
+            Self::Scrolling(ScrollingSpaceRenderElement::Tile(
+                TileRenderElement::Shadow(_)
+            ))
+        )
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct InteractiveResize<W: LayoutElement> {
     pub window: W::Id,
@@ -177,6 +192,8 @@ enum FloatingActive {
     /// This is necessary for focus-follows-mouse that activates but doesn't raise the window to
     /// avoid being annoying.
     NoButRaised,
+    /// A window navigation control selected an unobstructed tiling view.
+    NoWithFloatingHidden,
     /// The floating space is active.
     Yes,
 }
@@ -268,6 +285,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
+            overview_caption: OverviewCaption::default(),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             output: Some(output),
             clock,
@@ -331,6 +349,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
+            overview_caption: OverviewCaption::default(),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             clock,
             base_options,
@@ -407,6 +426,12 @@ impl<W: LayoutElement> Workspace<W> {
                 .with_merged_layout(self.layout_config.as_ref())
                 .adjusted_for_scale(scale),
         );
+
+        if !options.layout.clip_scroll_to_work_area
+            && self.floating_is_active == FloatingActive::NoWithFloatingHidden
+        {
+            self.floating_is_active = FloatingActive::No;
+        }
 
         self.scrolling.update_config(
             self.view_size,
@@ -1615,12 +1640,26 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn tiles_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
+        self.tile_render_positions(None)
+    }
+
+    pub(super) fn tiles_with_overview_positions<'a>(
+        &'a self,
+        positions: &'a OverviewPositions<W::Id>,
+    ) -> impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)> + 'a {
+        self.tile_render_positions(Some(positions))
+    }
+
+    fn tile_render_positions<'a>(
+        &'a self,
+        overview: Option<&'a OverviewPositions<W::Id>>,
+    ) -> impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)> + 'a {
         let scrolling = self.scrolling.tiles_with_render_positions();
-
-        let floating = self.floating.tiles_with_render_positions();
-        let visible = self.is_floating_visible();
+        let floating = self
+            .floating
+            .tiles_with_preview_positions(overview.unwrap_or(&[]));
+        let visible = self.floating_visible_in(overview.is_some());
         let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
-
         floating.chain(scrolling)
     }
 
@@ -1665,13 +1704,18 @@ impl<W: LayoutElement> Workspace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        visible_x: Option<&Range<f64>>,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
         let scrolling_focus_ring = focus_ring && !self.floating_is_active();
-        self.scrolling
-            .render(ctx, xray_pos, scrolling_focus_ring, layer, &mut |elem| {
-                push(elem.into())
-            });
+        self.scrolling.render(
+            ctx,
+            xray_pos,
+            scrolling_focus_ring,
+            layer,
+            visible_x,
+            &mut |elem| push(elem.into()),
+        );
     }
 
     pub fn render_floating<R: NiriRenderer>(
@@ -1680,9 +1724,10 @@ impl<W: LayoutElement> Workspace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        overview: Option<&OverviewPositions<W::Id>>,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        if !self.is_floating_visible() && layer.is_normal() {
+        if !self.floating_visible_in(overview.is_some()) && layer.is_normal() {
             return;
         }
 
@@ -1694,6 +1739,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_rect,
             floating_focus_ring,
             layer,
+            overview.unwrap_or(&[]),
             &mut |elem| push(elem.into()),
         );
     }
@@ -1720,11 +1766,26 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn is_floating_visible(&self) -> bool {
+        self.floating_visible_in(false)
+    }
+
+    fn floating_visible_in(&self, overview: bool) -> bool {
+        if self.floating_is_active == FloatingActive::NoWithFloatingHidden {
+            return overview;
+        }
         // If the focus is on a fullscreen scrolling window, hide the floating windows.
         matches!(
             self.floating_is_active,
             FloatingActive::Yes | FloatingActive::NoButRaised
         ) || self.fullscreen_window_above_top_layer().is_none()
+    }
+
+    /// Reveal the selected tiled window while keeping floating windows in the
+    /// workspace, ready to select again from its navigation strip or overview.
+    pub fn reveal_window_from_navigation(&mut self) {
+        if !self.floating.is_empty() && !self.floating_is_active.get() {
+            self.floating_is_active = FloatingActive::NoWithFloatingHidden;
+        }
     }
 
     pub fn store_unmap_snapshot_if_empty(
@@ -1794,17 +1855,32 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        // This logic is consistent with tiles_with_render_positions().
-        if self.is_floating_visible() {
+        self.window_under_at(pos, None)
+    }
+
+    pub(super) fn window_under_in_overview(
+        &self,
+        pos: Point<f64, Logical>,
+        positions: &OverviewPositions<W::Id>,
+    ) -> Option<(&W, HitType)> {
+        self.window_under_at(pos, Some(positions))
+    }
+
+    fn window_under_at(
+        &self,
+        pos: Point<f64, Logical>,
+        overview: Option<&OverviewPositions<W::Id>>,
+    ) -> Option<(&W, HitType)> {
+        // This ordering matches tile_render_positions().
+        if self.floating_visible_in(overview.is_some()) {
             if let Some(rv) = self
                 .floating
-                .tiles_with_render_positions()
+                .tiles_with_preview_positions(overview.unwrap_or(&[]))
                 .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
             {
                 return Some(rv);
             }
         }
-
         self.scrolling.window_under(pos)
     }
 
@@ -1874,7 +1950,9 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating_is_active = FloatingActive::Yes;
             true
         } else if self.scrolling.activate_window(window) {
-            self.floating_is_active = FloatingActive::No;
+            if self.floating_is_active != FloatingActive::NoWithFloatingHidden {
+                self.floating_is_active = FloatingActive::No;
+            }
             true
         } else {
             false
@@ -1889,6 +1967,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating_is_active = match self.floating_is_active {
                 FloatingActive::No => FloatingActive::No,
                 FloatingActive::NoButRaised => FloatingActive::NoButRaised,
+                FloatingActive::NoWithFloatingHidden => FloatingActive::NoWithFloatingHidden,
                 FloatingActive::Yes => FloatingActive::NoButRaised,
             };
             true
@@ -2108,7 +2187,7 @@ pub(super) fn compute_working_area(output: &Output) -> Rectangle<f64, Logical> {
     layer_map_for_output(output).non_exclusive_zone().to_f64()
 }
 
-fn compute_workspace_shadow_config(
+pub(super) fn compute_workspace_shadow_config(
     config: niri_config::WorkspaceShadow,
     view_size: Size<f64, Logical>,
 ) -> niri_config::Shadow {

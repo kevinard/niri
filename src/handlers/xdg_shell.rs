@@ -952,10 +952,12 @@ impl XdgShellHandler for State {
 
     fn app_id_changed(&mut self, toplevel: ToplevelSurface) {
         self.update_window_rules(&toplevel);
+        self.redraw_navigation_caption(&toplevel);
     }
 
     fn title_changed(&mut self, toplevel: ToplevelSurface) {
         self.update_window_rules(&toplevel);
+        self.redraw_navigation_caption(&toplevel);
     }
 
     fn parent_changed(&mut self, toplevel: ToplevelSurface) {
@@ -1427,6 +1429,24 @@ impl State {
                 }
                 PopupKind::InputMethod(_) => (),
             }
+        }
+    }
+
+    fn redraw_navigation_caption(&mut self, toplevel: &ToplevelSurface) {
+        let Some((window, Some(output))) = self
+            .niri
+            .layout
+            .find_window_and_output(toplevel.wl_surface())
+        else {
+            return;
+        };
+        if self
+            .niri
+            .layout
+            .monitor_for_output(output)
+            .is_some_and(|monitor| monitor.window_has_navigation_caption(&window.window))
+        {
+            self.niri.queue_redraw(&output.clone());
         }
     }
 
