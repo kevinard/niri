@@ -63,7 +63,6 @@ pub(super) enum LabelKind {
         outlined: bool,
         hovered: bool,
         focus: FocusMarker,
-        direction: Option<bool>,
         compact: bool,
     },
     LayerAction {
@@ -706,18 +705,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
                 "sans-serif Medium 13px",
             )));
         }
-        let (status, focus, direction) = match key.kind {
-            LabelKind::StripButton {
-                status,
-                focus,
-                direction,
-                ..
-            } => {
-                title_width -= 14.;
-                title_x += 7.;
-                (status, focus, direction)
+        let (status, focus) = match key.kind {
+            LabelKind::StripButton { status, focus, .. } => {
+                if focus == FocusMarker::Current {
+                    title_width -= 14.;
+                    title_x += 7.;
+                }
+                (status, focus)
             }
-            _ => (None, FocusMarker::None, None),
+            _ => (None, FocusMarker::None),
         };
         if let Some(status) = status {
             let detail = layout(&cr, key);
@@ -800,10 +796,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         } else {
             (height - f64::from(h)) / 2.
         };
-        if let Some(left) = direction {
-            cr.set_line_width(1.45);
-            draw_arrow(&cr, x - 10., y + f64::from(h) / 2., left, 4.)?;
-        } else if focus != FocusMarker::None {
+        if focus == FocusMarker::Current {
             cr.arc(
                 x - 9.,
                 y + f64::from(h) / 2.,
