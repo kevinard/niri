@@ -100,7 +100,6 @@ pub struct Monitor<W: LayoutElement> {
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_viewport_outlines: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
-    strip_forecast_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
@@ -571,9 +570,6 @@ impl<W: LayoutElement> Monitor<W> {
                 RefCell::new(BorderRenderElement::empty())
             }),
             strip_viewport_backings: std::array::from_fn(|_| {
-                RefCell::new(BorderRenderElement::empty())
-            }),
-            strip_forecast_backings: std::array::from_fn(|_| {
                 RefCell::new(BorderRenderElement::empty())
             }),
             strip_viewport_labels: Default::default(),
@@ -2883,14 +2879,6 @@ impl<W: LayoutElement> Monitor<W> {
                 })
             });
             let viewports = &strip.viewports;
-            let in_forecast = |title: &NavigationTitle<'_, W>| {
-                preview_window.is_some_and(|preview| {
-                    preview
-                        .visible_after
-                        .iter()
-                        .any(|window| window.id() == title.window.id())
-                })
-            };
             let ink = caption_ink(surface);
             let gray = (ink.r + ink.g + ink.b) / 3.;
             let viewport_color = tint_caption(
@@ -2898,7 +2886,6 @@ impl<W: LayoutElement> Monitor<W> {
                 surface,
             );
             let viewport_background = tint_caption(surface, viewport_color);
-            let forecast_background = tint_caption(tint_caption(surface, accent), accent);
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
@@ -2908,12 +2895,7 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
-            for ((title, label), preview_label) in strip
-                .titles
-                .iter()
-                .zip(&self.strip_labels)
-                .zip(&self.strip_forecast_titles)
-            {
+            for (title, label) in strip.titles.iter().zip(&self.strip_labels) {
                 let hovered = pointer.is_some_and(|point| title.rect.contains(point));
                 let referenced = edge_target == Some(title.window.id());
                 let offscreen = title.direction.is_some();
@@ -2976,38 +2958,54 @@ impl<W: LayoutElement> Monitor<W> {
                 ) {
                     draw(label);
                 }
-                let preview_status = preview_window.and_then(|preview| {
-                    if preview.window.id() == title.window.id() {
-                        return Some("Takes focus");
-                    }
-                    match (title.fully_visible, in_forecast(title)) {
-                        (true, true) => Some("Stays in view"),
-                        (true, false) => Some("Leaves view"),
-                        (false, true) => Some("Enters view"),
-                        (false, false) => None,
-                    }
-                });
-                if let Some(status) = preview_status {
-                    let background = if in_forecast(title) {
-                        forecast_background
+            }
+            if let (Some(preview), Some(tray)) = (preview_window, strip.tray) {
+                let count = preview.visible_after.len() as f64;
+                let heading_width = 84.;
+                let gap = 6.;
+                let windows_width = (tray.size.w - heading_width - count * gap - 12.) / count;
+                let window_width = windows_width.clamp(1., 164.);
+                let row_width = heading_width + count * (gap + window_width);
+                let mut x = tray.loc.x + (tray.size.w - row_width) / 2.;
+                let y = preview.rect.loc.y + STRIP_GROUP_BUTTON_HEIGHT + 2.;
+                if let Some(heading) = self.strip_forecast_label.render(
+                    renderer.as_gles_renderer(),
+                    "Next view".into(),
+                    Color { a: 0., ..surface },
+                    LabelKind::StripViewportLabel,
+                    heading_width,
+                    scale,
+                    Point::from((x, y)),
+                    1.,
+                ) {
+                    draw(heading);
+                }
+                x += heading_width + gap;
+                for (window, label) in preview
+                    .visible_after
+                    .iter()
+                    .zip(&self.strip_forecast_titles)
+                {
+                    let takes_focus = window.id() == preview.window.id();
+                    let title = display_title(window);
+                    let (text, background) = if takes_focus {
+                        (format!("Focus {title}"), accent)
                     } else {
-                        surface
+                        (title.to_owned(), viewport_background)
                     };
-                    if let Some(caption) = preview_label.render(
+                    if let Some(caption) = label.render(
                         renderer.as_gles_renderer(),
-                        status.into(),
-                        Color {
-                            a: 0.,
-                            ..background
-                        },
+                        text,
+                        background,
                         LabelKind::StripViewportLabel,
-                        title.rect.size.w,
+                        window_width,
                         scale,
-                        title.rect.loc + Point::from((0., STRIP_GROUP_BUTTON_HEIGHT)),
+                        Point::from((x, y)),
                         1.,
                     ) {
                         draw(caption);
                     }
+                    x += window_width + gap;
                 }
             }
             for (index, (edge, label)) in strip
@@ -3102,22 +3100,6 @@ impl<W: LayoutElement> Monitor<W> {
                         Size::from((line.size.w, frame_height)),
                     )
                 });
-                let forecast_frames = preview_window.into_iter().flat_map(|preview| {
-                    let spans = navigation_spans(
-                        strip
-                            .titles
-                            .iter()
-                            .filter(|title| in_forecast(title))
-                            .map(|title| title.rect),
-                    );
-                    let y = preview.rect.loc.y + STRIP_GROUP_BUTTON_HEIGHT + 2.;
-                    spans.into_iter().map(move |span| {
-                        Rectangle::new(
-                            Point::from((span.start, y)),
-                            Size::from((span.end - span.start, 14.)),
-                        )
-                    })
-                });
                 let outlines = self
                     .strip_viewport_outlines
                     .iter()
@@ -3126,15 +3108,7 @@ impl<W: LayoutElement> Monitor<W> {
                     .strip_viewport_backings
                     .iter()
                     .map(|backing| (backing, viewport_background, 0.));
-                let forecasts = self
-                    .strip_forecast_backings
-                    .iter()
-                    .map(|backing| (backing, forecast_background, 0.));
-                let pairs = frames
-                    .clone()
-                    .zip(outlines)
-                    .chain(frames.zip(backings))
-                    .chain(forecast_frames.zip(forecasts));
+                let pairs = frames.clone().zip(outlines).chain(frames.zip(backings));
                 for (frame, (element, color, width)) in pairs {
                     let size = frame.size;
                     let geometry = Rectangle::from_size(size);
