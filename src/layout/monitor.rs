@@ -196,7 +196,7 @@ struct OverviewGroup {
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
     viewports: Vec<Rectangle<f64, Logical>>,
-    motion_left: Option<bool>,
+    moving: bool,
     edge_actions: [Option<NavigationArrow<'a, W>>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
@@ -2180,11 +2180,9 @@ impl<W: LayoutElement> Monitor<W> {
         })?;
         let active = ws.active_window()?;
         let pixel = 1. / self.scale.fractional_scale();
-        let moving_left = scrolling
+        let moving = scrolling
             .remaining_view_movement()
-            .filter(|movement| movement.abs() > 2. * pixel)
-            .map(|movement| movement < 0.);
-        let moving = moving_left.is_some();
+            .is_some_and(|movement| movement.abs() > 2. * pixel);
         let positions: HashMap<_, _> = scrolling
             .columns_with_render_positions()
             .map(|(column, position)| (column.id(), position.x))
@@ -2399,7 +2397,7 @@ impl<W: LayoutElement> Monitor<W> {
         Some(NavigationStrip {
             tray,
             viewports,
-            motion_left: moving_left,
+            moving,
             edge_actions,
             titles,
             layer_action,
@@ -2719,7 +2717,7 @@ impl<W: LayoutElement> Monitor<W> {
             let scale = self.scale.fractional_scale();
             let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible() && !ws.floating().is_empty();
-            let moving = strip.motion_left.is_some();
+            let moving = strip.moving;
             let edge_target = pointer.and_then(|point| {
                 strip
                     .edge_actions
@@ -2818,10 +2816,7 @@ impl<W: LayoutElement> Monitor<W> {
                     None
                 };
                 let name = display_title(index);
-                let motion = strip
-                    .motion_left
-                    .filter(|_| title.active && !title.floating);
-                let focus = if title.active && motion.is_none() {
+                let focus = if title.active {
                     FocusMarker::Current
                 } else {
                     FocusMarker::None
@@ -2842,7 +2837,7 @@ impl<W: LayoutElement> Monitor<W> {
                     outlined: !title.active,
                     hovered: hovered && !moving,
                     focus,
-                    direction: motion.or(title.direction),
+                    direction: title.direction,
                     compact,
                 };
                 let companion_hint = if !has_forecast && (hovered || referenced) {
