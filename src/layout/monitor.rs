@@ -100,6 +100,7 @@ pub struct Monitor<W: LayoutElement> {
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_viewport_outlines: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
+    strip_forecast_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
@@ -570,6 +571,9 @@ impl<W: LayoutElement> Monitor<W> {
                 RefCell::new(BorderRenderElement::empty())
             }),
             strip_viewport_backings: std::array::from_fn(|_| {
+                RefCell::new(BorderRenderElement::empty())
+            }),
+            strip_forecast_backings: std::array::from_fn(|_| {
                 RefCell::new(BorderRenderElement::empty())
             }),
             strip_viewport_labels: Default::default(),
@@ -2879,6 +2883,14 @@ impl<W: LayoutElement> Monitor<W> {
                 })
             });
             let viewports = &strip.viewports;
+            let in_forecast = |title: &NavigationTitle<'_, W>| {
+                preview_window.is_some_and(|preview| {
+                    preview
+                        .visible_after
+                        .iter()
+                        .any(|window| window.id() == title.window.id())
+                })
+            };
             let ink = caption_ink(surface);
             let gray = (ink.r + ink.g + ink.b) / 3.;
             let viewport_color = tint_caption(
@@ -2886,6 +2898,7 @@ impl<W: LayoutElement> Monitor<W> {
                 surface,
             );
             let viewport_background = tint_caption(surface, viewport_color);
+            let forecast_background = tint_caption(tint_caption(surface, accent), accent);
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
@@ -2967,11 +2980,7 @@ impl<W: LayoutElement> Monitor<W> {
                     if preview.window.id() == title.window.id() {
                         return Some("Takes focus");
                     }
-                    let visible_after = preview
-                        .visible_after
-                        .iter()
-                        .any(|window| window.id() == title.window.id());
-                    match (title.fully_visible, visible_after) {
+                    match (title.fully_visible, in_forecast(title)) {
                         (true, true) => Some("Stays in view"),
                         (true, false) => Some("Leaves view"),
                         (false, true) => Some("Enters view"),
@@ -2979,8 +2988,8 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 });
                 if let Some(status) = preview_status {
-                    let background = if in_view {
-                        viewport_background
+                    let background = if in_forecast(title) {
+                        forecast_background
                     } else {
                         surface
                     };
@@ -3082,6 +3091,33 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             if BorderRenderElement::has_shader(renderer) {
+                let frame_height = if preview_window.is_some() {
+                    STRIP_GROUP_BUTTON_HEIGHT + 2.
+                } else {
+                    48.
+                };
+                let frames = viewports.iter().map(|line| {
+                    Rectangle::new(
+                        line.loc - Point::from((0., 46.)),
+                        Size::from((line.size.w, frame_height)),
+                    )
+                });
+                let forecast_frames = preview_window.into_iter().flat_map(|preview| {
+                    let spans = navigation_spans(
+                        strip
+                            .titles
+                            .iter()
+                            .filter(|title| in_forecast(title))
+                            .map(|title| title.rect),
+                    );
+                    let y = preview.rect.loc.y + STRIP_GROUP_BUTTON_HEIGHT + 2.;
+                    spans.into_iter().map(move |span| {
+                        Rectangle::new(
+                            Point::from((span.start, y)),
+                            Size::from((span.end - span.start, 14.)),
+                        )
+                    })
+                });
                 let outlines = self
                     .strip_viewport_outlines
                     .iter()
@@ -3090,13 +3126,17 @@ impl<W: LayoutElement> Monitor<W> {
                     .strip_viewport_backings
                     .iter()
                     .map(|backing| (backing, viewport_background, 0.));
-                let pairs = viewports
+                let forecasts = self
+                    .strip_forecast_backings
                     .iter()
+                    .map(|backing| (backing, forecast_background, 0.));
+                let pairs = frames
+                    .clone()
                     .zip(outlines)
-                    .chain(viewports.iter().zip(backings));
-                for (line, (element, color, width)) in pairs {
-                    let size = Size::from((line.size.w, 48.));
-                    let location = line.loc - Point::from((0., 46.));
+                    .chain(frames.zip(backings))
+                    .chain(forecast_frames.zip(forecasts));
+                for (frame, (element, color, width)) in pairs {
+                    let size = frame.size;
                     let geometry = Rectangle::from_size(size);
                     let mut element = element.borrow_mut();
                     element.update(
@@ -3113,7 +3153,7 @@ impl<W: LayoutElement> Monitor<W> {
                         1.,
                     );
                     let element = MonitorInnerRenderElement::Decoration(
-                        element.clone().with_location(location).into(),
+                        element.clone().with_location(frame.loc).into(),
                     );
                     push(RelocateRenderElement::from_element(
                         RescaleRenderElement::from_element(element, Point::default(), 1.),
