@@ -197,7 +197,7 @@ struct NavigationStrip<'a, W> {
     viewports: Vec<Rectangle<f64, Logical>>,
     motion_left: Option<bool>,
     edge_actions: [Option<NavigationArrow<'a, W>>; 2],
-    reveal_groups: Vec<Rectangle<f64, Logical>>,
+    reveal_groups: Vec<NavigationRevealGroup>,
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
 }
@@ -205,6 +205,12 @@ struct NavigationStrip<'a, W> {
 struct NavigationArrow<'a, W> {
     rect: Rectangle<f64, Logical>,
     target: Option<&'a W>,
+    reveal_count: usize,
+}
+
+struct NavigationRevealGroup {
+    rect: Rectangle<f64, Logical>,
+    named_action: bool,
 }
 
 struct NavigationTitle<'a, W> {
@@ -212,7 +218,7 @@ struct NavigationTitle<'a, W> {
     window: &'a W,
     companions: Vec<&'a W>,
     visible_after: Vec<&'a W>,
-    reveal_group_size: usize,
+    reveal_group: Option<usize>,
     active: bool,
     direction: Option<bool>,
     fully_visible: bool,
@@ -2327,7 +2333,7 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                     let mut visible_after = Vec::new();
                     let mut companions = Vec::new();
-                    if decorate && !moving && direction.is_some() {
+                    if !moving && direction.is_some() {
                         let columns = scrolling.columns_after_activating(window.id());
                         for (column, x) in columns.into_iter().flatten() {
                             let width = column.width();
@@ -2349,7 +2355,7 @@ impl<W: LayoutElement> Monitor<W> {
                         window,
                         companions,
                         visible_after,
-                        reveal_group_size: 0,
+                        reveal_group: None,
                         active: window.id() == active.id(),
                         direction,
                         fully_visible,
@@ -2372,7 +2378,7 @@ impl<W: LayoutElement> Monitor<W> {
             Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
             Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
         ));
-        let edge_actions = if floating.is_empty() && has_offscreen_windows {
+        let mut edge_actions = if floating.is_empty() && has_offscreen_windows {
             [true, false].map(|left| {
                 let tray = tray?;
                 let mut targets = titles.iter().filter(|title| title.direction == Some(left));
@@ -2389,6 +2395,7 @@ impl<W: LayoutElement> Monitor<W> {
                 Some(NavigationArrow {
                     rect: button(x, width)?,
                     target: target.map(|title| title.window),
+                    reveal_count: 0,
                 })
             })
         } else {
@@ -2403,7 +2410,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
         let mut reveal_groups = Vec::new();
-        if decorate && !moving && !floating_visible {
+        if !moving && !floating_visible {
             let mut first = 0;
             while first < titles.len() {
                 let shared_destination = |other: &NavigationTitle<'_, W>| {
@@ -2431,15 +2438,45 @@ impl<W: LayoutElement> Monitor<W> {
                 if end - first > 1 {
                     let left = titles[first].rect.loc.x;
                     let last = titles[end - 1].rect;
-                    reveal_groups.push(Rectangle::new(
-                        Point::from((left, y - 2.)),
-                        Size::from((last.loc.x + last.size.w - left, STRIP_REVEAL_GROUP_HEIGHT)),
-                    ));
+                    let index = reveal_groups.len();
+                    reveal_groups.push(NavigationRevealGroup {
+                        rect: Rectangle::new(
+                            Point::from((left, y - 2.)),
+                            Size::from((
+                                last.loc.x + last.size.w - left,
+                                STRIP_REVEAL_GROUP_HEIGHT,
+                            )),
+                        ),
+                        named_action: false,
+                    });
                     for title in &mut titles[first..end] {
-                        title.reveal_group_size = end - first;
+                        title.reveal_group = Some(index);
                     }
                 }
                 first = end;
+            }
+        }
+        for (index, arrow) in edge_actions.iter_mut().enumerate() {
+            let Some(arrow) = arrow else { continue };
+            let Some(window) = arrow.target else { continue };
+            let Some(title) = titles.iter().find(|title| title.window.id() == window.id()) else {
+                continue;
+            };
+            let Some(group) = title.reveal_group else {
+                continue;
+            };
+            let width = 118.;
+            let x = if index == 0 {
+                arrow.rect.loc.x + arrow.rect.size.w - width
+            } else {
+                arrow.rect.loc.x
+            };
+            if x >= bounds.start && x + width <= bounds.end {
+                if let Some(rect) = button(x, width) {
+                    arrow.rect = rect;
+                    arrow.reveal_count = title.companions.len() + 1;
+                    reveal_groups[group].named_action = true;
+                }
             }
         }
         let viewports = if !decorate {
@@ -2733,6 +2770,9 @@ impl<W: LayoutElement> Monitor<W> {
                     || edge_target == Some(title.window.id());
                 let offscreen = title.direction.is_some();
                 let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
+                let named_reveal = title
+                    .reveal_group
+                    .is_some_and(|group| strip.reveal_groups[group].named_action);
                 let status = if title.floating {
                     Some(if !floating_visible {
                         "Hidden"
@@ -2777,17 +2817,13 @@ impl<W: LayoutElement> Monitor<W> {
                 } else {
                     LabelKind::StripButton {
                         status,
-                        outlined: !title.active && (title.reveal_group_size == 0 || hovered),
+                        outlined: !title.active && (title.reveal_group.is_none() || hovered),
                         hovered: hovered && !moving,
                         focus,
                         compact,
                     }
                 };
-                let companion_hint = if hovered
-                    && title.reveal_group_size == title.companions.len() + 1
-                {
-                    Some(format!("Focus {name}"))
-                } else if hovered || fallback.is_some() {
+                let companion_hint = if !named_reveal && (hovered || fallback.is_some()) {
                     match title.companions.as_slice() {
                         [] => None,
                         [neighbor] => {
@@ -2815,6 +2851,10 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         format!("Moving to {name} →")
                     }
+                } else if moving && compact {
+                    name.to_owned()
+                } else if named_reveal {
+                    format!("Focus {name}")
                 } else if fallback.is_some() {
                     let reveal = companion_hint.as_deref().unwrap_or("Moves into view");
                     format!("{verb} {name}\n{reveal}")
@@ -2825,7 +2865,7 @@ impl<W: LayoutElement> Monitor<W> {
                         rect.size.h = STRIP_STATUS_HEIGHT;
                         hover_status = Some((rect, hint));
                     }
-                    if title.reveal_group_size > 0 {
+                    if title.reveal_group.is_some() {
                         name.to_owned()
                     } else {
                         format!("{verb} {name}")
@@ -2858,7 +2898,11 @@ impl<W: LayoutElement> Monitor<W> {
                 let hovered = enabled && pointer.is_some_and(|point| rect.contains(point));
                 if let Some(arrow) = label.render(
                     renderer.as_gles_renderer(),
-                    String::new(),
+                    if arrow.reveal_count > 0 {
+                        format!("Show {} tiles", arrow.reveal_count)
+                    } else {
+                        String::new()
+                    },
                     if !enabled {
                         surface
                     } else if hovered {
@@ -2866,7 +2910,7 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         direction_background
                     },
-                    LabelKind::ScrollWindow {
+                    LabelKind::StripEdgeAction {
                         left: index == 0,
                         hovered: hovered && !moving,
                     },
@@ -2918,15 +2962,34 @@ impl<W: LayoutElement> Monitor<W> {
                     draw(caption);
                 }
             }
-            for (rect, label) in strip.reveal_groups.iter().zip(&self.strip_reveal_labels) {
+            for (group, label) in strip.reveal_groups.iter().zip(&self.strip_reveal_labels) {
+                let (text, kind, location) = if group.named_action {
+                    (
+                        "",
+                        LabelKind::StripButton {
+                            status: None,
+                            outlined: false,
+                            hovered: false,
+                            focus: FocusMarker::None,
+                            compact: true,
+                        },
+                        group.rect.loc + Point::from((0., 2.)),
+                    )
+                } else {
+                    (
+                        "Reveal together",
+                        LabelKind::StripRevealGroup,
+                        group.rect.loc,
+                    )
+                };
                 if let Some(group) = label.render(
                     renderer.as_gles_renderer(),
-                    "Reveal together".into(),
+                    text.into(),
                     tint_caption(surface, accent),
-                    LabelKind::StripRevealGroup,
-                    rect.size.w,
+                    kind,
+                    group.rect.size.w,
                     scale,
-                    rect.loc,
+                    location,
                     1.,
                 ) {
                     draw(group);
