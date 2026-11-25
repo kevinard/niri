@@ -51,6 +51,7 @@ pub(super) enum LabelKind {
     OverviewCommand,
     StripTray,
     StripStatus,
+    StripRevealGroup,
     ScrollWindow {
         left: bool,
         hovered: bool,
@@ -404,7 +405,9 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
-    let font = if key.kind == LabelKind::StripStatus {
+    let font = if key.kind == LabelKind::StripRevealGroup {
+        "sans-serif Bold 11px"
+    } else if key.kind == LabelKind::StripStatus {
         "sans-serif Bold 13px"
     } else if matches!(key.kind, LabelKind::StripButton { .. })
         || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
@@ -447,6 +450,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => (max_width.min(4096.), 22.),
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
         LabelKind::StripStatus => (max_width, STRIP_STATUS_HEIGHT),
+        LabelKind::StripRevealGroup => (max_width, STRIP_BUTTON_HEIGHT + 2.),
         LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
         LabelKind::StripButton { .. }
         | LabelKind::ScrollWindow { .. }
@@ -489,7 +493,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint { .. } => 9.,
         LabelKind::StripTray | LabelKind::WindowNavigation { .. } => 14.,
-        LabelKind::StripButton { .. } | LabelKind::ScrollWindow { .. } => 9.,
+        LabelKind::StripButton { .. }
+        | LabelKind::ScrollWindow { .. }
+        | LabelKind::StripRevealGroup => 9.,
         _ => height / 2.,
     };
     cr.arc(
@@ -828,14 +834,16 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::StripButton { .. } | LabelKind::StripStatus => {
-                title_x + (title_width - f64::from(w)) / 2.
-            }
+            LabelKind::StripButton { .. }
+            | LabelKind::StripStatus
+            | LabelKind::StripRevealGroup => title_x + (title_width - f64::from(w)) / 2.,
             LabelKind::LayerAction { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
-        let y = if status.is_some() {
+        let y = if key.kind == LabelKind::StripRevealGroup {
+            height - f64::from(h) - 2.
+        } else if status.is_some() {
             3.
         } else {
             (height - f64::from(h)) / 2.
