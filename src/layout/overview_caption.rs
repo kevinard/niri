@@ -411,8 +411,10 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
         "sans-serif Bold 12px"
     } else if key.kind == LabelKind::StripStatus {
         "sans-serif Bold 13px"
-    } else if matches!(key.kind, LabelKind::StripButton { .. })
-        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
+    } else if matches!(
+        key.kind,
+        LabelKind::StripButton { .. } | LabelKind::ScrollWindow { .. }
+    ) || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
     {
         "sans-serif Medium 13px"
     } else {
@@ -627,7 +629,18 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     } else if let LabelKind::ScrollWindow { left, .. } = key.kind {
         cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         cr.set_line_width(2.);
-        draw_arrow(&cr, width / 2., height / 2., left, 7.)?;
+        let arrow_x = if left { 15. } else { width - 15. };
+        draw_arrow(&cr, arrow_x, height / 2., left, 7.)?;
+        let title = layout(&cr, key);
+        title.set_width(((width - 36.) * f64::from(pango::SCALE)) as i32);
+        let (w, h) = title.pixel_size();
+        let x = if left {
+            28.
+        } else {
+            width - 28. - f64::from(w)
+        };
+        cr.move_to(x, (height - f64::from(h)) / 2.);
+        pangocairo::functions::show_layout(&cr, &title);
     } else if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
         title.set_single_paragraph_mode(false);

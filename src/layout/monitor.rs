@@ -53,7 +53,7 @@ const OVERVIEW_INSET: f64 = 20.;
 const OVERVIEW_HEADER_OFFSET: f64 = 67.;
 const OVERVIEW_FRAME_MARGIN: f64 = 12.;
 const MAX_NAVIGATION_TITLES: usize = 5;
-const STRIP_ARROW_WIDTH: f64 = STRIP_BUTTON_HEIGHT;
+const STRIP_ARROW_WIDTH: f64 = 120.;
 const STRIP_ARROW_GAP: f64 = 6.;
 
 const WORKSPACE_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
@@ -104,7 +104,6 @@ pub struct Monitor<W: LayoutElement> {
     strip_forecast_label: PreviewLabel,
     strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_edge_labels: [PreviewLabel; 2],
-    strip_step_labels: [PreviewLabel; 2],
     dismissed_preview_arrow: Cell<Option<Rectangle<f64, Logical>>>,
     layer_action_label: PreviewLabel,
     overview_command_label: PreviewLabel,
@@ -562,7 +561,6 @@ impl<W: LayoutElement> Monitor<W> {
             strip_forecast_label: PreviewLabel::default(),
             strip_forecast_titles: Default::default(),
             strip_edge_labels: Default::default(),
-            strip_step_labels: Default::default(),
             dismissed_preview_arrow: Cell::new(None),
             layer_action_label: PreviewLabel::default(),
             overview_command_label: PreviewLabel::default(),
@@ -2294,7 +2292,8 @@ impl<W: LayoutElement> Monitor<W> {
             16.
         };
         let available = bounds.end - bounds.start - 2. * inset;
-        let capacity = ((available + gap) / 160.).floor() as usize;
+        let title_pitch = if floating.is_empty() { 126. } else { 160. };
+        let capacity = ((available + gap) / title_pitch).floor() as usize;
         let count = windows
             .len()
             .min(capacity.max(1))
@@ -2975,12 +2974,13 @@ impl<W: LayoutElement> Monitor<W> {
                 .enumerate()
             {
                 let Some(arrow) = edge else { continue };
-                let enabled = arrow.target.is_some();
+                let destination = arrow.target.map(&display_title);
+                let enabled = destination.is_some();
                 let rect = arrow.rect;
                 let hovered = enabled && pointer.is_some_and(|point| rect.contains(point));
                 if let Some(arrow) = label.render(
                     renderer.as_gles_renderer(),
-                    String::new(),
+                    destination.unwrap_or_default().into(),
                     if !enabled {
                         surface
                     } else if hovered {
@@ -2998,38 +2998,6 @@ impl<W: LayoutElement> Monitor<W> {
                     if enabled { 1. } else { 0.35 },
                 ) {
                     draw(arrow);
-                }
-            }
-            if !moving {
-                for (index, (arrow, label)) in strip
-                    .edge_actions
-                    .iter()
-                    .zip(&self.strip_step_labels)
-                    .enumerate()
-                {
-                    let Some(window) = arrow.as_ref().and_then(|arrow| arrow.target) else {
-                        continue;
-                    };
-                    let Some(title) = strip
-                        .titles
-                        .iter()
-                        .find(|title| title.window.id() == window.id())
-                    else {
-                        continue;
-                    };
-                    let location = title.rect.loc + Point::from((0., STRIP_GROUP_BUTTON_HEIGHT));
-                    if let Some(caption) = label.render(
-                        renderer.as_gles_renderer(),
-                        ["Previous", "Next"][index].into(),
-                        Color { a: 0., ..surface },
-                        LabelKind::StripViewportLabel,
-                        title.rect.size.w,
-                        scale,
-                        location,
-                        1.,
-                    ) {
-                        draw(caption);
-                    }
                 }
             }
             if let Some((rect, _)) = strip.layer_action {
