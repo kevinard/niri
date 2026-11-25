@@ -10,7 +10,6 @@ use niri_config::{Color, CornerRadius, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
-use smithay::backend::renderer::element::Kind;
 use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
@@ -39,7 +38,6 @@ use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
-use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::rubber_band::RubberBand;
@@ -55,6 +53,8 @@ const OVERVIEW_INSET: f64 = 20.;
 const OVERVIEW_HEADER_OFFSET: f64 = 67.;
 const OVERVIEW_FRAME_MARGIN: f64 = 12.;
 const MAX_NAVIGATION_TITLES: usize = 5;
+const STRIP_ARROW_WIDTH: f64 = STRIP_BUTTON_HEIGHT;
+const STRIP_ARROW_GAP: f64 = 6.;
 
 const WORKSPACE_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
     stiffness: 0.5,
@@ -97,7 +97,7 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_element: InsertHintElement,
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_viewport_marks: [RefCell<SolidColorBuffer>; 3 * MAX_NAVIGATION_TITLES],
+    strip_viewport_outlines: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
     strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
     strip_status_label: PreviewLabel,
@@ -267,7 +267,6 @@ niri_render_elements! {
         InsertHint = CropRenderElement<InsertHintRenderElement>,
         Decoration = InsertHintRenderElement,
         Shadow = ShadowRenderElement,
-        SolidColor = SolidColorRenderElement,
         Caption = PrimaryGpuTextureRenderElement,
         WindowPreview = CropRenderElement<LayoutElementRenderElement<R>>,
     }
@@ -550,7 +549,9 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
-            strip_viewport_marks: Default::default(),
+            strip_viewport_outlines: std::array::from_fn(|_| {
+                RefCell::new(BorderRenderElement::empty())
+            }),
             strip_viewport_backings: std::array::from_fn(|_| {
                 RefCell::new(BorderRenderElement::empty())
             }),
@@ -2268,13 +2269,26 @@ impl<W: LayoutElement> Monitor<W> {
         if windows.len() == 1 && floating.is_empty() {
             return None;
         }
-        let has_offscreen_windows = windows.iter().any(|(_, direction, ..)| direction.is_some());
+        let edge_targets = [
+            windows
+                .iter()
+                .rfind(|(_, direction, ..)| *direction == Some(true)),
+            windows
+                .iter()
+                .find(|(_, direction, ..)| *direction == Some(false)),
+        ]
+        .map(|target| target.map(|(window, ..)| *window));
 
         let active_index = windows
             .iter()
             .position(|(window, ..)| window.id() == active.id())?;
         let gap = 8.;
-        let inset = 16.;
+        // Keep room for stepping through tiled columns even when names fill the row.
+        let inset = if floating.is_empty() {
+            STRIP_TRAY_PADDING + STRIP_ARROW_GAP + STRIP_ARROW_WIDTH + 2.
+        } else {
+            16.
+        };
         let available = bounds.end - bounds.start - 2. * inset;
         let capacity = ((available + gap) / 160.).floor() as usize;
         let count = windows
@@ -2396,23 +2410,20 @@ impl<W: LayoutElement> Monitor<W> {
             Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
             Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
         ));
-        let edge_actions = if floating.is_empty() && has_offscreen_windows {
-            [true, false].map(|left| {
+        let edge_actions = if floating.is_empty() && edge_targets.iter().any(Option::is_some) {
+            std::array::from_fn(|index| {
                 let tray = tray?;
-                let mut targets = titles.iter().filter(|title| title.direction == Some(left));
-                let target = if left { targets.last() } else { targets.next() };
-                let width = 30.;
-                let x = if left {
-                    tray.loc.x - 6. - width
+                let x = if index == 0 {
+                    tray.loc.x - STRIP_ARROW_GAP - STRIP_ARROW_WIDTH
                 } else {
-                    tray.loc.x + tray.size.w + 6.
+                    tray.loc.x + tray.size.w + STRIP_ARROW_GAP
                 };
-                if x < bounds.start || x + width > bounds.end {
+                if x < bounds.start || x + STRIP_ARROW_WIDTH > bounds.end {
                     return None;
                 }
                 Some(NavigationArrow {
-                    rect: button(x, width)?,
-                    target: target.map(|title| title.window),
+                    rect: button(x, STRIP_ARROW_WIDTH)?,
+                    target: edge_targets[index],
                 })
             })
         } else {
@@ -2695,7 +2706,7 @@ impl<W: LayoutElement> Monitor<W> {
                     tint_caption(surface, accent)
                 },
                 LabelKind::Preview {
-                    badge: (focused && width >= 96.).then_some("Focus"),
+                    badge: (focused && width >= 108.).then_some("Next focus"),
                     current: false,
                 },
                 width,
@@ -2801,33 +2812,6 @@ impl<W: LayoutElement> Monitor<W> {
                 surface,
             );
             let viewport_background = tint_caption(surface, viewport_color);
-            let marks = strip.viewports.iter().flat_map(|line| {
-                let cap_width = line.size.w.min(2.);
-                let cap = Rectangle::new(
-                    line.loc - Point::from((0., 3.)),
-                    Size::from((cap_width, 3.)),
-                );
-                [
-                    *line,
-                    cap,
-                    Rectangle::new(
-                        cap.loc + Point::from((line.size.w - cap_width, 0.)),
-                        cap.size,
-                    ),
-                ]
-            });
-            for (rect, buffer) in marks.zip(&self.strip_viewport_marks) {
-                let mut buffer = buffer.borrow_mut();
-                buffer.update(rect.size, viewport_color);
-                let element =
-                    SolidColorRenderElement::from_buffer(&buffer, rect.loc, 1., Kind::Unspecified);
-                let element = MonitorInnerRenderElement::SolidColor(element);
-                push(RelocateRenderElement::from_element(
-                    RescaleRenderElement::from_element(element, Point::default(), 1.),
-                    Point::default(),
-                    Relocate::Relative,
-                ));
-            }
             let mut draw = |label| {
                 let elem = MonitorInnerRenderElement::Caption(label);
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
@@ -2868,14 +2852,12 @@ impl<W: LayoutElement> Monitor<W> {
                 };
                 let background = if title.active {
                     accent
-                } else if offscreen && (hovered || referenced) {
-                    tint_caption(direction_background, accent)
-                } else if offscreen || hovered || referenced {
+                } else if hovered || referenced {
                     direction_background
-                } else if !title.floating {
-                    viewport_background
-                } else {
+                } else if offscreen || title.floating {
                     surface
+                } else {
+                    viewport_background
                 };
                 let kind = LabelKind::StripButton {
                     status,
@@ -2942,7 +2924,7 @@ impl<W: LayoutElement> Monitor<W> {
                     rect.size.w,
                     scale,
                     rect.loc,
-                    if enabled { 1. } else { 0.55 },
+                    if enabled { 1. } else { 0.35 },
                 ) {
                     draw(arrow);
                 }
@@ -3010,26 +2992,39 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
             if BorderRenderElement::has_shader(renderer) {
-                for (line, backing) in strip.viewports.iter().zip(&self.strip_viewport_backings) {
+                let outlines = self
+                    .strip_viewport_outlines
+                    .iter()
+                    .map(|outline| (outline, viewport_color, 2.));
+                let backings = self
+                    .strip_viewport_backings
+                    .iter()
+                    .map(|backing| (backing, viewport_background, 0.));
+                let pairs = strip
+                    .viewports
+                    .iter()
+                    .zip(outlines)
+                    .chain(strip.viewports.iter().zip(backings));
+                for (line, (element, color, width)) in pairs {
                     let size = Size::from((line.size.w, 48.));
                     let location = line.loc - Point::from((0., 46.));
                     let geometry = Rectangle::from_size(size);
-                    let mut backing = backing.borrow_mut();
-                    backing.update(
+                    let mut element = element.borrow_mut();
+                    element.update(
                         size,
                         geometry,
                         Default::default(),
-                        viewport_background,
-                        viewport_background,
+                        color,
+                        color,
                         0.,
                         geometry,
-                        0.,
+                        width,
                         CornerRadius::from(11.).fit_to(size.w as f32, size.h as f32),
                         scale as f32,
                         1.,
                     );
                     let element = MonitorInnerRenderElement::Decoration(
-                        backing.clone().with_location(location).into(),
+                        element.clone().with_location(location).into(),
                     );
                     push(RelocateRenderElement::from_element(
                         RescaleRenderElement::from_element(element, Point::default(), 1.),
