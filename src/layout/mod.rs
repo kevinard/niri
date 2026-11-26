@@ -248,6 +248,10 @@ pub trait LayoutElement {
     fn with_decoration_title<T>(&self, f: impl FnOnce(&str) -> T) -> T {
         f("")
     }
+    /// The application ID, used to show the application's icon.
+    fn with_app_id<T>(&self, f: impl FnOnce(&str) -> T) -> T {
+        f("")
+    }
     /// The titlebar button under the pointer or a finger, and its state.
     fn titlebar_interaction(&self) -> Option<(titlebar::TitlebarPart, titlebar::ButtonState)> {
         None
@@ -2585,6 +2589,19 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn overview_zoom(&self) -> f64 {
+        // Monitors may zoom out further to fit their workspaces; follow the active one.
+        if let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &self.monitor_set
+        {
+            if let Some(monitor) = monitors.get(*active_monitor_idx) {
+                if self.overview_progress.is_some() {
+                    return monitor.overview_zoom();
+                }
+            }
+        }
         let progress = self.overview_progress.as_ref().map(|p| p.value());
         compute_overview_zoom(&self.options, progress)
     }

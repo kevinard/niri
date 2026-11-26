@@ -15,6 +15,7 @@ use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
 use super::monitor::InsertPosition;
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
+use super::titlebar::TitlebarTabs;
 use super::workspace::{InteractiveResize, ResolvedSize};
 use super::{ConfigureIntent, HitType, InteractiveResizeData, LayoutElement, Options, RemovedTile};
 use crate::animation::{Animation, Clock};
@@ -107,6 +108,17 @@ pub struct ScrollingSpace<W: LayoutElement> {
     /// Used for popup unconstraining. Popups can go over struts, but they shouldn't go over
     /// the layer-shell top layer (which renders on top of popups).
     parent_area: Rectangle<f64, Logical>,
+
+    /// Extra space between columns in the overview.
+    overview_spread: f64,
+    /// Where each column moves in the overview, which may wrap the strip into rows.
+    overview_offsets: Vec<Point<f64, Logical>>,
+    /// Height the overview adds to the workspace for its extra rows.
+    overview_extra_height: f64,
+    /// Whether the overview's captions replace the titles in titlebars.
+    overview_captions: bool,
+    /// Whether the overview is open or animating, when windows show whole.
+    overview_open: bool,
 
     /// Scale of the output the space is on (and rounds its sizes to).
     scale: f64,
@@ -241,6 +253,10 @@ pub struct Column<W: LayoutElement> {
 
     /// Animation of the render offset during window swapping.
     move_x_animation: Option<MoveAnimation>,
+
+    /// How far the column has slid out past the edge of the view, once the view settles with
+    /// it only partly on screen.
+    edge_shift: f64,
 
     /// Animation of a column visually moving vertically.
     move_y_animation: Option<MoveAnimation>,
@@ -378,6 +394,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             working_area,
             full_working_area: working_area,
             parent_area,
+            overview_spread: 0.,
+            overview_offsets: Vec::new(),
+            overview_extra_height: 0.,
+            overview_captions: false,
+            overview_open: false,
             scale,
             clock,
             options,
@@ -518,6 +539,28 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let col_off = Point::from((col_x, 0.));
             let col_pos = view_pos - col_off - col.render_offset();
             let view_rect = Rectangle::new(col_pos, view_size);
+            let clip = self.options.layout.clip_scroll_to_work_area;
+            let left = -col_pos.x;
+            let right = left + col.width();
+            let area = self.parent_area;
+            let gaps = self.options.layout.gaps;
+            let start = area.loc.x;
+            let end = area.loc.x + area.size.w;
+            let shown = right.min(end) - left.max(start);
+            let peek = clip && shown < col.width() * 0.5;
+            // A partly visible column draws as a card over the part in view, one gap in from
+            // the panels, with its own corners, border and shadow.
+            // Partly visible columns are cut straight at the gutter by the monitor; they keep
+            // their own frame and title where they are.
+            let card: Option<(f64, f64)> = None;
+            let _ = (gaps, self.overview_open);
+            let hide_title = self.overview_captions;
+            for tile in &mut col.tiles {
+                tile.set_peek(peek);
+                tile.set_hidden_start(0.);
+                tile.set_card(card);
+                tile.set_hide_title(hide_title);
+            }
             col.update_render_elements(is_active, view_rect);
         }
     }
@@ -681,12 +724,68 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     fn column_render_xs(&self, view_pos: f64) -> Vec<f64> {
         let area = self.full_working_area;
         let gaps = self.options.layout.gaps;
+        let spread = self.overview_spread;
         zip(self.column_xs(self.data.iter().copied()), &self.data)
-            .map(|(x, data)| match data.pinned {
+            .enumerate()
+            .map(|(idx, (x, data))| match data.pinned {
                 Some(side) => view_pos + pinned_view_x(area, gaps, side, data.width),
-                None => x,
+                None => match self.overview_offsets.get(idx) {
+                    Some(offset) => x + offset.x,
+                    None => x + idx as f64 * spread,
+                },
             })
             .collect()
+    }
+
+    /// Extra space between columns while the overview is open, so that previews keep a
+    /// readable gutter when zoomed out.
+    pub fn set_overview_spread(&mut self, spread: f64) {
+        self.overview_spread = spread.max(0.);
+    }
+
+    pub fn overview_spread(&self) -> f64 {
+        self.overview_spread
+    }
+
+    /// Moves each column in the overview; empty restores the strip.
+    pub fn set_overview_layout(&mut self, offsets: Vec<Point<f64, Logical>>, extra_height: f64) {
+        self.overview_offsets = offsets;
+        self.overview_extra_height = extra_height.max(0.);
+    }
+
+    pub fn overview_extra_height(&self) -> f64 {
+        self.overview_extra_height
+    }
+
+    /// Where the strip starts, relative to the view, before any overview offsets.
+    pub fn strip_origin(&self) -> f64 {
+        let view_pos = self.view_pos();
+        self.column_xs(self.data.iter().copied())
+            .next()
+            .map_or(0., |x| x - view_pos)
+    }
+
+    /// The widths of the scrolling columns, in order.
+    pub fn column_widths(&self) -> Vec<f64> {
+        self.data
+            .iter()
+            .filter(|data| data.pinned.is_none())
+            .map(|data| data.width)
+            .collect()
+    }
+
+    fn overview_dy(&self, idx: usize) -> f64 {
+        self.overview_offsets.get(idx).map_or(0., |offset| offset.y)
+    }
+
+    /// Hides titlebar titles while the overview shows its own captions over the windows.
+    pub fn set_overview_captions(&mut self, captions: bool) {
+        self.overview_captions = captions;
+    }
+
+    /// Windows show whole in the overview, without the desktop's edge treatment.
+    pub fn set_overview_open(&mut self, open: bool) {
+        self.overview_open = open;
     }
 
     /// Returns each column's position in the view, excluding render offsets.
@@ -721,6 +820,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             order.push(active);
         }
         order.extend((0..len).filter(|&idx| idx != active && self.data[idx].pinned.is_none()));
+        // Columns still fading in, as the overview opens, pass behind the ones already shown.
+        let fading = |idx: &usize| {
+            self.columns[*idx]
+                .tiles()
+                .any(|(tile, _)| tile.fade() < 0.999)
+        };
+        let (shown, fading): (Vec<_>, Vec<_>) = order.into_iter().partition(|idx| !fading(idx));
+        let mut order = shown;
+        order.extend(fading);
         order
     }
 
@@ -2048,29 +2156,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         true
     }
 
-    pub(super) fn columns_after_activating(
-        &self,
-        window: &W::Id,
-    ) -> Option<impl Iterator<Item = (&Column<W>, f64)> + '_> {
-        let idx = self
-            .columns
-            .iter()
-            .position(|column| column.contains(window))?;
-        if !self.columns[idx].sizing_mode().is_normal() {
-            return None;
-        }
-        let view_pos = if idx == self.active_column_idx {
-            self.target_view_pos()
-        } else {
-            self.view_anchor_x(idx)
-                + self.compute_new_view_offset_for_column(None, idx, Some(self.active_column_idx))
-        };
-        Some(
-            zip(&self.columns, self.column_render_xs(view_pos))
-                .map(move |(column, x)| (column, x - view_pos)),
-        )
-    }
-
     pub fn start_close_animation_for_window(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -3047,44 +3132,51 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.columns.iter()
     }
 
-    fn columns_in_render_order(&self) -> impl Iterator<Item = (&Column<W>, f64)> + '_ {
+    fn columns_in_render_order(&self) -> impl Iterator<Item = (&Column<W>, f64, f64)> + '_ {
         let col_xs = self.column_render_xs(self.view_pos());
         self.column_render_order()
             .into_iter()
-            .map(move |idx| (&self.columns[idx], col_xs[idx]))
+            .map(move |idx| (&self.columns[idx], col_xs[idx], self.overview_dy(idx)))
     }
 
-    fn columns_in_render_order_mut(&mut self) -> impl Iterator<Item = (&mut Column<W>, f64)> + '_ {
+    fn columns_in_render_order_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&mut Column<W>, f64, f64)> + '_ {
         let col_xs = self.column_render_xs(self.view_pos());
+        let dys: Vec<_> = (0..self.columns.len())
+            .map(|idx| self.overview_dy(idx))
+            .collect();
         let order = self.column_render_order();
         let mut columns: Vec<_> = self.columns.iter_mut().map(Some).collect();
         order
             .into_iter()
-            .map(move |idx| (columns[idx].take().unwrap(), col_xs[idx]))
+            .map(move |idx| (columns[idx].take().unwrap(), col_xs[idx], dys[idx]))
     }
 
     pub fn columns_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Column<W>, Point<f64, Logical>)> {
         let view_off = Point::from((-self.view_pos(), 0.));
-        self.columns_in_render_order().map(move |(col, col_x)| {
-            let col_off = Point::from((col_x, 0.));
-            let col_render_off = col.render_offset();
-            let pos = view_off + col_off + col_render_off;
-            (col, pos)
-        })
+        self.columns_in_render_order()
+            .map(move |(col, col_x, col_y)| {
+                let col_off = Point::from((col_x, col_y));
+                let col_render_off = col.render_offset();
+                let pos = view_off + col_off + col_render_off;
+                (col, pos)
+            })
     }
 
     pub fn columns_with_render_positions_mut(
         &mut self,
     ) -> impl Iterator<Item = (&mut Column<W>, Point<f64, Logical>)> {
         let view_off = Point::from((-self.view_pos(), 0.));
-        self.columns_in_render_order_mut().map(move |(col, col_x)| {
-            let col_off = Point::from((col_x, 0.));
-            let col_render_off = col.render_offset();
-            let pos = view_off + col_off + col_render_off;
-            (col, pos)
-        })
+        self.columns_in_render_order_mut()
+            .map(move |(col, col_x, col_y)| {
+                let col_off = Point::from((col_x, col_y));
+                let col_render_off = col.render_offset();
+                let pos = view_off + col_off + col_render_off;
+                (col, pos)
+            })
     }
 
     pub fn tiles_with_render_positions(
@@ -3767,6 +3859,23 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // Hit the tab indicator.
             if col.display_mode == ColumnDisplay::Tabbed && col.sizing_mode().is_normal() {
                 let col_pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
+
+                // Hit the tabs in the titlebar of the shown window.
+                let active = &col.tiles[col.active_tile_idx];
+                if active.has_titlebar_tabs() {
+                    let offset = col
+                        .tiles_in_render_order()
+                        .find_map(|(tile, off, _)| std::ptr::eq(tile, active).then_some(off));
+                    if let Some(offset) = offset {
+                        let tile_pos = col_pos + offset + active.render_offset();
+                        if let Some(idx) = active.titlebar_tab_hit(pos - tile_pos) {
+                            let hit = HitType::Activate {
+                                is_tab_indicator: true,
+                            };
+                            return Some((col.tiles[idx].window(), hit));
+                        }
+                    }
+                }
 
                 if let Some(idx) = col.tab_indicator.hit(
                     col.tab_indicator_area(),
@@ -4808,6 +4917,7 @@ impl<W: LayoutElement> Column<W> {
             display_mode,
             tab_indicator: TabIndicator::new(options.layout.tab_indicator),
             move_x_animation: None,
+            edge_shift: 0.,
             move_y_animation: None,
             view_size,
             working_area,
@@ -4994,6 +5104,30 @@ impl<W: LayoutElement> Column<W> {
 
     pub fn update_render_elements(&mut self, is_active: bool, view_rect: Rectangle<f64, Logical>) {
         let active_idx = self.active_tile_idx;
+        // Tabbed columns name their windows in the titlebar of the shown one.
+        let tabbed = self.display_mode == ColumnDisplay::Tabbed
+            && self.sizing_mode().is_normal()
+            && self.tiles.len() > 1;
+        let titles = tabbed.then(|| {
+            let titles = self
+                .tiles
+                .iter()
+                .map(|tile| tile.window().with_decoration_title(str::to_owned))
+                .collect::<Vec<_>>();
+            let app_ids = self
+                .tiles
+                .iter()
+                .map(|tile| tile.window().with_app_id(str::to_owned))
+                .collect::<Vec<_>>();
+            (titles, app_ids)
+        });
+        for (tile_idx, tile) in self.tiles.iter_mut().enumerate() {
+            tile.set_titlebar_tabs(titles.clone().map(|(titles, app_ids)| TitlebarTabs {
+                titles,
+                app_ids,
+                active: tile_idx,
+            }));
+        }
         for (tile_idx, (tile, tile_off)) in self.tiles_mut().enumerate() {
             let is_active = is_active && tile_idx == active_idx;
 
@@ -5017,7 +5151,9 @@ impl<W: LayoutElement> Column<W> {
         // you don't want that to happen in fullscreen. Also, laying things out correctly when the
         // tab indicator is within the column and the column goes fullscreen, would require too
         // many changes to the code for too little benefit (it's mostly invisible anyway).
-        let enabled = self.display_mode == ColumnDisplay::Tabbed && self.sizing_mode().is_normal();
+        let enabled = self.display_mode == ColumnDisplay::Tabbed
+            && self.sizing_mode().is_normal()
+            && !self.tiles[active_idx].has_titlebar_tabs();
 
         self.tab_indicator.update_render_elements(
             enabled,
@@ -5049,7 +5185,7 @@ impl<W: LayoutElement> Column<W> {
     }
 
     pub fn render_offset(&self) -> Point<f64, Logical> {
-        let mut offset = Point::from((0., 0.));
+        let mut offset = Point::from((self.edge_shift, 0.));
 
         if let Some(move_) = &self.move_x_animation {
             offset.x += move_.from * move_.anim.value();
@@ -5059,6 +5195,14 @@ impl<W: LayoutElement> Column<W> {
         }
 
         offset
+    }
+
+    pub fn edge_shift(&self) -> f64 {
+        self.edge_shift
+    }
+
+    pub fn set_edge_shift(&mut self, shift: f64) {
+        self.edge_shift = shift;
     }
 
     pub fn animate_move_from(&mut self, from: Point<f64, Logical>) {
@@ -6246,7 +6390,9 @@ impl<W: LayoutElement> Column<W> {
         self.display_mode
     }
 
-    fn tiles_mut(&mut self) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> + '_ {
+    pub(super) fn tiles_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> + '_ {
         let offsets = self.tile_offsets_iter(self.data.iter().copied());
         zip(&mut self.tiles, offsets)
     }

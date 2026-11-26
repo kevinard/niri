@@ -1981,6 +1981,7 @@ mod tests {
                 empty_workspace_above_first: false,
                 default_column_display: Tabbed,
                 gaps: 8.0,
+                clip_scroll_to_work_area: false,
                 struts: Struts {
                     left: FloatOrInt(
                         1.0,
@@ -2229,6 +2230,7 @@ mod tests {
                     },
                 },
                 emit_typed_text: false,
+                framed_workspaces: false,
             },
             environment: Environment(
                 [

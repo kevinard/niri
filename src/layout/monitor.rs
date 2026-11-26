@@ -10,17 +10,20 @@ use niri_config::{Color, CornerRadius, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
+use smithay::backend::renderer::element::Kind;
 use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::overview_caption::{
-    caption_background, caption_ink, frame_radius, tint_caption, FocusMarker, GroupStyle,
-    LabelKind, PreviewLabel, OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
-    STRIP_BUTTON_HEIGHT, STRIP_FORECAST_HEIGHT, STRIP_GROUP_BUTTON_HEIGHT, STRIP_TRAY_HEIGHT,
-    STRIP_TRAY_PADDING,
+    caption_background, caption_ink, frame_radius, measure_bar_label, set_caption_font,
+    tint_caption, BarIcon, BarPillState, GroupStyle, LabelKind, PreviewLabel, BAR_CARD_PADDING,
+    BAR_CARD_TITLE_HEIGHT, BAR_PILL_HEIGHT, BAR_SHADOW_MARGIN, BAR_TRAY_HEIGHT,
+    OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
 };
-use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
+use super::scrolling::{
+    navigation_strip_fits, Column, ColumnId, ColumnWidth, NAVIGATION_STRIP_HEIGHT,
+};
 use super::tile::Tile;
 use super::workspace::{
     compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
@@ -38,6 +41,7 @@ use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
+use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::rubber_band::RubberBand;
@@ -50,12 +54,41 @@ use crate::utils::{
 const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
 
 const OVERVIEW_INSET: f64 = 20.;
-const OVERVIEW_HEADER_OFFSET: f64 = 67.;
+const OVERVIEW_HEADER_OFFSET: f64 = 42.;
+/// Space between framed workspaces in the open overview, for the header of the next one.
+const OVERVIEW_WORKSPACE_GAP: f64 = 76.;
 const OVERVIEW_FRAME_MARGIN: f64 = 12.;
-const MAX_NAVIGATION_TITLES: usize = 5;
-const STRIP_ARROW_WIDTH: f64 = STRIP_BUTTON_HEIGHT;
-const STRIP_TITLE_GAP: f64 = 8.;
-const STRIP_ARROW_GAP: f64 = 6.;
+/// The overview never zooms out further than this to fit a workspace.
+const OVERVIEW_MIN_ZOOM: f64 = 0.24;
+/// Space between window previews in the overview.
+const OVERVIEW_PREVIEW_GAP: f64 = 24.;
+/// Space between the rows of a workspace that wraps in the overview.
+const OVERVIEW_ROW_GAP: f64 = 24.;
+/// Height of a window's title above its preview in the Overview.
+const OVERVIEW_LABEL_HEIGHT: f64 = 22.;
+/// Height of the card of an empty workspace in the overview.
+const OVERVIEW_EMPTY_CARD_HEIGHT: f64 = 40.;
+/// Space between the open workspace and a compact empty one after it.
+const OVERVIEW_EMPTY_GAP: f64 = 40.;
+/// Space between the previews and the edge of their workspace frame in the Overview.
+const OVERVIEW_FRAME_PADDING: f64 = 40.;
+/// Narrowest workspace frame in the Overview.
+const OVERVIEW_FRAME_MIN_WIDTH: f64 = 720.;
+const MAX_NAVIGATION_TITLES: usize = 8;
+/// Space between neighboring controls in the window bar.
+const BAR_PILL_GAP: f64 = 4.;
+const BAR_PILL_MIN_WIDTH: f64 = 96.;
+const BAR_PILL_MAX_WIDTH: f64 = 220.;
+/// Share of the work area the window bar may take before its names shrink.
+const BAR_MAX_SHARE: f64 = 0.86;
+/// Space on either side of the line between tiled and floating windows.
+const BAR_DIVIDER_GAP: f64 = 8.;
+/// Space between the bar of tiled windows and the bar of floating ones.
+const BAR_GROUP_GAP: f64 = 8.;
+/// Narrowest width of the bar of tiled windows.
+const BAR_MIN_WIDTH: f64 = 600.;
+/// Minimum space between the window bar and the sides of the work area.
+const BAR_MARGIN: f64 = 24.;
 
 const WORKSPACE_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
     stiffness: 0.5,
@@ -98,11 +131,24 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_element: InsertHintElement,
     strip_tray: PreviewLabel,
     strip_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_viewport_outlines: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
-    strip_viewport_backings: [RefCell<BorderRenderElement>; MAX_NAVIGATION_TITLES],
-    strip_viewport_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
-    strip_forecast_label: PreviewLabel,
-    strip_forecast_titles: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    /// The focused style of each name, shown inside the focus fill while it slides.
+    strip_focus_labels: [PreviewLabel; MAX_NAVIGATION_TITLES],
+    strip_card: PreviewLabel,
+    strip_floating_tray: PreviewLabel,
+    /// The window whose entry in the window bar shows focus.
+    bar_focus: RefCell<Option<W::Id>>,
+    /// The focus fill of the window bar, sliding from one name to the next.
+    bar_highlight: RefCell<Option<BarHighlight<W::Id>>>,
+    bar_highlight_fill: RefCell<BorderRenderElement>,
+    bar_highlight_fade: RefCell<BorderRenderElement>,
+    /// Columns that were in view on the desktop when the overview started opening.
+    overview_on_desktop: Option<std::collections::HashSet<ColumnId>>,
+    /// Dimming over columns that are mostly out of view.
+    peek_scrims: RefCell<Vec<BorderRenderElement>>,
+    peek_scrim_labels: RefCell<Vec<PreviewLabel>>,
+    /// Dimming over the wallpaper in the overview.
+    overview_dim: RefCell<SolidColorBuffer>,
+    arrow_tooltips: [PreviewLabel; 2],
     strip_edge_labels: [PreviewLabel; 2],
     dismissed_preview_arrow: Cell<Option<Rectangle<f64, Logical>>>,
     layer_action_label: PreviewLabel,
@@ -190,6 +236,16 @@ struct InsertHintRenderLoc {
     location: Point<f64, Logical>,
 }
 
+/// The arrangement of a workspace's previews in the open overview.
+#[derive(Debug, Clone, Copy)]
+struct OverviewPlan {
+    rows: usize,
+    /// Columns in the first row.
+    split: usize,
+    /// The largest zoom at which this arrangement fits.
+    zoom: f64,
+}
+
 struct OverviewGroup {
     range: Range<f64>,
     title: &'static str,
@@ -199,41 +255,91 @@ struct OverviewGroup {
 
 struct NavigationStrip<'a, W> {
     tray: Option<Rectangle<f64, Logical>>,
-    viewports: Vec<Rectangle<f64, Logical>>,
     moving: bool,
     edge_actions: [Option<NavigationArrow<'a, W>>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
+    /// The separate bar of floating windows.
+    floating_tray: Option<Rectangle<f64, Logical>>,
 }
 
-fn navigation_spans(rects: impl Iterator<Item = Rectangle<f64, Logical>>) -> Vec<Range<f64>> {
-    let mut spans: Vec<Range<f64>> = Vec::new();
-    for rect in rects {
-        let start = rect.loc.x;
-        let end = start + rect.size.w;
-        if let Some(span) = spans
-            .last_mut()
-            .filter(|span| start <= span.end + STRIP_TITLE_GAP + 0.001)
-        {
-            span.end = end;
+#[derive(Debug)]
+struct BarHighlight<Id> {
+    window: Id,
+    previous: Option<Id>,
+    from: Rectangle<f64, Logical>,
+    to: Rectangle<f64, Logical>,
+    anim: Animation,
+}
+
+impl<Id> BarHighlight<Id> {
+    /// Whether other names lie between the two ends: the fill then crossfades rather than
+    /// sliding under them. To a neighbour it slides, which shows the direction.
+    fn leaps(&self) -> bool {
+        let gap = 12.;
+        self.to.loc.x > self.from.loc.x + self.from.size.w + gap
+            || self.to.loc.x + self.to.size.w + gap < self.from.loc.x
+    }
+
+    /// The sliding fill, while it is between two names.
+    fn sliding(&self) -> Option<Rectangle<f64, Logical>> {
+        (!self.leaps() && !self.anim.is_done()).then(|| self.rect())
+    }
+
+    /// The fills to draw with their opacity: one easing in place, or two crossfading. The old
+    /// one is gone halfway through, so no ghost lingers on the name focus left.
+    fn fills(&self) -> Vec<(Rectangle<f64, Logical>, f32)> {
+        if !self.leaps() || self.anim.is_done() {
+            return vec![(self.rect(), 1.)];
+        }
+        let t = self.anim.clamped_value().clamp(0., 1.) as f32;
+        vec![
+            (self.from, (1. - 2. * t).max(0.)),
+            (self.to, (1.5 * t).min(1.)),
+        ]
+    }
+
+    /// Where the fill counts as being, for styling the names above it.
+    fn anchor(&self) -> Rectangle<f64, Logical> {
+        if self.leaps() && !self.anim.is_done() {
+            // Where the stronger of the two fills is.
+            if self.anim.clamped_value() < 2. / 7. {
+                self.from
+            } else {
+                self.to
+            }
         } else {
-            spans.push(start..end);
+            self.rect()
         }
     }
-    spans
+
+    fn rect(&self) -> Rectangle<f64, Logical> {
+        let t = self.anim.value();
+        let lerp = |a: f64, b: f64| a + (b - a) * t;
+        Rectangle::new(
+            Point::from((
+                lerp(self.from.loc.x, self.to.loc.x),
+                lerp(self.from.loc.y, self.to.loc.y),
+            )),
+            Size::from((
+                lerp(self.from.size.w, self.to.size.w),
+                lerp(self.from.size.h, self.to.size.h),
+            )),
+        )
+    }
 }
 
 struct NavigationArrow<'a, W> {
     rect: Rectangle<f64, Logical>,
     target: Option<&'a W>,
+    /// How many windows lie out of view on this side.
+    count: usize,
 }
 
 struct NavigationTitle<'a, W> {
     rect: Rectangle<f64, Logical>,
     window: &'a W,
-    visible_after: Vec<&'a W>,
     active: bool,
-    direction: Option<bool>,
     fully_visible: bool,
     floating: bool,
 }
@@ -285,6 +391,7 @@ niri_render_elements! {
         Decoration = InsertHintRenderElement,
         Shadow = ShadowRenderElement,
         Caption = PrimaryGpuTextureRenderElement,
+        ClippedCaption = CropRenderElement<PrimaryGpuTextureRenderElement>,
         WindowPreview = CropRenderElement<LayoutElementRenderElement<R>>,
     }
 }
@@ -423,32 +530,6 @@ fn compact_window_title(title: &str, distinct_app: bool) -> &str {
     name.strip_prefix("Canopa ").unwrap_or(name)
 }
 
-fn compact_navigation_titles(titles: &[String]) -> Vec<&str> {
-    let mut suffix_counts = HashMap::new();
-    for title in titles {
-        *suffix_counts.entry(window_title_suffix(title)).or_insert(0) += 1;
-    }
-    let aliases = titles
-        .iter()
-        .map(|title| compact_window_title(title, suffix_counts[window_title_suffix(title)] == 1))
-        .collect::<Vec<_>>();
-    let mut alias_counts = HashMap::new();
-    for &alias in &aliases {
-        *alias_counts.entry(alias).or_insert(0) += 1;
-    }
-    titles
-        .iter()
-        .zip(aliases)
-        .map(|(title, alias)| {
-            if alias_counts[alias] == 1 {
-                alias
-            } else {
-                title.as_str()
-            }
-        })
-        .collect()
-}
-
 fn visible_extent<'a, W: LayoutElement + 'a>(
     tiles: impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)>,
 ) -> Option<Range<f64>> {
@@ -468,7 +549,8 @@ fn fit_overview_strip(
 ) -> Option<f64> {
     let width = extent.end - extent.start;
     let available = viewport.end - viewport.start;
-    if width * final_zoom > available {
+    // Allow for rounding: the overview zoom is chosen to fit the strip exactly.
+    if width * final_zoom > available + 1. {
         return None;
     }
     let center = (viewport.start + viewport.end) / 2.;
@@ -477,22 +559,7 @@ fn fit_overview_strip(
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_navigation_titles, fit_overview_strip};
-
-    #[test]
-    fn navigation_names_distinguish_windows_from_the_same_application() {
-        let titles = [
-            "Field Notes — Canopa Files",
-            "Field Notes — Terminal",
-            "Canopa Settings",
-            "Build log — Terminal",
-        ]
-        .map(str::to_owned);
-        assert_eq!(
-            compact_navigation_titles(&titles),
-            vec!["Files", "Field Notes", "Settings", "Build log"],
-        );
-    }
+    use super::fit_overview_strip;
 
     #[test]
     fn overview_strip_centers_within_the_area_beside_the_rail() {
@@ -525,6 +592,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> Self {
         let options =
             Rc::new(Options::clone(&base_options).with_merged_layout(layout_config.as_ref()));
+        set_caption_font(&options.layout.titlebar.font);
 
         let scale = output.current_scale();
         let view_size = output_size(&output);
@@ -566,15 +634,18 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             strip_tray: PreviewLabel::default(),
             strip_labels: Default::default(),
-            strip_viewport_outlines: std::array::from_fn(|_| {
-                RefCell::new(BorderRenderElement::empty())
-            }),
-            strip_viewport_backings: std::array::from_fn(|_| {
-                RefCell::new(BorderRenderElement::empty())
-            }),
-            strip_viewport_labels: Default::default(),
-            strip_forecast_label: PreviewLabel::default(),
-            strip_forecast_titles: Default::default(),
+            strip_focus_labels: Default::default(),
+            strip_card: PreviewLabel::default(),
+            strip_floating_tray: PreviewLabel::default(),
+            bar_focus: RefCell::new(None),
+            bar_highlight: RefCell::new(None),
+            bar_highlight_fill: RefCell::new(BorderRenderElement::empty()),
+            bar_highlight_fade: RefCell::new(BorderRenderElement::empty()),
+            overview_on_desktop: None,
+            peek_scrims: RefCell::new(Vec::new()),
+            peek_scrim_labels: RefCell::new(Vec::new()),
+            overview_dim: RefCell::new(SolidColorBuffer::default()),
+            arrow_tooltips: Default::default(),
             strip_edge_labels: Default::default(),
             dismissed_preview_arrow: Cell::new(None),
             layer_action_label: PreviewLabel::default(),
@@ -1319,6 +1390,11 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
+            || self
+                .bar_highlight
+                .borrow()
+                .as_ref()
+                .is_some_and(|highlight| !highlight.anim.is_done())
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1330,7 +1406,59 @@ impl<W: LayoutElement> Monitor<W> {
                 .any(|ws| ws.are_transitions_ongoing())
     }
 
+    /// Slides partly visible columns out past the edges of the view as it settles, whole,
+    /// instead of cutting them along the edge.
+    fn update_edge_shifts(&mut self) {
+        let active_idx = self.active_workspace_idx;
+        let mut shifts: Vec<(usize, f64)> = Vec::new();
+        if let Some(ws) = self.workspaces.get(active_idx) {
+            let gaps = ws.options.layout.gaps;
+            let span = (self.workspace_switch.is_none() && self.navigation_strip_top().is_some())
+                .then(|| self.scroll_clip(ws))
+                .flatten()
+                .map(|bounds| bounds.start + gaps..bounds.end - gaps);
+            if let Some(span) = span {
+                let (_, _, settle) = self.resting_edges(ws, &span);
+                let scrolling = ws.scrolling();
+                let active = scrolling.active_column().map(|column| column.id());
+                for (idx, (column, pos)) in scrolling.columns_with_render_positions().enumerate() {
+                    // Where the column would be without its own shift.
+                    let start = pos.x - column.edge_shift();
+                    let end = start + column.width();
+                    // A column that only reaches into the gap beside a panel, as rounding at
+                    // fractional scales can leave it, still counts as on screen.
+                    let shift = if Some(column.id()) == active {
+                        0.
+                    } else if start < span.start - gaps && end > span.start + 0.5 {
+                        -(end - span.start + gaps) * settle
+                    } else if start < span.end - 0.5 && end > span.end + gaps {
+                        (span.end - start + gaps) * settle
+                    } else {
+                        0.
+                    };
+                    shifts.push((idx, shift));
+                }
+            }
+        }
+        for (idx, ws) in self.workspaces.iter_mut().enumerate() {
+            let scrolling = ws.scrolling_mut();
+            for (col_idx, (column, _)) in scrolling.columns_with_render_positions_mut().enumerate()
+            {
+                let shift = if idx == active_idx {
+                    shifts
+                        .iter()
+                        .find(|(i, _)| *i == col_idx)
+                        .map_or(0., |(_, shift)| *shift)
+                } else {
+                    0.
+                };
+                column.set_edge_shift(shift);
+            }
+        }
+    }
+
     pub fn update_render_elements(&mut self, is_active: bool) {
+        self.update_edge_shifts();
         let showing_previews = self.has_framed_overview()
             && self
                 .overview_progress_value()
@@ -1456,6 +1584,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         self.insert_hint_element
             .update_config(options.layout.insert_hint);
+        set_caption_font(&options.layout.titlebar.font);
 
         self.base_options = base_options;
         self.options = options;
@@ -1612,7 +1741,12 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn workspace_gap(&self, zoom: f64) -> f64 {
         let scale = self.scale.fractional_scale();
-        let gap = self.view_size.h * 0.1 * zoom;
+        let mut gap = self.view_size.h * 0.1 * zoom;
+        if self.options.overview.framed_workspaces {
+            // Grow toward the header space as the overview zooms out.
+            let opened = ((1. - zoom) / 0.5).clamp(0., 1.);
+            gap = gap.max(OVERVIEW_WORKSPACE_GAP * opened);
+        }
         round_logical_in_physical_max1(scale, gap)
     }
 
@@ -1622,8 +1756,113 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn overview_zoom(&self) -> f64 {
-        let progress = self.overview_progress.as_ref().map(|p| p.value());
-        compute_overview_zoom(&self.options, progress)
+        let Some(progress) = self.overview_progress.as_ref().map(|p| p.value()) else {
+            return 1.;
+        };
+        let zoom = self.overview_target_zoom();
+        (1. - progress * (1. - zoom)).max(0.0001)
+    }
+
+    /// The zoom of the open overview. Framed overviews zoom out further when needed, so that
+    /// every window of the widest workspace fits beside the panels, wrapping into two rows when
+    /// that keeps the previews larger.
+    pub fn overview_target_zoom(&self) -> f64 {
+        let zoom = compute_overview_zoom(&self.options, Some(1.));
+        if !self.options.overview.framed_workspaces {
+            return zoom;
+        }
+        let fit = self
+            .workspaces
+            .iter()
+            .filter_map(|ws| self.overview_plan(ws).map(|plan| plan.zoom))
+            .fold(f64::INFINITY, f64::min);
+        if !fit.is_finite() {
+            return zoom;
+        }
+        zoom.min(fit).max(OVERVIEW_MIN_ZOOM.min(zoom))
+    }
+
+    /// How a workspace lays out its previews in the open overview.
+    fn overview_plan(&self, ws: &Workspace<W>) -> Option<OverviewPlan> {
+        let config = compute_overview_zoom(&self.options, Some(1.));
+        let available = self.overview_usable_area(1.).size.w - 2. * OVERVIEW_FRAME_PADDING;
+        if available <= 0. {
+            return None;
+        }
+        let gaps = self.options.layout.gaps;
+        // The zoom at which a row of these widths fits, keeping a fixed on-screen gutter.
+        let row_zoom = |widths: &[f64], extra: f64| {
+            let joins = widths.len().saturating_sub(1) as f64;
+            let width = widths.iter().sum::<f64>() + extra;
+            (width > 0.).then(|| (available - joins * OVERVIEW_PREVIEW_GAP) / width)
+        };
+        let scrolling = ws.scrolling();
+        let widths = scrolling.column_widths();
+        let pinned = widths.len() != scrolling.columns().count();
+
+        if !ws.floating().is_empty() || pinned {
+            // Floating previews line up after the strip; keep a single row.
+            let positions = self.floating_overview_layout(ws, 1.);
+            let extent = visible_extent(ws.tiles_with_overview_positions(&positions))?;
+            let joins = scrolling.columns().count().saturating_sub(1) as f64;
+            let width = extent.end - extent.start - joins * (gaps + scrolling.overview_spread());
+            let zoom = (available - joins * OVERVIEW_PREVIEW_GAP) / width.max(1.);
+            return Some(OverviewPlan {
+                rows: 1,
+                split: widths.len(),
+                zoom: zoom.min(config),
+            });
+        }
+        if widths.is_empty() {
+            return None;
+        }
+        let one = row_zoom(&widths, 0.)?.min(config);
+        let mut best = OverviewPlan {
+            rows: 1,
+            split: widths.len(),
+            zoom: one,
+        };
+        if widths.len() >= 3 {
+            // Two rows of nearly equal width, if the taller card still fits on screen. A row
+            // is as tall as the tallest column, with its titles above.
+            let height = scrolling
+                .columns()
+                .map(|column| {
+                    let tiles: Vec<f64> =
+                        column.tiles().map(|(tile, _)| tile.tile_size().h).collect();
+                    tiles.iter().sum::<f64>() + gaps * tiles.len().saturating_sub(1) as f64
+                })
+                .fold(0., f64::max)
+                .max(1.);
+            let room =
+                self.working_area.size.h * 0.8 - OVERVIEW_ROW_GAP - 2. * OVERVIEW_LABEL_HEIGHT;
+            let tall = room / (2. * height);
+            let total: f64 = widths.iter().sum();
+            let mut first = 0.;
+            // On a tie the first row takes the extra column: three over two, not two over three.
+            let split = (1..widths.len())
+                .rev()
+                .min_by(|a, b| {
+                    let wa: f64 = widths[..*a].iter().sum();
+                    let wb: f64 = widths[..*b].iter().sum();
+                    (wa - total / 2.).abs().total_cmp(&(wb - total / 2.).abs())
+                })
+                .unwrap_or(1);
+            first += widths[..split].iter().sum::<f64>();
+            let _ = first;
+            let wide = row_zoom(&widths[..split], 0.)?.min(row_zoom(&widths[split..], 0.)?);
+            let two = wide.min(tall).min(config);
+            // From five windows on, rows keep the grid steady as windows come and go, unless
+            // the previews would get noticeably smaller.
+            if two > one * 1.12 || (widths.len() >= 5 && two >= one * 0.9) {
+                best = OverviewPlan {
+                    rows: 2,
+                    split,
+                    zoom: two,
+                };
+            }
+        }
+        Some(best)
     }
 
     pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
@@ -1632,6 +1871,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let prev_render_idx = self.workspace_render_idx();
         self.overview_progress = progress.map(OverviewProgress::from);
+        self.update_overview_spread();
         let new_render_idx = self.workspace_render_idx();
 
         // If the view jumped (can happen when going from corrected to uncorrected render_idx, for
@@ -1642,6 +1882,161 @@ impl<W: LayoutElement> Monitor<W> {
                 // FIXME: maintain velocity.
                 *anim = anim.restarted(prev_render_idx, anim.to(), 0.);
             }
+        }
+    }
+
+    fn update_overview_spread(&mut self) {
+        let progress = self
+            .overview_progress_value()
+            .unwrap_or_default()
+            .clamp(0., 1.);
+        let framed = self.options.overview.framed_workspaces && progress > 0.;
+        for ws in &mut self.workspaces {
+            ws.scrolling_mut().set_overview_spread(0.);
+            ws.scrolling_mut().set_overview_layout(Vec::new(), 0.);
+        }
+        // Windows out of view on the desktop fade in on their way to the grid, rather than
+        // sweeping across the ones you can see.
+        // They wait in their own slots and appear while the zoom is under way, so the grid forms
+        // as one movement without previews crossing each other.
+        let view_width = self.view_size.w;
+        let arriving = ((progress - 0.55) / 0.4).clamp(0., 1.);
+        let arriving = arriving * arriving * (3. - 2. * arriving);
+        // Decided once, from the desktop as it was when the overview started opening.
+        if progress <= 0. {
+            self.overview_on_desktop = None;
+        } else if self.overview_on_desktop.is_none() {
+            let mut seen = std::collections::HashSet::new();
+            for ws in &self.workspaces {
+                let active = ws.scrolling().active_column().map(|column| column.id());
+                // A column cut by a screen edge had slid out of sight on the desktop.
+                for (column, pos) in ws.scrolling().columns_with_render_positions() {
+                    let start = pos.x - column.edge_shift();
+                    if Some(column.id()) == active
+                        || (start >= -1. && start + column.width() <= view_width + 1.)
+                    {
+                        seen.insert(column.id());
+                    }
+                }
+            }
+            self.overview_on_desktop = Some(seen);
+        }
+        let mut on_desktop = Vec::with_capacity(self.workspaces.len());
+        for ws in &mut self.workspaces {
+            let visible: Vec<bool> = ws
+                .scrolling()
+                .columns()
+                .map(|column| {
+                    self.overview_on_desktop
+                        .as_ref()
+                        .is_none_or(|seen| seen.contains(&column.id()))
+                })
+                .collect();
+            // By id: the render order puts the active column first.
+            let seen = self.overview_on_desktop.as_ref();
+            for (column, _) in ws.scrolling_mut().columns_with_render_positions_mut() {
+                let visible = seen.is_none_or(|seen| seen.contains(&column.id()));
+                let fade = if progress <= 0. || visible {
+                    1.
+                } else {
+                    arriving
+                };
+                for (tile, _) in column.tiles_mut() {
+                    tile.set_fade(fade);
+                }
+            }
+            on_desktop.push(visible);
+        }
+        let zoom = framed.then(|| self.overview_target_zoom());
+        // Offsets live in workspace space, which shrinks as the overview zooms out; scale them
+        // so that every preview moves on screen in a straight line at an even pace.
+        let current_zoom = self.overview_zoom();
+        let travel = |target: f64| (progress * target / current_zoom).min(1.);
+        let plans: Vec<_> = self
+            .workspaces
+            .iter()
+            .map(|ws| framed.then(|| self.overview_plan(ws)).flatten())
+            .collect();
+        let gaps = self.options.layout.gaps;
+        for ((ws, plan), visible) in zip(zip(&mut self.workspaces, plans), on_desktop) {
+            let Some(zoom) = zoom else { continue };
+            // Windows that were out of view wait in their slots rather than crossing the grid.
+            let travel_to = |idx: usize, travel: f64| {
+                if visible.get(idx).copied().unwrap_or(true) {
+                    travel
+                } else {
+                    1.
+                }
+            };
+            // Grow the gutters as the overview zooms out, so they stay the same on screen.
+            let spread = (OVERVIEW_PREVIEW_GAP / zoom - gaps).max(0.);
+            let widths = ws.scrolling().column_widths();
+            let pinned = widths.len() != ws.scrolling().columns().count();
+            // The overview strip starts at the workspace origin, wherever the view had
+            // scrolled, so the workspace's geometry covers its previews.
+            let origin = -ws.scrolling().strip_origin();
+            match plan {
+                Some(plan) if plan.rows == 2 && !pinned => {
+                    // The second row starts under the first, each row centred on the other.
+                    let row_width = |widths: &[f64]| {
+                        widths.iter().sum::<f64>()
+                            + (widths.len().saturating_sub(1)) as f64 * (gaps + spread)
+                    };
+                    let first = row_width(&widths[..plan.split]);
+                    let second = row_width(&widths[plan.split..]);
+                    let start_second: f64 =
+                        widths[..plan.split].iter().map(|width| width + gaps).sum();
+                    let row_gap = OVERVIEW_ROW_GAP / zoom;
+                    // Rows stack by the height of their tallest column and its label, so the
+                    // gap between rows matches the gap between columns.
+                    let height = ws
+                        .scrolling()
+                        .columns()
+                        .map(|column| {
+                            let tiles: Vec<f64> =
+                                column.tiles().map(|(tile, _)| tile.tile_size().h).collect();
+                            tiles.iter().sum::<f64>() + gaps * tiles.len().saturating_sub(1) as f64
+                        })
+                        .fold(0., f64::max)
+                        .max(1.)
+                        + OVERVIEW_LABEL_HEIGHT / zoom;
+                    let travel = travel(zoom);
+                    let offsets = (0..widths.len())
+                        .map(|idx| {
+                            let point = if idx < plan.split {
+                                Point::from((origin + idx as f64 * spread, 0.))
+                            } else {
+                                let j = (idx - plan.split) as f64;
+                                Point::from((
+                                    origin - start_second + j * spread + (first - second) / 2.,
+                                    height + row_gap,
+                                ))
+                            };
+                            // Straight from the desktop to the grid.
+                            point.upscale(travel_to(idx, travel))
+                        })
+                        .collect();
+                    let extra = (height + row_gap) * travel;
+                    ws.scrolling_mut().set_overview_layout(offsets, extra);
+                }
+                _ if !pinned && ws.floating().is_empty() => {
+                    let travel = travel(zoom);
+                    let offsets = (0..widths.len())
+                        .map(|idx| {
+                            Point::from((origin + idx as f64 * spread, 0.))
+                                .upscale(travel_to(idx, travel))
+                        })
+                        .collect();
+                    ws.scrolling_mut().set_overview_layout(offsets, 0.);
+                }
+                _ => ws.scrolling_mut().set_overview_spread(spread * progress),
+            }
+        }
+        // Captions take over from the titlebars as soon as they start to fade in.
+        let captions = self.options.overview.framed_workspaces && progress > 0.6;
+        for ws in &mut self.workspaces {
+            ws.scrolling_mut().set_overview_captions(captions);
+            ws.scrolling_mut().set_overview_open(progress > 0.);
         }
     }
 
@@ -1732,6 +2127,30 @@ impl<W: LayoutElement> Monitor<W> {
         if !self.has_framed_overview() || progress <= 0. || ws.floating().is_empty() {
             return Vec::new();
         }
+        let positions = self.floating_overview_layout(ws, progress);
+        let extent = visible_extent(
+            ws.tiles_with_overview_positions(&self.floating_overview_layout(ws, 1.)),
+        );
+        let fits = extent.is_some_and(|extent| {
+            (extent.end - extent.start) * self.overview_target_zoom()
+                <= self.overview_usable_area(1.).size.w - 2. * OVERVIEW_FRAME_PADDING + 0.5
+        });
+        if fits {
+            positions
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Floating windows lined up after the tiled strip, without checking that they fit.
+    fn floating_overview_layout(
+        &self,
+        ws: &Workspace<W>,
+        progress: f64,
+    ) -> Vec<(W::Id, Point<f64, Logical>)> {
+        if !self.options.overview.framed_workspaces || progress <= 0. || ws.floating().is_empty() {
+            return Vec::new();
+        }
         let extent = visible_extent(ws.scrolling().tiles_with_render_positions());
         let gap = ws.options.layout.gaps.max(22.);
         let y = ws.working_area().loc.y + ws.options.layout.gaps + self.overview_strip_offset(ws);
@@ -1744,16 +2163,6 @@ impl<W: LayoutElement> Monitor<W> {
             .tiles_with_render_positions()
             .collect::<Vec<_>>();
         floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-        let total_width = x - left
-            + floating
-                .iter()
-                .map(|(tile, _)| tile.tile_size().w + gap)
-                .sum::<f64>()
-            - gap;
-        let final_zoom = self.options.overview.zoom.clamp(0.0001, 0.75);
-        if total_width * final_zoom > self.overview_usable_area(1.).size.w - 2. * OVERVIEW_INSET {
-            return Vec::new();
-        }
 
         let scale = self.scale.fractional_scale();
         let progress = progress.clamp(0., 1.);
@@ -1810,18 +2219,64 @@ impl<W: LayoutElement> Monitor<W> {
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
-        let first_ws_y = round_logical_in_physical(scale, first_ws_y);
-
         let progress = self
             .overview_progress_value()
             .unwrap_or_default()
             .clamp(0., 1.);
+        let mut first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        // The empty workspace at the end is a compact row that sits close under the others.
+        let last = self.workspaces.len() - 1;
+        let compact_last = self.options.overview.framed_workspaces
+            && last != self.active_workspace_idx
+            && !self.workspaces[last].has_windows_or_name();
+        let pull = if compact_last {
+            (gap - OVERVIEW_EMPTY_GAP).max(0.) * progress
+        } else {
+            0.
+        };
+        if self.options.overview.framed_workspaces
+            && self.active_workspace_idx + 1 < self.workspaces.len()
+        {
+            // Center the open workspace together with the header above it and the card of
+            // the workspace below it.
+            let below = OVERVIEW_EMPTY_CARD_HEIGHT.min(ws_size.h);
+            let below_gap = if self.active_workspace_idx + 1 == last {
+                gap - pull
+            } else {
+                gap
+            };
+            first_ws_y -= (below_gap + below - OVERVIEW_HEADER_OFFSET) / 2. * progress;
+        }
+        // In the overview, a workspace's geometry spans all its previews.
+        let spans: Vec<f64> = if self.options.overview.framed_workspaces && progress > 0. {
+            self.workspaces
+                .iter()
+                .map(|ws| {
+                    let positions = self.floating_overview_positions(ws, progress);
+                    visible_extent(ws.tiles_with_overview_positions(&positions))
+                        .map_or(0., |extent| extent.end.max(0.) * zoom)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Workspaces that wrap into rows take more height; keep the open one centred.
+        let extras: Vec<f64> = self
+            .workspaces
+            .iter()
+            .map(|ws| ws.scrolling().overview_extra_height() * zoom)
+            .collect();
+        if let Some(extra) = extras.get(self.active_workspace_idx) {
+            first_ws_y -= extra / 2.;
+        }
+
+        let first_ws_y = round_logical_in_physical(scale, first_ws_y);
+
         let overview_origins: Vec<_> = if self.options.overview.framed_workspaces && progress > 0. {
-            let final_zoom = self.options.overview.zoom.clamp(0.0001, 0.75);
+            let final_zoom = self.overview_target_zoom();
             let usable = self.overview_usable_area(1.);
-            let viewport =
-                usable.loc.x + OVERVIEW_INSET..usable.loc.x + usable.size.w - OVERVIEW_INSET;
+            let viewport = usable.loc.x + OVERVIEW_FRAME_PADDING
+                ..usable.loc.x + usable.size.w - OVERVIEW_FRAME_PADDING;
             self.workspaces
                 .iter()
                 .enumerate()
@@ -1833,7 +2288,10 @@ impl<W: LayoutElement> Monitor<W> {
 
                     let positions = self.floating_overview_positions(ws, 1.);
                     let extent = visible_extent(ws.tiles_with_overview_positions(&positions))?;
-                    fit_overview_strip(extent, &viewport, zoom, final_zoom)
+                    fit_overview_strip(extent.clone(), &viewport, zoom, final_zoom).map(|_| {
+                        let center = (viewport.start + viewport.end) / 2.;
+                        (center, (extent.start + extent.end) / 2.)
+                    })
                 })
                 .collect()
         } else {
@@ -1842,10 +2300,20 @@ impl<W: LayoutElement> Monitor<W> {
 
         // Return position for one-past-last workspace too.
         (0..=self.workspaces.len()).map(move |idx| {
-            let y = first_ws_y + idx as f64 * ws_height_with_gap;
+            let mut y = first_ws_y + idx as f64 * ws_height_with_gap;
+            if idx >= last {
+                y -= pull;
+            }
+            y += extras[..idx.min(extras.len())].iter().sum::<f64>();
+            let mut ws_size = ws_size;
+            ws_size.h += extras.get(idx).copied().unwrap_or(0.);
+            ws_size.w = ws_size.w.max(spans.get(idx).copied().unwrap_or(0.));
             let mut loc = Point::from((0., y)) + static_offset;
-            if let Some(Some(origin)) = overview_origins.get(idx) {
-                loc.x += (origin - loc.x) * progress;
+            if let Some(Some((center, mid))) = overview_origins.get(idx) {
+                // Move the middle of the strip straight to the middle of the overview while it
+                // zooms, so it never overshoots and slides back.
+                let start = loc.x + mid;
+                loc.x = start + (center - start) * progress - mid * zoom;
             }
 
             // Even though all components that go into loc are rounded to physical pixels, the
@@ -1996,10 +2464,223 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn scrolling_visible_span(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
         let bounds = self.scroll_clip(ws)?;
+        if self.navigation_strip_top().is_some() {
+            // Partly visible columns are cut one gap in from the panels while the view moves,
+            // and retract behind an edge tab once it settles.
+            let gaps = ws.options.layout.gaps;
+            // Partly visible columns slide out whole as the view settles (see
+            // `update_edge_shifts`), so the cut stays at the edge.
+            let span = bounds.start + gaps..bounds.end - gaps;
+            return Some(span);
+        }
         if ws.id() == self.active_workspace_ref().id() {
             return Some(Self::exclude_narrow_peeks(bounds, &self.scroll_cues()));
         }
         Some(bounds)
+    }
+
+    /// Where partly visible columns end once the view settles, and how settled it is.
+    fn resting_edges(
+        &self,
+        ws: &Workspace<W>,
+        span: &Range<f64>,
+    ) -> (Option<f64>, Option<f64>, f64) {
+        let scrolling = ws.scrolling();
+        let settle = scrolling.remaining_view_movement().map_or(0., |distance| {
+            (1. - distance.abs() / 80.).clamp(0., 1.).powi(2)
+        });
+        if settle <= 0. || self.overview_progress.is_some() {
+            return (None, None, 0.);
+        }
+        let gaps = ws.options.layout.gaps;
+        let active = scrolling.active_column().map(|column| column.id());
+        let columns = || {
+            scrolling
+                .columns_with_render_positions()
+                .filter(|(column, _)| Some(column.id()) != active)
+                .map(|(column, pos)| (pos.x, pos.x + column.width()))
+        };
+        let left = columns()
+            .filter(|(start, end)| *start < span.start - 0.5 && *end > span.start + 0.5)
+            .map(|(_, end)| end + gaps / 2.)
+            .reduce(f64::max);
+        let right = columns()
+            .filter(|(start, end)| *start < span.end - 0.5 && *end > span.end + 0.5)
+            .map(|(start, _)| start - gaps / 2.)
+            .reduce(f64::min);
+        (left, right, settle)
+    }
+
+    /// Tiles of the active workspace that lie mostly beyond the panels, with how strongly to
+    /// dim them.
+    fn peek_scrims(&self) -> Vec<(Rectangle<f64, Logical>, f32, bool, bool)> {
+        let ws = self.active_workspace_ref();
+        if self.workspace_switch.is_some()
+            || self.overview_progress.is_some()
+            || self.navigation_strip_top().is_none()
+        {
+            return Vec::new();
+        }
+        let Some(bounds) = self.scrolling_visible_span(ws) else {
+            return Vec::new();
+        };
+        // While a floating window has focus, the tiled windows recede a little, like the
+        // backdrop of a dialog.
+        let modal = ws.floating_is_active() && ws.is_floating_visible();
+        ws.scrolling()
+            .tiles_with_render_positions()
+            .filter(|(_, _, visible)| *visible)
+            .filter_map(|(tile, pos, _)| {
+                let size = tile.tile_size();
+                if size.w <= 0. {
+                    return None;
+                }
+                let shown = (pos.x + size.w).min(bounds.end) - pos.x.max(bounds.start);
+                let fraction = (shown / size.w).clamp(0., 1.);
+                // Every partly hidden window recedes by the same amount; the ramp only
+                // smooths the moment it starts to leave.
+                let strength = ((1. - fraction) / 0.06).clamp(0., 1.) as f32;
+                let strength = if modal { strength.max(0.35) } else { strength };
+                // A window fading out at the edge takes its shade with it.
+                let strength = strength * tile.fade() as f32;
+                (strength > 0.).then(|| {
+                    let loc = self.workspace_origin(ws) + pos + tile.bob_offset();
+                    // Only the visible part; the clipped side ends square like the window.
+                    let left = loc.x.max(bounds.start);
+                    let right = (loc.x + size.w).min(bounds.end);
+                    let rect = Rectangle::new(
+                        Point::from((left, loc.y)),
+                        Size::from(((right - left).max(0.), size.h)),
+                    );
+                    let clipped_left = loc.x < bounds.start - 0.5;
+                    let clipped_right = loc.x + size.w > bounds.end + 0.5;
+                    (rect, strength, clipped_left, clipped_right)
+                })
+            })
+            .collect()
+    }
+
+    fn render_peek_scrims<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        ws: &Workspace<W>,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        if !BorderRenderElement::has_shader(renderer) {
+            return;
+        }
+        let scrims = self.peek_scrims();
+        let mut elements = self.peek_scrims.borrow_mut();
+        let count = scrims.len().max(elements.len());
+        elements.resize_with(count, BorderRenderElement::empty);
+        let backdrop = ws.options.layout.background_color;
+        let scale = self.scale.fractional_scale() as f32;
+        let radius = ws
+            .scrolling()
+            .tiles()
+            .next()
+            .map(|tile| {
+                tile.window()
+                    .rules()
+                    .geometry_corner_radius
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let light = 0.2126 * backdrop.r + 0.7152 * backdrop.g + 0.0722 * backdrop.b >= 0.55;
+        // Darken in both schemes; lightening reads as glare on pale windows.
+        // Windows sliding past stay as they are; only a floating window's backdrop recedes.
+        let (shade, amount) = if light { (0.06, 0.10) } else { (0., 0.18) };
+        let modal = ws.floating_is_active() && ws.is_floating_visible();
+        let amount = if modal { amount } else { 0. };
+        let scale_f64 = self.scale.fractional_scale();
+        // A short fade inside the clipped edge, so the window reads as continuing past it.
+        for (index, (rect, strength, clipped_left, clipped_right)) in scrims
+            .iter()
+            .filter(|(rect, _, left, right)| rect.size.w >= 1. && (*left || *right))
+            .take(2)
+            .enumerate()
+        {
+            let (at_left, at_right) = (*clipped_left, *clipped_right);
+            if !(at_left || at_right) || rect.size.w < 8. {
+                continue;
+            }
+            let width = rect.size.w.min(24.);
+            let x = if at_left {
+                rect.loc.x
+            } else {
+                rect.loc.x + rect.size.w - width
+            };
+            if let Some(fade) = self.scroll_edge_fades[index].render(
+                renderer.as_gles_renderer(),
+                String::new(),
+                Color::new_unpremul(shade, shade, shade, 1.),
+                LabelKind::EdgeFade {
+                    height: rect.size.h.round().max(1.) as u32,
+                    from_left: at_left,
+                },
+                width,
+                scale_f64,
+                Point::from((x, rect.loc.y)),
+                0.3 * strength,
+            ) {
+                push(RelocateRenderElement::from_element(
+                    RescaleRenderElement::from_element(
+                        MonitorInnerRenderElement::Caption(fade),
+                        Point::default(),
+                        1.,
+                    ),
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            }
+        }
+        // Dimming as textures: the border shader cannot darken with a translucent fill.
+        let mut labels = self.peek_scrim_labels.borrow_mut();
+        let visible: Vec<_> = scrims
+            .into_iter()
+            .filter(|(rect, ..)| rect.size.w >= 1.)
+            .collect();
+        let count = visible.len().max(labels.len());
+        labels.resize_with(count, PreviewLabel::default);
+        for ((rect, strength, clipped_left, clipped_right), label) in
+            visible.into_iter().zip(labels.iter())
+        {
+            // Square only where the window is actually cut.
+            let (round_left, round_right) = (!clipped_left, !clipped_right);
+            if let Some(scrim) = label.render_with_ink(
+                renderer.as_gles_renderer(),
+                String::new(),
+                String::new(),
+                Color::new_unpremul(shade, shade, shade, amount),
+                Color::new_unpremul(shade, shade, shade, 1.),
+                LabelKind::Scrim {
+                    height: rect.size.h.round().max(1.) as u32,
+                    round_left,
+                    round_right,
+                },
+                rect.size.w,
+                scale_f64,
+                rect.loc,
+                strength,
+            ) {
+                push(RelocateRenderElement::from_element(
+                    RescaleRenderElement::from_element(
+                        MonitorInnerRenderElement::Caption(scrim),
+                        Point::default(),
+                        1.,
+                    ),
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            }
+        }
+        let _ = (elements, radius, scale);
+    }
+
+    fn workspace_origin(&self, ws: &Workspace<W>) -> Point<f64, Logical> {
+        self.workspaces_with_render_geo()
+            .find(|(candidate, _)| candidate.id() == ws.id())
+            .map_or(Point::default(), |(_, geo)| geo.loc)
     }
 
     fn navigation_strip_top(&self) -> Option<f64> {
@@ -2207,7 +2888,10 @@ impl<W: LayoutElement> Monitor<W> {
                 ScrollCue {
                     rect,
                     destination: column.active_window(),
-                    clipped_column_edge: (clip_progress > 0.).then(|| {
+                    // With the window bar, partly visible columns stay in view.
+                    clipped_column_edge: (clip_progress > 0.
+                        && self.navigation_strip_top().is_none())
+                    .then(|| {
                         let boundary = if left { bounds.start } else { bounds.end };
                         boundary + (edge - boundary) * clip_progress
                     }),
@@ -2228,7 +2912,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     /// Normal tiled windows leave a row for the strip, so the same controls
     /// remain available in each position without painting over a client surface.
-    fn navigation_strip(&self, decorate: bool) -> Option<NavigationStrip<'_, W>> {
+    fn navigation_strip(&self) -> Option<NavigationStrip<'_, W>> {
         let ws = self.active_workspace_ref();
         if self.workspace_switch.is_some()
             || self.overview_progress.is_some()
@@ -2253,8 +2937,7 @@ impl<W: LayoutElement> Monitor<W> {
             .columns_with_render_positions()
             .map(|(column, position)| (column.id(), position.x))
             .collect();
-        let cues = self.scroll_cues_for(ws, &bounds);
-        let visible = Self::exclude_narrow_peeks(bounds.clone(), &cues);
+        let visible = bounds.clone();
         let mut windows = scrolling
             .columns()
             .map(|column| {
@@ -2268,6 +2951,7 @@ impl<W: LayoutElement> Monitor<W> {
                 (window, direction, fully_visible, false, column.width(), x)
             })
             .collect::<Vec<_>>();
+        let tiled_count = windows.len();
         let mut floating = ws
             .floating()
             .tiles_with_render_positions()
@@ -2286,6 +2970,22 @@ impl<W: LayoutElement> Monitor<W> {
         if windows.len() == 1 && floating.is_empty() {
             return None;
         }
+        let floating_visible = ws.is_floating_visible() && !floating.is_empty();
+        // The bar's top lines up with the rail's: both sit 12 px from the screen edge.
+        let tray_y = top + NAVIGATION_STRIP_HEIGHT - BAR_TRAY_HEIGHT;
+        // The bar stays clear of floating windows that reach into its row.
+        let row = Rectangle::new(
+            Point::from((bounds.start, tray_y)),
+            Size::from((bounds.end - bounds.start, BAR_TRAY_HEIGHT)),
+        );
+        if floating_visible
+            && floating.iter().any(|(tile, position)| {
+                row.intersection(Rectangle::new(*position, tile.tile_size()))
+                    .is_some()
+            })
+        {
+            return None;
+        }
         let edge_targets = [
             windows
                 .iter()
@@ -2299,170 +2999,248 @@ impl<W: LayoutElement> Monitor<W> {
         let active_index = windows
             .iter()
             .position(|(window, ..)| window.id() == active.id())?;
-        let gap = STRIP_TITLE_GAP;
-        // Keep room for stepping through tiled columns even when names fill the row.
-        let inset = if floating.is_empty() {
-            STRIP_TRAY_PADDING + STRIP_ARROW_GAP + STRIP_ARROW_WIDTH + 2.
-        } else {
-            16.
-        };
-        let available = bounds.end - bounds.start - 2. * inset;
-        let capacity = ((available + gap) / 160.).floor() as usize;
-        let count = windows
-            .len()
-            .min(capacity.max(1))
-            .min(MAX_NAVIGATION_TITLES);
-        let action_width = 188.;
-        let action_gap = 16.;
-        let floating_visible = ws.is_floating_visible() && !floating.is_empty();
         let layer_destination = match (scrolling.active_window(), ws.floating().active_window()) {
-            (Some(tiled), Some(floating))
-                if available >= action_width + action_gap + (150. + gap) * count as f64 =>
-            {
-                Some(if floating_visible { tiled } else { floating })
-            }
+            (Some(tiled), Some(floating)) => Some(if floating_visible { tiled } else { floating }),
             _ => None,
         };
-        let action_space = layer_destination.map_or(0., |_| action_width + action_gap);
-        let first = active_index
-            .saturating_sub(count / 2)
-            .min(windows.len() - count);
-        let windows = &windows[first..first + count];
-        let gaps = (count - 1) as f64 * gap;
-        let button_space = (available - action_space - gaps).min(194. * count as f64);
-        let widest_window = windows
-            .iter()
-            .map(|(_, _, _, _, width, _)| *width)
-            .fold(1., f64::max);
-        let weight = |width: f64| width.max(widest_window * 0.55);
-        let total_weight: f64 = windows
-            .iter()
-            .map(|(_, _, _, _, width, _)| weight(*width))
-            .sum();
-        let tabs_width = button_space + gaps;
-        let tray_width = tabs_width + action_space;
-        let start = (bounds.start + bounds.end - tray_width) / 2.;
-        let y = top + (NAVIGATION_STRIP_HEIGHT - STRIP_BUTTON_HEIGHT) / 2.;
-        let uncovered = |rect: Rectangle<f64, Logical>| {
-            let covered = floating_visible
-                && floating.iter().any(|(tile, position)| {
-                    rect.intersection(Rectangle::new(*position, tile.tile_size()))
-                        .is_some()
-                });
-            (!covered).then_some(rect)
-        };
-        let button = |x, width| {
-            uncovered(Rectangle::new(
-                Point::from((x, y)),
-                Size::from((width, STRIP_BUTTON_HEIGHT)),
-            ))
-        };
-        let mut next_x = start;
-        let mut motion_extent = f64::INFINITY..f64::NEG_INFINITY;
-        let titles: Vec<_> = windows
-            .iter()
-            .filter_map(
-                |&(window, direction, fully_visible, floating, window_width, column_x)| {
-                    let width = button_space * weight(window_width) / total_weight;
-                    let x = next_x;
-                    next_x += width + gap;
-                    let mut rect = button(x, width)?;
-                    let compact =
-                        !floating && (!floating_visible || layer_destination.is_some() || moving);
-                    if compact {
-                        rect.size.h = STRIP_GROUP_BUTTON_HEIGHT;
-                    }
-                    if decorate && moving && !floating {
-                        let left = (visible.start - column_x).max(0.);
-                        let right = (visible.end - column_x).min(window_width);
-                        if right > left && window_width > 0. {
-                            motion_extent.start =
-                                motion_extent.start.min(x + width * left / window_width);
-                            motion_extent.end =
-                                motion_extent.end.max(x + width * right / window_width);
-                        }
-                    }
-                    let mut visible_after = Vec::new();
-                    if decorate && !moving && direction.is_some() {
-                        let columns = scrolling.columns_after_activating(window.id());
-                        for (column, x) in columns.into_iter().flatten() {
-                            let width = column.width();
-                            if x < bounds.start - pixel || x + width > bounds.end + pixel {
-                                continue;
-                            }
-                            visible_after.push(column.active_window());
-                        }
-                    }
-                    Some(NavigationTitle {
-                        rect,
-                        window,
-                        visible_after,
-                        active: window.id() == active.id(),
-                        direction,
-                        fully_visible,
-                        floating,
-                    })
-                },
-            )
-            .collect();
-        let layer_action = layer_destination.and_then(|window| {
-            button(start + tabs_width + action_gap, action_width).map(|rect| (rect, window))
+
+        let gap = BAR_PILL_GAP;
+        let pad = (BAR_TRAY_HEIGHT - BAR_PILL_HEIGHT) / 2.;
+        let button = BAR_PILL_HEIGHT;
+        // Each arrow carries the number of windows out of view on its side; with nothing out
+        // of view, there are no arrows.
+        let counts = [Some(true), Some(false)].map(|side| {
+            windows[..tiled_count]
+                .iter()
+                .filter(|(_, direction, ..)| *direction == side)
+                .count()
         });
-        let viewport_mark = |span: Range<f64>| {
-            uncovered(Rectangle::new(
-                Point::from((span.start, y + STRIP_BUTTON_HEIGHT + 4.)),
-                Size::from((span.end - span.start, 2.)),
-            ))
+        let show_arrows = tiled_count >= 2 && counts.iter().any(|count| *count > 0);
+        let arrow_width =
+            // Room for a "+N" badge beside the chevron.
+            |count: usize| {
+                button
+                    + if count > 0 {
+                        12. + 7. * (count.to_string().len() + 1) as f64
+                    } else {
+                        0.
+                    }
+            };
+        let arrow_widths = counts.map(arrow_width);
+        let arrow_space = if show_arrows {
+            arrow_widths[0] + arrow_widths[1] + 2. * gap
+        } else {
+            0.
         };
-        let tray = uncovered(Rectangle::new(
-            Point::from((start - STRIP_TRAY_PADDING, top + 4.)),
-            Size::from((tray_width + 2. * STRIP_TRAY_PADDING, STRIP_TRAY_HEIGHT)),
-        ));
-        let edge_actions = if floating.is_empty() && edge_targets.iter().any(Option::is_some) {
-            std::array::from_fn(|index| {
-                let tray = tray?;
-                let x = if index == 0 {
-                    tray.loc.x - STRIP_ARROW_GAP - STRIP_ARROW_WIDTH
+        // The floating layer's control is a round icon button, set apart from the windows.
+        let toggle_width = layer_destination.map_or(0., |_| BAR_PILL_HEIGHT);
+        let toggle_space = if layer_destination.is_some() {
+            toggle_width + gap
+        } else {
+            0.
+        };
+        let divider_space = 2. * BAR_DIVIDER_GAP + 1. - gap;
+        // Each name gets the width of its label, within limits; the bar grows with them up to
+        // a share of the output, then the names shrink and finally the bar shows fewer windows.
+        let natural = windows
+            .iter()
+            .map(|&(window, _, _, is_floating, _, _)| {
+                let stacked = if is_floating {
+                    1
                 } else {
-                    tray.loc.x + tray.size.w + STRIP_ARROW_GAP
+                    scrolling
+                        .columns()
+                        .find(|column| column.contains(window.id()))
+                        .map_or(1, |column| column.tiles().count())
                 };
-                if x < bounds.start || x + STRIP_ARROW_WIDTH > bounds.end {
-                    return None;
-                }
-                Some(NavigationArrow {
-                    rect: button(x, STRIP_ARROW_WIDTH)?,
-                    target: edge_targets[index],
-                })
+                let has_icon = window.with_app_id(|app_id| {
+                    crate::app_icons::icon(
+                        app_id,
+                        (16. * self.scale.fractional_scale()).round() as i32,
+                    )
+                    .is_some()
+                });
+                window
+                    .with_decoration_title(|title| {
+                        measure_bar_label(title, has_icon, is_floating, stacked)
+                    })
+                    .clamp(BAR_PILL_MIN_WIDTH, BAR_PILL_MAX_WIDTH)
             })
-        } else {
-            [None, None]
+            .collect::<Vec<_>>();
+        let max_width = ((bounds.end - bounds.start) * BAR_MAX_SHARE)
+            .min(bounds.end - bounds.start - 2. * BAR_MARGIN);
+        let fixed = 2. * pad + arrow_space + toggle_space;
+        let row_width = |range: Range<usize>| {
+            let has_tiled = windows[range.clone()].iter().any(|window| !window.3);
+            let has_floating = windows[range.clone()].iter().any(|window| window.3);
+            let divider = if has_tiled && has_floating {
+                divider_space
+            } else {
+                0.
+            };
+            natural[range.clone()].iter().sum::<f64>() + gap * (range.len() as f64 - 1.) + divider
         };
-        let viewports = if !decorate {
-            Vec::new()
-        } else if moving {
-            (!motion_extent.is_empty())
-                .then(|| viewport_mark(motion_extent))
-                .flatten()
-                .into_iter()
+        let mut count = windows.len().min(MAX_NAVIGATION_TITLES);
+        let first = |count: usize| {
+            active_index
+                .saturating_sub(count / 2)
+                .min(windows.len() - count)
+        };
+        // Fewer windows only once every name is at its minimum width.
+        while count > 1 {
+            let start = first(count);
+            let min_row = BAR_PILL_MIN_WIDTH * count as f64 + gap * (count as f64 - 1.);
+            let has_both = windows[start..start + count].iter().any(|w| w.3)
+                && windows[start..start + count].iter().any(|w| !w.3);
+            let min_row = min_row + if has_both { divider_space } else { 0. };
+            if fixed + min_row <= max_width {
+                break;
+            }
+            count -= 1;
+        }
+        let first = first(count);
+        let shown = &windows[first..first + count];
+        let shown_tiled = shown.iter().filter(|window| !window.3).count();
+        let shown_floating = count - shown_tiled;
+        let row = row_width(first..first + count);
+        let available_row = max_width - fixed;
+        // Shrink the wider names first, keeping each at least at the minimum.
+        let widths: Vec<f64> = if row <= available_row {
+            natural[first..first + count].to_vec()
+        } else {
+            let slack = |w: f64| (w - BAR_PILL_MIN_WIDTH).max(0.);
+            let total_slack: f64 = natural[first..first + count]
+                .iter()
+                .map(|w| slack(*w))
+                .sum();
+            let excess = row - available_row;
+            let factor = if total_slack > 0. {
+                (1. - excess / total_slack).clamp(0., 1.)
+            } else {
+                0.
+            };
+            natural[first..first + count]
+                .iter()
+                .map(|w| BAR_PILL_MIN_WIDTH + slack(*w) * factor)
                 .collect()
-        } else {
-            navigation_spans(
-                titles
-                    .iter()
-                    .filter(|title| title.fully_visible)
-                    .map(|title| title.rect),
-            )
-            .into_iter()
-            .filter_map(viewport_mark)
-            .collect()
         };
+        // Tiled windows sit in the main bar; floating windows get their own small bar beside it,
+        // so neither moves when the other changes.
+        let row =
+            |widths: &[f64]| widths.iter().sum::<f64>() + gap * (widths.len().max(1) as f64 - 1.);
+        let natural_tiled = if shown_tiled > 0 {
+            2. * pad + arrow_space + row(&widths[..shown_tiled])
+        } else {
+            0.
+        };
+        // A minimum width keeps the arrows still as windows open and close.
+        let tiled_width = if shown_tiled > 0 {
+            natural_tiled.max(BAR_MIN_WIDTH.min(bounds.end - bounds.start - 2. * BAR_MARGIN))
+        } else {
+            0.
+        };
+        let tiled_inset = (tiled_width - natural_tiled) / 2.;
+        let floating_width = if shown_floating > 0 || layer_destination.is_some() {
+            let pills = if shown_floating > 0 {
+                row(&widths[shown_tiled..]) + gap
+            } else {
+                0.
+            };
+            2. * pad + pills + toggle_width
+        } else {
+            0.
+        };
+        // Floating windows get their own small bar beside the main one.
+        let separation = if tiled_width > 0. && floating_width > 0. {
+            BAR_GROUP_GAP
+        } else {
+            0.
+        };
+        let total = tiled_width + separation + floating_width;
+        // The main bar stays centred; the floating bar hangs off its right end, so the tiled
+        // windows keep their place when a window starts or stops floating. Only when the pair
+        // would not fit does the main bar give way.
+        // The main bar stays centred and anchored; the floating bar hangs off its right end.
+        let centre = if tiled_width > 0. { tiled_width } else { total };
+        let tray_x = ((bounds.start + bounds.end - centre) / 2.)
+            .min(bounds.end - BAR_MARGIN - total)
+            .max(bounds.start);
+        let floating_x = tray_x + tiled_width + separation;
+        let tray_width = tiled_width;
+        let y = tray_y + pad;
+        let rect = |x: f64, width: f64| {
+            Rectangle::new(Point::from((x, y)), Size::from((width, BAR_PILL_HEIGHT)))
+        };
+
+        let left_arrow = show_arrows.then(|| rect(tray_x + pad, arrow_widths[0]));
+        let right_arrow =
+            show_arrows.then(|| rect(tray_x + tray_width - pad - arrow_widths[1], arrow_widths[1]));
+        let layer_action = layer_destination.map(|window| {
+            (
+                rect(
+                    floating_x + floating_width - pad - toggle_width,
+                    toggle_width,
+                ),
+                window,
+            )
+        });
+        let mut x = tray_x
+            + tiled_inset
+            + pad
+            + if show_arrows {
+                arrow_widths[0] + gap
+            } else {
+                0.
+            };
+        let mut in_floating_bar = false;
+        let mut titles = Vec::with_capacity(count);
+        for (&(window, _, fully_visible, is_floating, _, _), &pill_width) in zip(shown, &widths) {
+            if is_floating && !in_floating_bar {
+                in_floating_bar = true;
+                x = floating_x + pad;
+            }
+            let pill = rect(x, pill_width);
+            let is_active = window.id() == active.id();
+            titles.push(NavigationTitle {
+                rect: pill,
+                window,
+                active: is_active,
+                fully_visible,
+                floating: is_floating,
+            });
+            x += pill_width + gap;
+        }
+        let edge_actions = [
+            left_arrow.map(|rect| NavigationArrow {
+                rect,
+                target: edge_targets[0],
+                count: counts[0],
+            }),
+            right_arrow.map(|rect| NavigationArrow {
+                rect,
+                target: edge_targets[1],
+                count: counts[1],
+            }),
+        ];
+        let tray = (tray_width > 0.).then(|| {
+            Rectangle::new(
+                Point::from((tray_x, tray_y)),
+                Size::from((tray_width, BAR_TRAY_HEIGHT)),
+            )
+        });
+        let floating_tray = (floating_width > 0.).then(|| {
+            Rectangle::new(
+                Point::from((floating_x, tray_y)),
+                Size::from((floating_width, BAR_TRAY_HEIGHT)),
+            )
+        });
         Some(NavigationStrip {
             tray,
-            viewports,
             moving,
             edge_actions,
             titles,
             layer_action,
+            floating_tray,
         })
     }
 
@@ -2503,7 +3281,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let progress = self.overview_progress_value()?;
-        if progress < 0.82 {
+        if progress < 0.35 {
             return None;
         }
 
@@ -2524,12 +3302,13 @@ impl<W: LayoutElement> Monitor<W> {
         };
         let (_, preview) = previews().find(|(id, _)| *id == window.id())?;
         let area = self.overview_content();
-        let bottom = previews()
-            .map(|(_, preview)| preview.loc.y + preview.size.h)
-            .reduce(f64::max)?;
         let width = 216.;
+        // The command sits at the end of the workspace header, above the previews.
         let rect = Rectangle::new(
-            Point::from((area.loc.x + (area.size.w - width) / 2., bottom + 17.)),
+            Point::from((
+                self.overview_frame_columns().1 - OVERVIEW_INSET - width,
+                geo.loc.y - OVERVIEW_HEADER_OFFSET - 2.,
+            )),
             Size::from((width, OVERVIEW_CONTROL_HEIGHT)),
         );
         let fits = |part: Rectangle<f64, Logical>| {
@@ -2538,9 +3317,11 @@ impl<W: LayoutElement> Monitor<W> {
                 && part.loc.x + part.size.w <= area.loc.x + area.size.w
                 && part.loc.y + part.size.h <= area.loc.y + area.size.h
         };
-        let clear = fits(rect)
-            && fits(preview)
-            && previews().all(|(_, preview)| preview.intersection(rect).is_none());
+        // Judged on the settled layout, so the command appears with the other hints.
+        let clear = progress < 1.
+            || fits(rect)
+                && fits(preview)
+                && previews().all(|(_, preview)| preview.intersection(rect).is_none());
         clear.then_some((rect, window))
     }
 
@@ -2552,7 +3333,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .map(|(_, window)| window);
         }
 
-        if let Some(strip) = self.navigation_strip(false) {
+        if let Some(strip) = self.navigation_strip() {
             return strip
                 .titles
                 .into_iter()
@@ -2589,7 +3370,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn dismiss_navigation_preview(&self, position: Point<f64, Logical>) {
-        let arrow = self.navigation_strip(false).and_then(|strip| {
+        let arrow = self.navigation_strip().and_then(|strip| {
             strip
                 .edge_actions
                 .into_iter()
@@ -2613,7 +3394,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
         self.has_framed_overview()
             || self
-                .navigation_strip(false)
+                .navigation_strip()
                 .is_some_and(|strip| strip.titles.iter().any(|title| title.window.id() == id))
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
@@ -2664,145 +3445,79 @@ impl<W: LayoutElement> Monitor<W> {
         });
     }
 
-    fn preview_overlaps_tile(&self, preview: Rectangle<f64, Logical>) -> bool {
-        self.active_workspace_ref()
-            .scrolling()
-            .tiles_with_render_positions()
-            .any(|(tile, position, visible)| {
-                visible
-                    && preview
-                        .intersection(Rectangle::new(
-                            position + tile.bob_offset(),
-                            tile.tile_size(),
-                        ))
-                        .is_some()
-            })
+    /// The popover under the window bar that previews `window`, centered under `anchor`.
+    fn bar_preview_card(
+        &self,
+        anchor: Rectangle<f64, Logical>,
+        tray: Rectangle<f64, Logical>,
+        window: &W,
+    ) -> Option<Rectangle<f64, Logical>> {
+        let source = window.size().to_f64();
+        if source.w <= 0. || source.h <= 0. {
+            return None;
+        }
+        let area = self.working_area;
+        // Fit the window into at most 320 × 260, and the card snugly around it.
+        let fit = (320. / source.w).min(260. / source.h).min(1.);
+        let thumbnail = source.upscale(fit);
+        let width = (thumbnail.w + 2. * BAR_CARD_PADDING)
+            .max(240.)
+            .min(area.size.w - 2. * BAR_MARGIN);
+        let height = BAR_CARD_TITLE_HEIGHT + thumbnail.h + BAR_CARD_PADDING;
+        let top = tray.loc.y + tray.size.h + 10.;
+        if width < 160. || top + height > area.loc.y + area.size.h {
+            return None;
+        }
+        let left = (anchor.loc.x + (anchor.size.w - width) / 2.).clamp(
+            area.loc.x + BAR_MARGIN,
+            (area.loc.x + area.size.w - BAR_MARGIN - width).max(area.loc.x + BAR_MARGIN),
+        );
+        let scale = self.scale.fractional_scale();
+        let rect = Rectangle::new(Point::from((left, top)), Size::from((width, height)));
+        Some(Rectangle::new(
+            rect.loc.to_physical_precise_round(scale).to_logical(scale),
+            rect.size,
+        ))
     }
 
-    fn render_navigation_forecast<'a, R: NiriRenderer>(
+    /// Renders the whole of `window`, scaled to fit and centered in `rect`.
+    fn render_window_thumbnail<R: NiriRenderer>(
         &self,
         renderer: &mut R,
         target: RenderTarget,
-        title: &NavigationTitle<'_, W>,
-        anchor: Rectangle<f64, Logical>,
-        display_title: impl Fn(&W) -> &'a str,
+        rect: Rectangle<f64, Logical>,
+        window: &W,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
-    ) -> bool {
-        let ws = self.active_workspace_ref();
-        let area = self.working_area;
-        let top = anchor.loc.y + STRIP_BUTTON_HEIGHT + 12.;
-        let Some(clip) = self.scroll_clip(ws) else {
-            return false;
-        };
-        let windows = title.visible_after.as_slice();
-        let width = (188. * windows.len() as f64)
-            .clamp(236., 480.)
-            .min(clip.end - clip.start - 20.);
-        if width < 210. {
-            return false;
+    ) {
+        if target.should_block_out(window.rules().block_out_from) {
+            return;
         }
-        let padding = 10.;
-        let gap = 8.;
-        let left = (anchor.loc.x + (anchor.size.w - width) / 2.)
-            .clamp(clip.start + padding, clip.end - width - padding);
-        let preview = Rectangle::new(
-            Point::from((left, top)),
-            Size::from((width, STRIP_FORECAST_HEIGHT)),
-        );
-        if top + STRIP_FORECAST_HEIGHT > area.loc.y + area.size.h
-            || self.preview_overlaps_tile(preview)
-        {
-            return false;
+        let source = window.size().to_f64();
+        if source.w <= 0. || source.h <= 0. {
+            return;
         }
-        let accent = ws.options.layout.border.active_color;
-        let surface = caption_background(accent, ws.options.layout.background_color, false);
         let scale = self.scale.fractional_scale();
-        let available = width - 2. * padding - gap * windows.len().saturating_sub(1) as f64;
-        let widest = windows
-            .iter()
-            .map(|window| window.size().w)
-            .max()
-            .unwrap_or(1);
-        let weight = |window: &W| f64::from(window.size().w.max(1)).max(f64::from(widest) * 0.55);
-        let total: f64 = windows.iter().map(|window| weight(*window)).sum();
-        let mut x = left + padding;
-        for (window, label) in windows.iter().zip(&self.strip_forecast_titles) {
-            let width = available * weight(*window) / total;
-            let height = STRIP_FORECAST_HEIGHT - 42.;
-            let rect = Rectangle::new(Point::from((x, top + 32.)), Size::from((width, height)));
-            let focused = window.id() == title.window.id();
-            if focused {
-                ws.overview_caption.render_selection(
-                    renderer,
-                    rect,
-                    accent,
-                    1.,
-                    scale,
-                    &mut |outline| {
-                        let element = MonitorInnerRenderElement::Decoration(outline);
-                        push(RelocateRenderElement::from_element(
-                            RescaleRenderElement::from_element(element, Point::default(), 1.),
-                            Point::default(),
-                            Relocate::Relative,
-                        ));
-                    },
-                );
-            }
-            if let Some(caption) = label.render(
-                renderer.as_gles_renderer(),
-                display_title(window).to_owned(),
-                if focused {
-                    accent
-                } else {
-                    tint_caption(surface, accent)
-                },
-                LabelKind::Preview {
-                    badge: None,
-                    current: false,
-                },
-                width,
-                scale,
-                rect.loc,
-                1.,
-            ) {
-                let element = MonitorInnerRenderElement::Caption(caption);
+        let zoom = (rect.size.w / source.w).min(rect.size.h / source.h).min(1.);
+        let shown = source.upscale(zoom);
+        let loc = rect.loc + (rect.size.to_point() - shown.to_point()).downscale(2.);
+        let location = loc.to_physical_precise_round(scale);
+        let crop = Rectangle::from_size(source.to_physical_precise_round(scale));
+        let ctx = RenderCtx {
+            renderer,
+            target,
+            xray: None,
+        };
+        window.render_normal(ctx, Point::default(), scale.into(), 1., &mut |elem| {
+            if let Some(elem) = CropRenderElement::from_element(elem, scale, crop) {
+                let elem = MonitorInnerRenderElement::WindowPreview(elem);
+                let elem = RescaleRenderElement::from_element(elem, Point::default(), zoom);
                 push(RelocateRenderElement::from_element(
-                    RescaleRenderElement::from_element(element, Point::default(), 1.),
-                    Point::default(),
+                    elem,
+                    location,
                     Relocate::Relative,
                 ));
             }
-            self.render_scroll_preview(
-                renderer,
-                target,
-                Rectangle::new(
-                    rect.loc + Point::from((0., 22.)),
-                    Size::from((width, height - 22.)),
-                ),
-                *window,
-                1.,
-                push,
-            );
-            x += width + gap;
-        }
-        if let Some(caption) = self.strip_forecast_label.render(
-            renderer.as_gles_renderer(),
-            format!("Switch to {}", display_title(title.window)),
-            surface,
-            LabelKind::StripForecast,
-            width,
-            scale,
-            Point::from((left, top)),
-            1.,
-        ) {
-            let element = MonitorInnerRenderElement::Caption(caption);
-            push(RelocateRenderElement::from_element(
-                RescaleRenderElement::from_element(element, Point::default(), 1.),
-                Point::default(),
-                Relocate::Relative,
-            ));
-        }
-        true
+        });
     }
 
     fn render_scroll_cues<R: NiriRenderer>(
@@ -2817,13 +3532,17 @@ impl<W: LayoutElement> Monitor<W> {
                 .get()
                 .is_none_or(|arrow| !arrow.contains(*point))
         });
-        if let Some(strip) = self.navigation_strip(true) {
+        if let Some(strip) = self.navigation_strip() {
             let ws = self.active_workspace_ref();
             let accent = ws.options.layout.border.active_color;
-            let surface = caption_background(accent, ws.options.layout.background_color, false);
-            let direction_background = tint_caption(surface, accent);
+            let titlebar = &ws.options.layout.titlebar;
+            // Opaque, like the rail beside it.
+            let surface = Color {
+                a: 1.,
+                ..titlebar.background_color(false)
+            };
+            let ink = titlebar.text_color(true);
             let scale = self.scale.fractional_scale();
-            let has_layer_action = strip.layer_action.is_some();
             let floating_visible = ws.is_floating_visible() && !ws.floating().is_empty();
             let moving = strip.moving;
             let windows = ws.windows().collect::<Vec<_>>();
@@ -2831,63 +3550,68 @@ impl<W: LayoutElement> Monitor<W> {
                 .iter()
                 .map(|window| navigation_title(*window, target, "Window"))
                 .collect::<Vec<_>>();
-            let names = compact_navigation_titles(&titles);
             let display_title = |window: &W| {
                 windows
                     .iter()
                     .position(|candidate| candidate.id() == window.id())
-                    .map_or("Window", |index| names[index])
+                    .map_or("Window", |index| titles[index].as_str())
             };
-            let hovered_arrow = preview_pointer.and_then(|point| {
+            // A popover previews the window that a hovered name or arrow brings into view.
+            let preview = preview_pointer.filter(|_| !moving).and_then(|point| {
                 strip
-                    .edge_actions
+                    .titles
                     .iter()
-                    .flatten()
-                    .find(|arrow| arrow.rect.contains(point) && arrow.target.is_some())
-            });
-            let edge_target = hovered_arrow
-                .and_then(|arrow| arrow.target)
-                .map(|window| window.id());
-            let forecast = preview_pointer.and_then(|point| {
-                strip.titles.iter().find(|title| {
-                    !moving
-                        && !floating_visible
-                        && title.direction.is_some()
-                        && !title.visible_after.is_empty()
-                        && title.visible_after.len() <= self.strip_forecast_titles.len()
-                        && title
-                            .visible_after
+                    .find(|title| title.rect.contains(point))
+                    .filter(|title| !title.active && !title.fully_visible && !title.floating)
+                    .map(|title| (title.rect, title.window))
+                    .or_else(|| {
+                        strip
+                            .edge_actions
                             .iter()
-                            .any(|window| window.id() == title.window.id())
-                        && (title.rect.contains(point) || edge_target == Some(title.window.id()))
-                })
+                            .flatten()
+                            .find(|arrow| arrow.rect.contains(point))
+                            .and_then(|arrow| arrow.target.map(|window| (arrow.rect, window)))
+                    })
             });
-            let preview_window = forecast.filter(|forecast| {
-                let anchor = hovered_arrow.map_or(forecast.rect, |arrow| arrow.rect);
-                !self.render_navigation_forecast(
-                    renderer,
-                    target,
-                    forecast,
-                    anchor,
-                    &display_title,
-                    push,
-                ) && forecast.visible_after.iter().all(|window| {
-                    strip
-                        .titles
-                        .iter()
-                        .any(|title| title.window.id() == window.id())
-                })
-            });
-            let viewports = &strip.viewports;
-            let ink = caption_ink(surface);
-            let gray = (ink.r + ink.g + ink.b) / 3.;
-            let viewport_color = tint_caption(
-                tint_caption(Color::new_unpremul(gray, gray, gray, 1.), surface),
-                surface,
-            );
-            let viewport_background = tint_caption(surface, viewport_color);
-            let mut draw = |label| {
-                let elem = MonitorInnerRenderElement::Caption(label);
+            let mut card = None;
+            if let (Some((anchor, window)), Some(tray)) = (preview, strip.tray) {
+                card = self.bar_preview_card(anchor, tray, window);
+            }
+            if let (Some((_, window)), Some(card)) = (preview, card) {
+                let padding = BAR_CARD_PADDING;
+                let thumbnail = Rectangle::new(
+                    card.loc + Point::from((padding, BAR_CARD_TITLE_HEIGHT)),
+                    Size::from((
+                        card.size.w - 2. * padding,
+                        card.size.h - BAR_CARD_TITLE_HEIGHT - padding,
+                    )),
+                );
+                self.render_window_thumbnail(renderer, target, thumbnail, window, push);
+                let margin = Point::from((BAR_SHADOW_MARGIN, BAR_SHADOW_MARGIN));
+                if let Some(label) = self.strip_card.render_with_ink(
+                    renderer.as_gles_renderer(),
+                    display_title(window).to_owned(),
+                    window.with_app_id(str::to_owned),
+                    Color { a: 1., ..surface },
+                    ink,
+                    LabelKind::BarCard {
+                        height: card.size.h.round() as u32,
+                    },
+                    card.size.w,
+                    scale,
+                    card.loc - margin,
+                    1.,
+                ) {
+                    let elem = MonitorInnerRenderElement::Caption(label);
+                    let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                    push(RelocateRenderElement::from_element(
+                        elem,
+                        Point::default(),
+                        Relocate::Relative,
+                    ));
+                }
+            }
+            let mut draw = |elem: MonitorInnerRenderElement<R>| {
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
                 push(RelocateRenderElement::from_element(
                     elem,
@@ -2895,152 +3619,7 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             };
-            for (line, label) in viewports.iter().zip(&self.strip_viewport_labels) {
-                let previewing = preview_window.is_some();
-                let width = if previewing { 72. } else { 104. };
-                if line.size.w < width {
-                    continue;
-                }
-                // During hover the legend sits over the top edge of the current group.
-                let offset = if previewing { 52. } else { 16. };
-                let center = line.loc + Point::from(((line.size.w - width) / 2., -offset));
-                if let Some(caption) = label.render(
-                    renderer.as_gles_renderer(),
-                    "In view".into(),
-                    Color {
-                        a: if previewing { 1. } else { 0. },
-                        ..viewport_background
-                    },
-                    LabelKind::StripViewportLabel,
-                    width,
-                    scale,
-                    center,
-                    1.,
-                ) {
-                    draw(caption);
-                }
-            }
-            for (title, label) in strip.titles.iter().zip(&self.strip_labels) {
-                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
-                let referenced = edge_target == Some(title.window.id());
-                let offscreen = title.direction.is_some();
-                let in_view = !offscreen && !title.floating;
-                let compact = title.rect.size.h == STRIP_GROUP_BUTTON_HEIGHT;
-                let step_target = strip.edge_actions.iter().flatten().any(|arrow| {
-                    arrow
-                        .target
-                        .is_some_and(|window| window.id() == title.window.id())
-                });
-                let status = if title.floating {
-                    Some(if !floating_visible {
-                        "Hidden"
-                    } else {
-                        "Floating"
-                    })
-                } else if !compact
-                    && !has_layer_action
-                    && !ws.floating().is_empty()
-                    && floating_visible
-                {
-                    Some("Hides floating windows")
-                } else {
-                    None
-                };
-                let name = display_title(title.window);
-                let focus = if title.active {
-                    FocusMarker::Current
-                } else {
-                    FocusMarker::None
-                };
-                let background = if title.active {
-                    accent
-                } else if hovered || referenced {
-                    tint_caption(direction_background, accent)
-                } else if step_target {
-                    direction_background
-                } else if in_view {
-                    viewport_background
-                } else {
-                    surface
-                };
-                let kind = LabelKind::StripButton {
-                    status,
-                    outlined: !title.active
-                        && ((offscreen && !in_view) || hovered || referenced || title.floating),
-                    hovered: (hovered || referenced) && !moving,
-                    focus,
-                    compact,
-                };
-                if let Some(label) = label.render(
-                    renderer.as_gles_renderer(),
-                    name.to_owned(),
-                    background,
-                    kind,
-                    title.rect.size.w - 6.,
-                    scale,
-                    title.rect.loc + Point::from((3., 0.)),
-                    1.,
-                ) {
-                    draw(label);
-                }
-            }
-            if let (Some(preview), Some(tray)) = (preview_window, strip.tray) {
-                let count = preview.visible_after.len() as f64;
-                let heading_width = 84.;
-                let gap = 6.;
-                let windows_width = (tray.size.w - heading_width - count * gap - 12.) / count;
-                let window_width = windows_width.clamp(1., 164.);
-                let row_width = heading_width + count * (gap + window_width);
-                let mut x = tray.loc.x + (tray.size.w - row_width) / 2.;
-                let y = preview.rect.loc.y + STRIP_GROUP_BUTTON_HEIGHT + 2.;
-                if let Some(heading) = self.strip_forecast_label.render(
-                    renderer.as_gles_renderer(),
-                    "Next view".into(),
-                    Color { a: 0., ..surface },
-                    LabelKind::StripViewportLabel,
-                    heading_width,
-                    scale,
-                    Point::from((x, y)),
-                    1.,
-                ) {
-                    draw(heading);
-                }
-                x += heading_width + gap;
-                for (window, label) in preview
-                    .visible_after
-                    .iter()
-                    .zip(&self.strip_forecast_titles)
-                {
-                    let takes_focus = window.id() == preview.window.id();
-                    let title = display_title(window);
-                    let stays = strip
-                        .titles
-                        .iter()
-                        .any(|title| title.fully_visible && title.window.id() == window.id());
-                    let (text, background) = if takes_focus {
-                        let pending =
-                            tint_caption(tint_caption(viewport_background, accent), accent);
-                        (format!("Focus {title}"), pending)
-                    } else if stays {
-                        (format!("{title} stays"), viewport_background)
-                    } else {
-                        (title.to_owned(), viewport_background)
-                    };
-                    if let Some(caption) = label.render(
-                        renderer.as_gles_renderer(),
-                        text,
-                        background,
-                        LabelKind::StripViewportLabel,
-                        window_width,
-                        scale,
-                        Point::from((x, y)),
-                        1.,
-                    ) {
-                        draw(caption);
-                    }
-                    x += window_width + gap;
-                }
-            }
+
             for (index, (edge, label)) in strip
                 .edge_actions
                 .iter()
@@ -3049,96 +3628,338 @@ impl<W: LayoutElement> Monitor<W> {
             {
                 let Some(arrow) = edge else { continue };
                 let enabled = arrow.target.is_some();
-                let rect = arrow.rect;
-                let hovered = enabled && pointer.is_some_and(|point| rect.contains(point));
-                if let Some(arrow) = label.render(
-                    renderer.as_gles_renderer(),
-                    String::new(),
-                    if !enabled {
-                        surface
-                    } else if hovered {
-                        tint_caption(direction_background, accent)
+                let hovered = enabled && pointer.is_some_and(|point| arrow.rect.contains(point));
+                if hovered && arrow.count > 0 {
+                    // Say what the number means, under the arrow.
+                    let side = if index == 0 { "left" } else { "right" };
+                    let text = if arrow.count == 1 {
+                        format!("1 window to the {side}")
                     } else {
-                        direction_background
+                        format!("{} windows to the {side}", arrow.count)
+                    };
+                    let width = 320.;
+                    let y = arrow.rect.loc.y + arrow.rect.size.h + 14.;
+                    let x = if index == 0 {
+                        arrow.rect.loc.x
+                    } else {
+                        arrow.rect.loc.x + arrow.rect.size.w - width
+                    };
+                    if let Some(tip) = self.arrow_tooltips[index].render_with_ink(
+                        renderer.as_gles_renderer(),
+                        text,
+                        String::new(),
+                        Color { a: 1., ..surface },
+                        ink,
+                        LabelKind::Tooltip {
+                            right_align: index == 1,
+                        },
+                        width,
+                        scale,
+                        Point::from((x, y)),
+                        1.,
+                    ) {
+                        draw(MonitorInnerRenderElement::Caption(tip));
+                    }
+                }
+                if let Some(element) = label.render_with_ink(
+                    renderer.as_gles_renderer(),
+                    if arrow.count > 0 {
+                        arrow.count.to_string()
+                    } else {
+                        String::new()
                     },
-                    LabelKind::ScrollWindow {
-                        left: index == 0,
-                        hovered: hovered && !moving,
+                    String::new(),
+                    Color { a: 0., ..surface },
+                    ink,
+                    LabelKind::BarButton {
+                        icon: if index == 0 {
+                            BarIcon::Left
+                        } else {
+                            BarIcon::Right
+                        },
+                        enabled,
+                        hovered,
                     },
-                    rect.size.w,
+                    arrow.rect.size.w,
                     scale,
-                    rect.loc,
-                    if enabled { 1. } else { 0.35 },
+                    arrow.rect.loc,
+                    1.,
                 ) {
-                    draw(arrow);
+                    draw(MonitorInnerRenderElement::Caption(element));
                 }
             }
             if let Some((rect, _)) = strip.layer_action {
                 let hovered = pointer.is_some_and(|point| rect.contains(point));
-                let text = if floating_visible {
-                    "Hide floating windows"
-                } else {
-                    "Show floating windows"
-                };
-                if let Some(label) = self.layer_action_label.render(
+                if let Some(element) = self.layer_action_label.render_with_ink(
                     renderer.as_gles_renderer(),
-                    text.into(),
-                    if hovered {
-                        tint_caption(tint_caption(surface, accent), accent)
-                    } else {
-                        tint_caption(surface, accent)
-                    },
-                    LabelKind::LayerAction {
-                        show: !floating_visible,
+                    String::new(),
+                    String::new(),
+                    Color { a: 0., ..surface },
+                    ink,
+                    LabelKind::BarButton {
+                        icon: if floating_visible {
+                            BarIcon::HideFloating
+                        } else {
+                            BarIcon::ShowFloating
+                        },
+                        enabled: true,
+                        hovered,
                     },
                     rect.size.w,
                     scale,
                     rect.loc,
                     1.,
                 ) {
-                    draw(label);
+                    draw(MonitorInnerRenderElement::Caption(element));
                 }
             }
-            if BorderRenderElement::has_shader(renderer) {
-                let frame_height = if preview_window.is_some() {
-                    STRIP_GROUP_BUTTON_HEIGHT + 2.
-                } else {
-                    48.
-                };
-                let frames = viewports.iter().map(|line| {
-                    Rectangle::new(
-                        line.loc - Point::from((0., 46.)),
-                        Size::from((line.size.w, frame_height)),
-                    )
+            // The focus fill moves to a window as it arrives on screen, in step with the view,
+            // rather than the moment focus changes.
+            let active_id = ws.active_window().map(|window| window.id().clone());
+            // The focus fill starts moving with focus and slides along with the view.
+            let arrived = true
+                || ws.floating_is_active()
+                || active_id.as_ref().is_none_or(|id| {
+                    let bounds = self.scroll_view_bounds();
+                    ws.scrolling()
+                        .tiles_with_render_positions()
+                        .find(|(tile, _, _)| tile.window().id() == id)
+                        .is_none_or(|(tile, pos, _)| {
+                            let width = tile.tile_size().w.max(1.);
+                            let shown = (pos.x + width).min(bounds.end) - pos.x.max(bounds.start);
+                            shown >= width * 0.25
+                        })
                 });
-                let outlines = self
-                    .strip_viewport_outlines
+            let shown_focus = {
+                let mut last = self.bar_focus.borrow_mut();
+                if arrived
+                    || last
+                        .as_ref()
+                        .is_none_or(|id| !ws.windows().any(|w| w.id() == id))
+                {
+                    last.clone_from(&active_id);
+                }
+                last.clone()
+            };
+            let sliding = BorderRenderElement::has_shader(renderer);
+            let (highlight_rect, styled_focus) = {
+                let target = strip
+                    .titles
                     .iter()
-                    .map(|outline| (outline, viewport_color, 2.));
-                let backings = self
-                    .strip_viewport_backings
+                    .find(|title| shown_focus.as_ref() == Some(title.window.id()));
+                let mut highlight = self.bar_highlight.borrow_mut();
+                match (target, shown_focus.as_ref()) {
+                    (Some(target), Some(id)) => {
+                        let current = highlight.as_ref().map(BarHighlight::rect);
+                        let same = highlight.as_ref().is_some_and(|h| &h.window == id);
+                        if same {
+                            let h = highlight.as_mut().unwrap();
+                            h.to = target.rect;
+                            if h.anim.is_done() {
+                                h.from = target.rect;
+                            }
+                        } else {
+                            let previous = highlight.as_ref().map(|h| h.window.clone());
+                            *highlight = Some(BarHighlight {
+                                window: id.clone(),
+                                previous,
+                                from: current.unwrap_or(target.rect),
+                                to: target.rect,
+                                anim: Animation::new(
+                                    self.clock.clone(),
+                                    0.,
+                                    1.,
+                                    0.,
+                                    self.options.animations.horizontal_view_movement.0,
+                                ),
+                            });
+                        }
+                        let h = highlight.as_ref().unwrap();
+                        // Names take the focused style once the fill is halfway there.
+                        let styled = if h.anim.clamped_value() < 0.5 {
+                            h.previous.clone().or_else(|| Some(id.clone()))
+                        } else {
+                            Some(id.clone())
+                        };
+                        let _ = styled;
+                        (Some((h.anchor(), h.fills(), h.sliding())), Some(id.clone()))
+                    }
+                    _ => {
+                        *highlight = None;
+                        (None, shown_focus.clone())
+                    }
+                }
+            };
+            let slide = highlight_rect.as_ref().and_then(|(_, _, slide)| *slide);
+            for ((title, label), focus_label) in strip
+                .titles
+                .iter()
+                .zip(&self.strip_labels)
+                .zip(&self.strip_focus_labels)
+            {
+                // Where a sliding fill only partly covers a name, the name keeps its own style
+                // and a focused copy shows inside the fill, so no letter loses its contrast.
+                let partial = sliding
+                    .then_some(slide)
+                    .flatten()
+                    .and_then(|fill| fill.intersection(title.rect))
+                    .filter(|cover| cover.size.w > 0.5);
+                // While the fill slides, a name takes the focused style when the fill covers
+                // most of it, so its text always contrasts with what is behind it.
+                let focused = if partial.is_some() {
+                    false
+                } else if sliding {
+                    let _ = &styled_focus;
+                    highlight_rect
+                        .as_ref()
+                        .map(|(anchor, _, _)| *anchor)
+                        .is_some_and(|fill| {
+                            let overlap = (fill.loc.x + fill.size.w)
+                                .min(title.rect.loc.x + title.rect.size.w)
+                                - fill.loc.x.max(title.rect.loc.x);
+                            overlap >= title.rect.size.w.min(fill.size.w) * 0.5
+                        })
+                } else {
+                    shown_focus.as_ref() == Some(title.window.id())
+                };
+                let hovered = pointer.is_some_and(|point| title.rect.contains(point));
+                let referenced =
+                    preview.is_some_and(|(_, window)| window.id() == title.window.id());
+                // Windows mostly on screen get a faint tint, once the view has settled.
+                let on_screen = !moving && !title.floating && {
+                    let bounds = self.scroll_view_bounds();
+                    ws.scrolling()
+                        .tiles_with_render_positions()
+                        .find(|(tile, _, _)| tile.window().id() == title.window.id())
+                        .is_some_and(|(tile, pos, _)| {
+                            let width = tile.tile_size().w.max(1.);
+                            let shown = (pos.x + width).min(bounds.end) - pos.x.max(bounds.start);
+                            shown >= width * 0.5
+                        })
+                };
+                let state = if focused {
+                    BarPillState::Focused
+                } else if on_screen {
+                    BarPillState::Visible
+                } else {
+                    BarPillState::Offscreen
+                };
+                // A window on screen carries a faint tint of the accent, passed as a clear
+                // background; it stays neutral while a floating window holds the focus.
+                let tinted = on_screen && !ws.floating_is_active();
+                let background = if focused && !sliding {
+                    accent
+                } else if tinted {
+                    Color { a: 0., ..accent }
+                } else {
+                    Color { a: 0., ..surface }
+                };
+                let pill_ink = if focused { caption_ink(accent) } else { ink };
+                let stacked = ws
+                    .scrolling()
+                    .columns()
+                    .find(|column| column.contains(title.window.id()))
+                    .map_or(1, |column| column.tiles().count());
+                if let Some(element) = label.render_with_ink(
+                    renderer.as_gles_renderer(),
+                    display_title(title.window).to_owned(),
+                    title.window.with_app_id(str::to_owned),
+                    background,
+                    pill_ink,
+                    LabelKind::BarPill {
+                        state,
+                        hovered: (hovered || referenced) && !moving,
+                        floating: title.floating,
+                        stacked: stacked.min(99) as u8,
+                        tinted,
+                    },
+                    title.rect.size.w,
+                    scale,
+                    title.rect.loc,
+                    if title.floating && !floating_visible {
+                        0.6
+                    } else {
+                        1.
+                    },
+                ) {
+                    let Some(cover) = partial else {
+                        draw(MonitorInnerRenderElement::Caption(element));
+                        continue;
+                    };
+                    let mut push_clipped =
+                        |element: PrimaryGpuTextureRenderElement, rect: Rectangle<f64, Logical>| {
+                            if rect.size.w <= 0. {
+                                return;
+                            }
+                            let crop = rect.to_physical_precise_round(scale);
+                            if let Some(element) =
+                                CropRenderElement::from_element(element, scale, crop)
+                            {
+                                draw(MonitorInnerRenderElement::ClippedCaption(element));
+                            }
+                        };
+                    // The focused copy inside the fill, the name's own style either side of it.
+                    if let Some(focus) = focus_label.render_with_ink(
+                        renderer.as_gles_renderer(),
+                        display_title(title.window).to_owned(),
+                        title.window.with_app_id(str::to_owned),
+                        Color { a: 0., ..accent },
+                        caption_ink(accent),
+                        LabelKind::BarPill {
+                            state: BarPillState::Focused,
+                            hovered: false,
+                            floating: title.floating,
+                            stacked: stacked.min(99) as u8,
+                            tinted: false,
+                        },
+                        title.rect.size.w,
+                        scale,
+                        title.rect.loc,
+                        1.,
+                    ) {
+                        push_clipped(focus, cover);
+                    }
+                    let r = title.rect;
+                    let before =
+                        Rectangle::new(r.loc, Size::from((cover.loc.x - r.loc.x, r.size.h)));
+                    let after_x = cover.loc.x + cover.size.w;
+                    let after = Rectangle::new(
+                        Point::from((after_x, r.loc.y)),
+                        Size::from((r.loc.x + r.size.w - after_x, r.size.h)),
+                    );
+                    push_clipped(element.clone(), before);
+                    push_clipped(element, after);
+                }
+            }
+            // The focus fill, behind the names and in front of the bar: it slides to a
+            // neighbour, and fades across when other names lie between.
+            if let (true, Some((_, fills, _))) = (sliding, &highlight_rect) {
+                for ((rect, alpha), cell) in fills
                     .iter()
-                    .map(|backing| (backing, viewport_background, 0.));
-                let pairs = frames.clone().zip(outlines).chain(frames.zip(backings));
-                for (frame, (element, color, width)) in pairs {
-                    let size = frame.size;
+                    .zip([&self.bar_highlight_fill, &self.bar_highlight_fade])
+                {
+                    if *alpha <= 0. {
+                        continue;
+                    }
+                    let size = rect.size;
                     let geometry = Rectangle::from_size(size);
-                    let mut element = element.borrow_mut();
+                    let mut element = cell.borrow_mut();
                     element.update(
                         size,
                         geometry,
                         Default::default(),
-                        color,
-                        color,
+                        accent,
+                        accent,
                         0.,
                         geometry,
-                        width,
-                        CornerRadius::from(11.).fit_to(size.w as f32, size.h as f32),
+                        0.,
+                        CornerRadius::from((size.h / 2.) as f32)
+                            .fit_to(size.w as f32, size.h as f32),
                         scale as f32,
-                        1.,
+                        *alpha,
                     );
                     let element = MonitorInnerRenderElement::Decoration(
-                        element.clone().with_location(frame.loc).into(),
+                        element.clone().with_location(rect.loc).into(),
                     );
                     push(RelocateRenderElement::from_element(
                         RescaleRenderElement::from_element(element, Point::default(), 1.),
@@ -3147,17 +3968,23 @@ impl<W: LayoutElement> Monitor<W> {
                     ));
                 }
             }
-            // Put the shared surface behind the window targets.
-            if let Some(rect) = strip.tray {
-                let background = Color { a: 0.73, ..surface };
-                if let Some(tray) = self.strip_tray.render(
+            // Put the shared surfaces behind the window targets.
+            for (rect, label) in [
+                (strip.tray, &self.strip_tray),
+                (strip.floating_tray, &self.strip_floating_tray),
+            ] {
+                let Some(rect) = rect else { continue };
+                let margin = Point::from((BAR_SHADOW_MARGIN, BAR_SHADOW_MARGIN));
+                if let Some(tray) = label.render_with_ink(
                     renderer.as_gles_renderer(),
                     String::new(),
-                    background,
-                    LabelKind::StripTray,
+                    String::new(),
+                    surface,
+                    ink,
+                    LabelKind::BarTray,
                     rect.size.w,
                     scale,
-                    rect.loc,
+                    rect.loc - margin,
                     1.,
                 ) {
                     let element = MonitorInnerRenderElement::Caption(tray);
@@ -3507,27 +4334,19 @@ impl<W: LayoutElement> Monitor<W> {
         progress: f64,
     ) -> Option<[Option<OverviewGroup>; 3]> {
         if ws.floating().is_empty() {
-            let ranges = self.desktop_window_groups(ws, geo)?;
-            let titles = [
-                "Offscreen to the left",
-                "On desktop",
-                "Offscreen to the right",
-            ];
-            let widths = [172., 114., 180.];
-            let mut ranges = ranges.into_iter();
-            return Some(std::array::from_fn(|index| {
-                let range = ranges.next().unwrap();
-                (!range.is_empty()).then_some(OverviewGroup {
-                    range,
-                    title: titles[index],
-                    minimum_width: widths[index],
-                    style: if index == 1 {
-                        GroupStyle::Desktop
-                    } else {
-                        GroupStyle::Offscreen
-                    },
-                })
-            }));
+            // A quiet backing marks the windows that are on screen, like the highlight in the
+            // window bar; the windows on either side need no label.
+            let [_, visible, _] = self.desktop_window_groups(ws, geo)?;
+            return Some([
+                None,
+                (!visible.is_empty()).then_some(OverviewGroup {
+                    range: visible,
+                    title: "",
+                    minimum_width: 0.,
+                    style: GroupStyle::Desktop,
+                }),
+                None,
+            ]);
         }
 
         let positions = self.floating_overview_positions(ws, progress);
@@ -3591,11 +4410,11 @@ impl<W: LayoutElement> Monitor<W> {
         let Some(progress) = self.overview_progress_value() else {
             return;
         };
-        let alpha = ((progress - 0.35) / 0.65).clamp(0., 1.) as f32;
-        if alpha == 0. {
+        let alpha = ((progress - 0.6) / 0.4).clamp(0., 1.) as f32;
+        if progress <= 0. {
             return;
         }
-        let label_alpha = ((progress - 0.82) / 0.18).clamp(0., 1.) as f32;
+        let label_alpha = ((progress - 0.6) / 0.3).clamp(0., 1.) as f32;
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
         let area = self.overview_content();
@@ -3616,12 +4435,15 @@ impl<W: LayoutElement> Monitor<W> {
             let accent = ws.options.layout.border.active_color;
             let backdrop = ws.options.layout.background_color;
             let empty = !ws.has_windows_or_name();
+            // An empty workspace is a single row with its label inside.
             let top = if empty && !active {
-                geo.loc.y + 11.
+                geo.loc.y + (OVERVIEW_EMPTY_CARD_HEIGHT.min(geo.size.h) - 28.) / 2.
             } else {
                 geo.loc.y - OVERVIEW_HEADER_OFFSET
             };
-            let x = left + OVERVIEW_INSET;
+            // Labels appear at their final place rather than travelling in from the panel,
+            // aligned with the frames' left edge.
+            let x = self.overview_frame_columns().0 + OVERVIEW_INSET;
             let width = (right - x - OVERVIEW_INSET).min(235.);
             if contains_y(top, 28.) && width >= 36. {
                 if let Some(caption) = ws.overview_caption.render(
@@ -3629,7 +4451,15 @@ impl<W: LayoutElement> Monitor<W> {
                     index + 1,
                     ws.name().map(String::as_str),
                     empty,
-                    caption_background(accent, backdrop, active),
+                    // Inside an empty slot the label is plain text, not a second outline.
+                    if empty && !active {
+                        Color {
+                            a: 0.,
+                            ..caption_background(accent, backdrop, active)
+                        }
+                    } else {
+                        caption_background(accent, backdrop, active)
+                    },
                     width,
                     scale,
                     Point::from((x, top)),
@@ -3642,10 +4472,13 @@ impl<W: LayoutElement> Monitor<W> {
             let command = active.then(|| self.overview_command()).flatten();
             if let Some((rect, window)) = command {
                 let hovered = pointer.is_some_and(|point| rect.contains(point));
+                // A neutral chip; the accent belongs to the selected preview.
+                let surface = caption_background(accent, backdrop, false);
+                // A keyboard hint until hovered, not a button.
                 let background = if hovered {
-                    tint_caption(accent, caption_ink(accent))
+                    tint_caption(surface, accent)
                 } else {
-                    accent
+                    Color { a: 0., ..surface }
                 };
                 let action = if ws
                     .active_window()
@@ -3689,7 +4522,10 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 });
                 let width = if mixed_layers { 350. } else { 154. };
-                let header = Point::from((right - OVERVIEW_INSET - width, top));
+                let header = Point::from((
+                    self.overview_frame_columns().1 - OVERVIEW_INSET - width,
+                    top,
+                ));
                 let position = command
                     .map(|(rect, _)| Point::from((rect.loc.x - 12. - width, rect.loc.y)))
                     .filter(|point| point.x >= x)
@@ -3698,7 +4534,7 @@ impl<W: LayoutElement> Monitor<W> {
                     if let Some(label) = self.overview_shortcuts_label.render(
                         renderer.as_gles_renderer(),
                         "Select window".into(),
-                        surface,
+                        Color { a: 0., ..surface },
                         LabelKind::NavigationHint { tab },
                         width,
                         scale,
@@ -3723,7 +4559,7 @@ impl<W: LayoutElement> Monitor<W> {
                     {
                         let Some(group) = group else { continue };
                         let width = group.range.end - group.range.start;
-                        if width < group.minimum_width {
+                        if group.title.is_empty() || width < group.minimum_width {
                             continue;
                         }
                         if let Some(caption) = label.render(
@@ -3743,9 +4579,6 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            if label_alpha == 0. {
-                continue;
-            }
             let mut in_front: Vec<Rectangle<f64, Logical>> = Vec::new();
             let focused = active.then(|| self.overview_selected_window()).flatten();
             let preview_positions = self.floating_overview_positions(ws, progress);
@@ -3759,8 +4592,11 @@ impl<W: LayoutElement> Monitor<W> {
                     continue;
                 }
                 let rect = Rectangle::new(location, size);
+                // The label replaces the window's own (tiny) titlebar: it ends where the titlebar
+                // ends, rising above the preview instead of covering its contents.
+                let titlebar = tile.titlebar_height() * zoom;
                 let label = Rectangle::new(
-                    location + Point::from((1., 1.)),
+                    location + Point::from((1., titlebar.min(22.) - 22. + 1.)),
                     Size::from((size.w - 2., 22.)),
                 );
                 let covered = in_front
@@ -3808,15 +4644,25 @@ impl<W: LayoutElement> Monitor<W> {
                     None
                 };
                 if selected && contains_y(rect.loc.y, rect.size.h) {
+                    // Around the label too, which rises above the preview.
+                    let top = rect.loc.y.min(label.loc.y - 1.);
+                    let outline = Rectangle::new(
+                        Point::from((rect.loc.x, top)),
+                        Size::from((rect.size.w, rect.loc.y + rect.size.h - top)),
+                    );
+                    // The selection ring is there from the first frame, so the window you
+                    // came from stays easy to follow into the grid.
                     ws.overview_caption.render_selection(
                         renderer,
-                        rect,
+                        outline,
                         selection_color,
-                        label_alpha,
+                        (progress as f32 * 4.).min(1.),
                         scale,
                         &mut |outline| draw(MonitorInnerRenderElement::Decoration(outline)),
                     );
                 }
+                // Read the app ID first: both accessors lock the toplevel's role.
+                let app_id = window.with_app_id(str::to_owned);
                 window.with_overview_title(|title| {
                     let title: String = title
                         .chars()
@@ -3835,10 +4681,12 @@ impl<W: LayoutElement> Monitor<W> {
                     } else {
                         surface
                     };
-                    if let Some(label) = tile.overview_label.render(
+                    if let Some(label) = tile.overview_label.render_with_ink(
                         renderer.as_gles_renderer(),
                         title,
+                        app_id.clone(),
                         background,
+                        caption_ink(background),
                         LabelKind::Preview { badge, current },
                         label.size.w,
                         scale,
@@ -3932,10 +4780,15 @@ impl<W: LayoutElement> Monitor<W> {
                     && self.options.overview.framed_workspaces
                     && self.overview_progress.is_some()
                 {
-                    self.overview_crop(geo, scale, zoom, height)
+                    // Include the rows a workspace wraps into below its first.
+                    let rows = (ws.scrolling().overview_extra_height() * scale).ceil() as i32;
+                    self.overview_crop(geo, scale, zoom, height.saturating_add(rows))
                 } else {
                     crop_bounds
                 };
+                if pass == 3 && ws.id() == self.active_workspace_ref().id() {
+                    self.render_peek_scrims(ctx.renderer, ws, &mut |elem| push(elem));
+                }
                 let visible_x = (pass == 3)
                     .then(|| self.scrolling_visible_span(ws))
                     .flatten();
@@ -4073,27 +4926,18 @@ impl<W: LayoutElement> Monitor<W> {
             return None;
         }
         let progress = self.overview_progress_value()?.clamp(0., 1.);
-        let margin = OVERVIEW_FRAME_MARGIN.min(self.working_area.size.w / 2.);
-        let empty = index != self.active_workspace_idx && !ws.has_windows_or_name();
         let area = self.overview_content();
-        let (left, width) = if empty {
-            (area.loc.x + OVERVIEW_INSET, area.size.w.min(188.))
-        } else {
-            (
-                self.working_area.loc.x + margin,
-                self.working_area.size.w - 2. * margin,
-            )
-        };
+        let (left, right) = self.overview_frame_columns();
+        let empty = index != self.active_workspace_idx && !ws.has_windows_or_name();
+        // An empty workspace is a short, open slot as wide as the others.
+        let width = right - left;
         let height = if empty {
-            geo.size.h.min(28.)
+            geo.size.h.min(OVERVIEW_EMPTY_CARD_HEIGHT)
         } else {
+            // The geometry already includes the height of any extra rows.
             geo.size.h + self.overview_strip_offset(ws) * self.overview_zoom()
         };
-        let y = if empty {
-            geo.loc.y + 11. * progress
-        } else {
-            geo.loc.y
-        };
+        let y = geo.loc.y;
         let position = Point::from((geo.loc.x + (left - geo.loc.x) * progress, y));
         let size = Size::from((
             geo.size.w + (width - geo.size.w) * progress,
@@ -4103,6 +4947,39 @@ impl<W: LayoutElement> Monitor<W> {
         Rectangle::new(position, size)
             .intersection(area)
             .map(|rect| rect.to_physical_precise_round(scale).to_logical(scale))
+    }
+
+    /// The horizontal extent shared by the workspace frames in the Overview: the previews of
+    /// every workspace with a comfortable margin, never wider than the space clear of panels.
+    fn overview_frame_columns(&self) -> (f64, f64) {
+        let usable = self.overview_usable_area(1.);
+        let (min_x, max_x) = (usable.loc.x, usable.loc.x + usable.size.w);
+        let zoom = self.overview_zoom();
+        let mut span: Option<(f64, f64)> = None;
+        for (ws, geo) in zip(&self.workspaces, self.workspaces_render_geo()) {
+            let positions = self.floating_overview_positions(ws, 1.);
+            for (tile, pos, visible) in ws.tiles_with_overview_positions(&positions) {
+                if !visible {
+                    continue;
+                }
+                let start = geo.loc.x + pos.x * zoom;
+                let end = start + tile.tile_size().w * zoom;
+                span = Some(span.map_or((start, end), |(a, b)| (a.min(start), b.max(end))));
+            }
+        }
+        let Some((start, end)) = span else {
+            return (min_x, max_x);
+        };
+        let mut left = (start - OVERVIEW_FRAME_PADDING).max(min_x);
+        let mut right = (end + OVERVIEW_FRAME_PADDING).min(max_x);
+        // Room for the headings and hints even when there is little to show.
+        let min_width = OVERVIEW_FRAME_MIN_WIDTH.min(max_x - min_x);
+        if right - left < min_width {
+            let centre = (left + right) / 2.;
+            left = (centre - min_width / 2.).clamp(min_x, max_x - min_width);
+            right = left + min_width;
+        }
+        (left, right)
     }
 
     pub fn render_overview_frames<R: NiriRenderer>(
@@ -4154,6 +5031,7 @@ impl<W: LayoutElement> Monitor<W> {
                         (
                             rect.to_physical_precise_round(scale).to_logical(scale),
                             group.style,
+                            !group.title.is_empty(),
                         )
                     })
                 })
@@ -4163,18 +5041,24 @@ impl<W: LayoutElement> Monitor<W> {
                 let zoom = self.overview_zoom();
                 let positions = self.floating_overview_positions(ws, progress);
                 for (index, group) in groups.iter().enumerate() {
-                    let Some((group, style)) = group else {
+                    let Some((group, style, titled)) = group else {
                         continue;
                     };
-                    ws.overview_caption.render_group_rule(
-                        index,
-                        *group,
-                        *style,
-                        ws.options.layout.background_color,
-                        ws.options.layout.border.active_color,
-                        group_alpha,
-                        &mut draw,
-                    );
+                    if *titled {
+                        ws.overview_caption.render_group_rule(
+                            index,
+                            *group,
+                            *style,
+                            ws.options.layout.background_color,
+                            ws.options.layout.border.active_color,
+                            group_alpha,
+                            &mut draw,
+                        );
+                    }
+                    if !*titled {
+                        // The previews' order and the window bar already say what is on screen.
+                        continue;
+                    }
                     let top = geo.loc.y + strip_offset - 39.;
                     let bottom = ws
                         .tiles_with_overview_positions(&positions)
@@ -4206,12 +5090,12 @@ impl<W: LayoutElement> Monitor<W> {
                     }
                 }
             }
-            let fade = if groups.is_some() || !active && !ws.has_windows_or_name() {
-                group_alpha
-            } else {
-                0.
-            };
-            let frame_alpha = progress as f32 * (1. - fade);
+            // The workspace card stays from the first frame to the last, so the windows never
+            // change layers while the overview opens.
+            // The card fades in with the zoom, a step behind the windows, so it is already in
+            // place when they land.
+            let frame_alpha = ((progress - 0.1) / 0.7).clamp(0., 1.);
+            let frame_alpha = (frame_alpha * frame_alpha * (3. - 2. * frame_alpha)) as f32;
             if frame_alpha > 0. {
                 ws.overview_caption.render_frame(
                     renderer,
@@ -4223,7 +5107,9 @@ impl<W: LayoutElement> Monitor<W> {
                     &mut draw,
                 );
             }
-            if !shadow_config.on || frame_alpha == 0. {
+            // A compact empty row has no shadow, so it stays quieter than the workspaces.
+            let compact = index != self.active_workspace_idx && !ws.has_windows_or_name();
+            if !shadow_config.on || frame_alpha == 0. || compact {
                 continue;
             }
             let mut shadow = ws.overview_caption.shadow.borrow_mut();
@@ -4244,6 +5130,28 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             });
+        }
+        // Dim the wallpaper behind the workspace cards as the overview opens.
+        if progress > 0. {
+            let backdrop = self.options.layout.background_color;
+            let light = 0.2126 * backdrop.r + 0.7152 * backdrop.g + 0.0722 * backdrop.b >= 0.55;
+            // A green-grey veil in light, so the pale wallpaper settles without going muddy.
+            let color = if light {
+                Color::new_unpremul(0.145, 0.227, 0.192, 0.16 * progress as f32)
+            } else {
+                Color::new_unpremul(0., 0., 0., 0.34 * progress as f32)
+            };
+            let mut dim = self.overview_dim.borrow_mut();
+            dim.update(self.view_size, color);
+            let elem = MonitorInnerRenderElement::Decoration(
+                SolidColorRenderElement::from_buffer(&dim, Point::default(), 1., Kind::Unspecified)
+                    .into(),
+            );
+            push(RelocateRenderElement::from_element(
+                RescaleRenderElement::from_element(elem, Point::default(), 1.),
+                Point::default(),
+                Relocate::Relative,
+            ));
         }
     }
 

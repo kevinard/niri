@@ -975,6 +975,12 @@ impl LayoutElement for Mapped {
         });
     }
 
+    fn with_app_id<T>(&self, f: impl FnOnce(&str) -> T) -> T {
+        with_toplevel_role(self.toplevel(), |role| {
+            f(role.app_id.as_deref().unwrap_or_default())
+        })
+    }
+
     fn with_decoration_title<T>(&self, f: impl FnOnce(&str) -> T) -> T {
         with_toplevel_role(self.toplevel(), |role| {
             f(role

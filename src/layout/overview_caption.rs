@@ -20,11 +20,8 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 const HEIGHT: f64 = 28.;
 const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
-pub(super) const STRIP_BUTTON_HEIGHT: f64 = 40.;
-pub(super) const STRIP_GROUP_BUTTON_HEIGHT: f64 = 28.;
 pub(super) const STRIP_FORECAST_HEIGHT: f64 = 126.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 52.;
-pub(super) const STRIP_TRAY_PADDING: f64 = 6.;
 pub(super) const SCROLL_CARD_HEIGHT: f64 = 176.;
 pub(super) const OVERVIEW_CONTROL_HEIGHT: f64 = 32.;
 
@@ -33,12 +30,6 @@ pub(super) enum GroupStyle {
     Desktop,
     Offscreen,
     Hidden,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FocusMarker {
-    None,
-    Current,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,20 +43,6 @@ pub(super) enum LabelKind {
     StripTray,
     StripViewportLabel,
     StripForecast,
-    ScrollWindow {
-        left: bool,
-        hovered: bool,
-    },
-    StripButton {
-        status: Option<&'static str>,
-        outlined: bool,
-        hovered: bool,
-        focus: FocusMarker,
-        compact: bool,
-    },
-    LayerAction {
-        show: bool,
-    },
     Preview {
         badge: Option<&'static str>,
         current: bool,
@@ -82,6 +59,138 @@ pub(super) enum LabelKind {
         height: u32,
         from_left: bool,
     },
+    /// The rounded surface behind the window bar, with its shadow.
+    BarTray,
+    /// One window in the window bar.
+    BarPill {
+        state: BarPillState,
+        hovered: bool,
+        floating: bool,
+        /// Windows stacked in the column; more than one shows a count.
+        stacked: u8,
+        /// A window on screen takes the background's colour, rather than the ink, for its mark.
+        tinted: bool,
+    },
+    /// A round icon button in the window bar.
+    BarButton {
+        icon: BarIcon,
+        enabled: bool,
+        hovered: bool,
+    },
+    /// The popover that previews a window from the window bar; the text is its title.
+    BarCard {
+        height: u32,
+    },
+    /// A one-line hint beside a control, sized to its text and aligned to one end.
+    Tooltip {
+        right_align: bool,
+    },
+    /// Dimming over a window that is partly out of view; rounded on the sides not clipped.
+    Scrim {
+        height: u32,
+        round_left: bool,
+        round_right: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BarPillState {
+    /// Scrolled out of view, fully or partly.
+    Offscreen,
+    /// Entirely on screen.
+    Visible,
+    /// The focused window.
+    Focused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BarIcon {
+    Left,
+    Right,
+    ShowFloating,
+    HideFloating,
+}
+
+/// Height of a window in the window bar.
+pub(super) const BAR_PILL_HEIGHT: f64 = 32.;
+/// Height of the window bar surface.
+pub(super) const BAR_TRAY_HEIGHT: f64 = 44.;
+/// Space around the tray and card textures for their shadows.
+pub(super) const BAR_SHADOW_MARGIN: f64 = 32.;
+/// Height of the title row of a window bar preview.
+pub(super) const BAR_CARD_TITLE_HEIGHT: f64 = 32.;
+pub(super) const BAR_CARD_PADDING: f64 = 12.;
+
+thread_local! {
+    /// Font family of compositor captions, following the titlebar font.
+    static FAMILY: RefCell<String> = RefCell::new("sans-serif".to_owned());
+}
+
+/// Uses the families of a Pango font description, such as the titlebar font, for captions.
+pub(super) fn set_caption_font(font: &str) {
+    let family = FontDescription::from_string(font)
+        .family()
+        .map(|family| family.to_string())
+        .filter(|family| !family.trim().is_empty())
+        .unwrap_or_else(|| "sans-serif".to_owned());
+    FAMILY.with(|current| {
+        if *current.borrow() != family {
+            *current.borrow_mut() = family;
+        }
+    });
+}
+
+thread_local! {
+    static BAR_WIDTHS: RefCell<std::collections::HashMap<(String, String, bool, u8), f64>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Natural width of a window bar entry: its title, an icon and a count of stacked windows.
+pub(super) fn measure_bar_label(text: &str, icon: bool, floating: bool, stacked: usize) -> f64 {
+    let stacked = stacked.min(99) as u8;
+    let family = FAMILY.with(|family| family.borrow().clone());
+    let key = (text.to_owned(), family, icon || floating, stacked);
+    if let Some(width) = BAR_WIDTHS.with(|cache| cache.borrow().get(&key).copied()) {
+        return width;
+    }
+    let measure = || -> Option<f64> {
+        let surface = ImageSurface::create(cairo::Format::ARgb32, 1, 1).ok()?;
+        let cr = cairo::Context::new(&surface).ok()?;
+        let layout = pangocairo::functions::create_layout(&cr);
+        layout.set_font_description(Some(&caption_font("Semibold", 13.)));
+        layout.set_single_paragraph_mode(true);
+        layout.set_text(text);
+        let mut width = f64::from(layout.pixel_size().0) + 2. * BAR_PILL_PADDING;
+        if icon || floating {
+            width += BAR_ICON_SIZE + BAR_ICON_GAP;
+        }
+        if stacked > 1 {
+            layout.set_font_description(Some(&caption_font("Bold", 11.)));
+            layout.set_text(&stacked.to_string());
+            width += f64::from(layout.pixel_size().0).max(7.) + 16.;
+        }
+        // Leave room for hinting differences at fractional scales.
+        Some((width + 6.).ceil())
+    };
+    let width = measure().unwrap_or(160.);
+    BAR_WIDTHS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        cache.insert(key, width);
+    });
+    width
+}
+
+/// Horizontal padding inside a window bar entry.
+const BAR_PILL_PADDING: f64 = 12.;
+const BAR_ICON_SIZE: f64 = 16.;
+const BAR_ICON_GAP: f64 = 7.;
+
+fn caption_font(weight: &str, size: f64) -> FontDescription {
+    let family = FAMILY.with(|family| family.borrow().clone());
+    FontDescription::from_string(&format!("{family} {weight} {size}px"))
 }
 
 #[derive(Debug)]
@@ -120,6 +229,9 @@ struct Key {
     kind: LabelKind,
     width: u32,
     scale: f64,
+    family: String,
+    /// Application ID whose icon the label shows, if any.
+    icon: String,
 }
 
 #[derive(Debug, Default)]
@@ -141,6 +253,35 @@ impl PreviewLabel {
         alpha: f32,
     ) -> Option<PrimaryGpuTextureRenderElement> {
         let ink = caption_ink(background);
+        self.render_with_ink(
+            renderer,
+            text,
+            String::new(),
+            background,
+            ink,
+            kind,
+            width,
+            scale,
+            location,
+            alpha,
+        )
+    }
+
+    /// Like [`Self::render`], with an explicit text color for translucent backgrounds.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_with_ink(
+        &self,
+        renderer: &mut GlesRenderer,
+        text: String,
+        icon: String,
+        background: Color,
+        ink: Color,
+        kind: LabelKind,
+        width: f64,
+        scale: f64,
+        location: Point<f64, Logical>,
+        alpha: f32,
+    ) -> Option<PrimaryGpuTextureRenderElement> {
         let key = Key {
             renderer: renderer.context_id(),
             text,
@@ -152,6 +293,8 @@ impl PreviewLabel {
                 _ => width as u32,
             },
             scale,
+            family: FAMILY.with(|family| family.borrow().clone()),
+            icon,
         };
         let mut cache = self.texture.borrow_mut();
         if cache.as_ref().is_none_or(|(old, _)| old != &key) {
@@ -304,6 +447,20 @@ impl OverviewCaption {
         scale: f64,
         push: &mut dyn FnMut(FocusRingRenderElement),
     ) {
+        self.render_outline(renderer, rect, accent, 3., alpha, scale, push);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_outline(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        rect: Rectangle<f64, Logical>,
+        accent: Color,
+        width: f32,
+        alpha: f32,
+        scale: f64,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
         if !BorderRenderElement::has_shader(renderer) {
             return;
         }
@@ -317,7 +474,7 @@ impl OverviewCaption {
             accent,
             0.,
             geometry,
-            3.,
+            width,
             CornerRadius::from(10.).fit_to(rect.size.w as f32, rect.size.h as f32),
             scale as f32,
             alpha,
@@ -339,9 +496,22 @@ impl OverviewCaption {
         if rect.size.w <= 0. || rect.size.h <= 0. {
             return;
         }
-        let strength = if is_light(background) { 0.52 } else { 0.32 };
+        let light = is_light(background);
+        // The workspace you are on is a panel; the others are lighter slots.
+        let strength = match (light, active) {
+            (true, true) => 0.16,
+            (true, false) => 0.22,
+            (false, true) => 0.36,
+            (false, false) => 0.22,
+        };
         let opacity = background.a + (1. - background.a) * progress * strength;
-        let fill = Color::new_unpremul(background.r, background.g, background.b, opacity);
+        // Light cards are near white, so they stay clean over a misty wallpaper.
+        let base = if light {
+            Color::new_unpremul(0.97, 0.98, 0.97, 1.)
+        } else {
+            background
+        };
+        let fill = Color::new_unpremul(base.r, base.g, base.b, opacity);
         if !BorderRenderElement::has_shader(renderer) {
             let mut fallback = self.fallback_fill.borrow_mut();
             fallback.update(rect.size, fill);
@@ -352,9 +522,15 @@ impl OverviewCaption {
             return;
         }
 
-        let ink = if is_light(background) { 0.08 } else { 0.94 };
-        let outline_alpha = if active { 0.22 } else { 0.32 };
-        let outline = Color::new_unpremul(ink, ink, ink, outline_alpha * progress);
+        // A muted sage edge in light, so the pale panel does not melt into the mist.
+        let outline = if light {
+            let alpha = if active { 0.9 } else { 0.6 };
+            Color::new_unpremul(0.553, 0.620, 0.580, alpha * progress)
+        } else {
+            // Dark panels are set apart by their fill; the edge only catches the light.
+            let alpha = if active { 0.10 } else { 0.16 };
+            Color::new_unpremul(0.94, 0.94, 0.94, alpha * progress)
+        };
         let geo = Rectangle::from_size(rect.size);
         let radius = frame_radius(rect, progress);
         let mut frame = self.frame.borrow_mut();
@@ -384,7 +560,7 @@ pub(super) fn frame_radius(rect: Rectangle<f64, Logical>, progress: f32) -> Corn
     CornerRadius::from(18. * progress).fit_to(rect.size.w as f32, rect.size.h as f32)
 }
 
-fn is_light(color: Color) -> bool {
+pub(super) fn is_light(color: Color) -> bool {
     0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b >= 0.55
 }
 
@@ -397,30 +573,27 @@ fn caption(index: usize, name: Option<&str>, empty: bool) -> String {
         .collect();
     let name = name.trim();
     match (name.is_empty(), empty) {
-        (true, true) => format!("{index}   Empty workspace"),
+        (true, true) => format!("Workspace {index} · Empty"),
         (true, false) => format!("Workspace {index}"),
-        (false, _) => format!("{index}   {name}"),
+        (false, _) => format!("{index} · {name}"),
     }
 }
 
 fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
     let font = if key.kind == LabelKind::StripViewportLabel {
-        "sans-serif Bold 12px"
-    } else if matches!(key.kind, LabelKind::StripButton { .. })
-        || matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220
-    {
-        "sans-serif Medium 13px"
+        caption_font("Bold", 12.)
+    } else if matches!(key.kind, LabelKind::Preview { .. }) && key.width < 220 {
+        caption_font("Medium", 13.)
     } else {
-        "sans-serif Medium 14px"
+        caption_font("Medium", 14.)
     };
-    layout.set_font_description(Some(&FontDescription::from_string(font)));
+    layout.set_font_description(Some(&font));
     layout.set_single_paragraph_mode(true);
     layout.set_ellipsize(
         if matches!(
             key.kind,
-            LabelKind::StripButton { .. }
-                | LabelKind::Preview { .. }
+            LabelKind::Preview { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::Button { .. }
                 | LabelKind::WindowNavigation { .. }
@@ -435,6 +608,17 @@ fn layout(cr: &cairo::Context, key: &Key) -> pango::Layout {
 }
 
 fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBuffer<GlesTexture>> {
+    if matches!(
+        key.kind,
+        LabelKind::BarTray
+            | LabelKind::BarPill { .. }
+            | LabelKind::BarButton { .. }
+            | LabelKind::BarCard { .. }
+            | LabelKind::Scrim { .. }
+            | LabelKind::Tooltip { .. }
+    ) {
+        return rasterize_bar(renderer, key);
+    }
     let probe = ImageSurface::create(cairo::Format::ARgb32, 1, 1)?;
     let cr = cairo::Context::new(&probe)?;
     cr.scale(key.scale, key.scale);
@@ -449,13 +633,15 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::StripTray => (max_width, STRIP_TRAY_HEIGHT),
         LabelKind::StripViewportLabel => (max_width, 16.),
         LabelKind::StripForecast => (max_width, STRIP_FORECAST_HEIGHT),
-        LabelKind::StripButton { compact: true, .. } => (max_width, STRIP_GROUP_BUTTON_HEIGHT),
-        LabelKind::StripButton { .. }
-        | LabelKind::ScrollWindow { .. }
-        | LabelKind::LayerAction { .. } => (max_width, STRIP_BUTTON_HEIGHT),
         LabelKind::Button { .. } => (max_width, SCROLL_BUTTON_HEIGHT),
         LabelKind::WindowNavigation { .. } => (max_width, SCROLL_CARD_HEIGHT),
         LabelKind::EdgeFade { height, .. } => (max_width, f64::from(height)),
+        LabelKind::BarTray
+        | LabelKind::BarPill { .. }
+        | LabelKind::BarButton { .. }
+        | LabelKind::BarCard { .. }
+        | LabelKind::Scrim { .. }
+        | LabelKind::Tooltip { .. } => (max_width, BAR_PILL_HEIGHT),
         LabelKind::Caption => (
             (f64::from(label.pixel_size().0) + 2. * PADDING)
                 .max(30.)
@@ -491,7 +677,6 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         LabelKind::Preview { .. } => 7.,
         LabelKind::OverviewCommand | LabelKind::NavigationHint { .. } => 9.,
         LabelKind::StripTray | LabelKind::StripForecast | LabelKind::WindowNavigation { .. } => 14.,
-        LabelKind::StripButton { .. } | LabelKind::ScrollWindow { .. } => 9.,
         _ => height / 2.,
     };
     cr.arc(
@@ -543,29 +728,18 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             key.kind,
             LabelKind::StripTray
                 | LabelKind::StripForecast
-                | LabelKind::ScrollWindow { .. }
                 | LabelKind::OverviewCommand
                 | LabelKind::NavigationHint { .. }
-                | LabelKind::StripButton { outlined: true, .. }
-                | LabelKind::LayerAction { .. }
                 | LabelKind::Button { .. }
                 | LabelKind::WindowNavigation { .. }
         ) {
             cr.fill_preserve()?;
             let stroke_alpha = match key.kind {
                 LabelKind::StripTray => 0.14,
-                LabelKind::ScrollWindow { hovered: true, .. }
-                | LabelKind::StripButton { hovered: true, .. } => 1.,
-                LabelKind::ScrollWindow { .. } => 0.54,
                 _ => 0.28,
             };
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), stroke_alpha);
-            cr.set_line_width(match key.kind {
-                LabelKind::ScrollWindow { hovered: true, .. }
-                | LabelKind::StripButton { hovered: true, .. } => 2.,
-                LabelKind::ScrollWindow { .. } => 1.5,
-                _ => 1.,
-            });
+            cr.set_line_width(1.);
             cr.stroke()?;
         } else {
             cr.fill()?;
@@ -579,13 +753,9 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
 
     if let LabelKind::NavigationHint { tab } = key.kind {
         let keycap = layout(&cr, key);
-        keycap.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 12px",
-        )));
+        keycap.set_font_description(Some(&caption_font("Medium", 12.)));
         let detail = layout(&cr, key);
-        detail.set_font_description(Some(&FontDescription::from_string(
-            "sans-serif Medium 13px",
-        )));
+        detail.set_font_description(Some(&caption_font("Medium", 13.)));
         let hints = [
             Some(("← →", key.text.as_str())),
             tab.map(|text| ("Tab", text)),
@@ -607,22 +777,21 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             keycap.set_text(key);
             detail.set_text(text);
             let (key_width, key_height) = keycap.pixel_size();
-            let (_, text_height) = detail.pixel_size();
+            let (text_width, text_height) = detail.pixel_size();
             let key_width = f64::from(key_width);
-            cr.rectangle(x, 5., key_width + 12., height - 10.);
+            // The action first and its key after, as in the other overview command.
+            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
+            cr.move_to(x, (height - f64::from(text_height)) / 2.);
+            pangocairo::functions::show_layout(&cr, &detail);
+            let key_x = x + f64::from(text_width) + 6.;
+            cr.rectangle(key_x, 5., key_width + 12., height - 10.);
             cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.17);
             cr.fill()?;
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-            cr.move_to(x + 6., (height - f64::from(key_height)) / 2.);
+            cr.move_to(key_x + 6., (height - f64::from(key_height)) / 2.);
             pangocairo::functions::show_layout(&cr, &keycap);
-            cr.move_to(x + key_width + 18., (height - f64::from(text_height)) / 2.);
-            pangocairo::functions::show_layout(&cr, &detail);
             x += hint_width + 12.;
         }
-    } else if let LabelKind::ScrollWindow { left, .. } = key.kind {
-        cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-        cr.set_line_width(2.);
-        draw_arrow(&cr, width / 2., height / 2., left, 7.)?;
     } else if let LabelKind::WindowNavigation { left, offset, more } = key.kind {
         let title = layout(&cr, key);
         title.set_single_paragraph_mode(false);
@@ -641,7 +810,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         pangocairo::functions::show_layout(&cr, &title);
 
         let heading = layout(&cr, key);
-        heading.set_font_description(Some(&FontDescription::from_string("sans-serif 12px")));
+        heading.set_font_description(Some(&caption_font("Regular", 12.)));
         let action = match (offset, left) {
             (1, true) => "Previous window",
             (1, false) => "Next window",
@@ -667,9 +836,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         if key.kind == LabelKind::OverviewCommand {
             let keycap = layout(&cr, key);
             keycap.set_text("Enter");
-            keycap.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 12px",
-            )));
+            keycap.set_font_description(Some(&caption_font("Medium", 12.)));
             let (w, h) = keycap.pixel_size();
             let key_width = f64::from(w) + 12.;
             let left = width - key_width - 6.;
@@ -681,48 +848,19 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
             pangocairo::functions::show_layout(&cr, &keycap);
             title_width = left - title_x - 6.;
         }
-        if let LabelKind::LayerAction { show } = key.kind {
-            let x = 13.5;
-            let y = height / 2. - 6.5;
-            cr.set_line_width(1.25);
-            cr.rectangle(x, y + 4., 11., 8.);
-            cr.stroke()?;
-            cr.rectangle(x + 4., y, 11., 8.);
-            cr.set_source_rgb(color.r.into(), color.g.into(), color.b.into());
-            cr.fill_preserve()?;
-            let front_alpha = if show { 0.62 } else { 1. };
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), front_alpha);
-            cr.stroke()?;
-            cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
-            title_x = 37.;
-            title_width = width - title_x - PADDING;
-            label.set_font_description(Some(&FontDescription::from_string(
-                "sans-serif Medium 13px",
-            )));
-        }
-        let (status, focus) = match key.kind {
-            LabelKind::StripButton { status, focus, .. } => {
-                if focus == FocusMarker::Current {
-                    title_width -= 14.;
-                    title_x += 7.;
-                }
-                (status, focus)
+        if matches!(key.kind, LabelKind::Preview { .. }) && !key.icon.is_empty() {
+            let icon_size = 14.;
+            if crate::app_icons::paint(
+                &cr,
+                &key.icon,
+                PADDING - 2.,
+                (height - icon_size) / 2.,
+                icon_size,
+                key.scale,
+            ) {
+                title_x = PADDING - 2. + icon_size + 6.;
+                title_width -= icon_size + 4.;
             }
-            _ => (None, FocusMarker::None),
-        };
-        if let Some(status) = status {
-            let detail = layout(&cr, key);
-            detail.set_font_description(Some(&FontDescription::from_string("sans-serif 13px")));
-            detail.set_text(status);
-            detail.set_ellipsize(EllipsizeMode::End);
-            detail.set_width((title_width * f64::from(pango::SCALE)) as i32);
-            let (w, h) = detail.pixel_size();
-            cr.set_source_rgba(ink.r.into(), ink.g.into(), ink.b.into(), 0.93);
-            cr.move_to(
-                title_x + (title_width - f64::from(w)) / 2.,
-                height - f64::from(h) - 4.,
-            );
-            pangocairo::functions::show_layout(&cr, &detail);
             cr.set_source_rgb(ink.r.into(), ink.g.into(), ink.b.into());
         }
         if let LabelKind::Preview {
@@ -731,8 +869,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         } = key.kind
         {
             let action = layout(&cr, key);
-            action
-                .set_font_description(Some(&FontDescription::from_string("sans-serif Bold 12px")));
+            action.set_font_description(Some(&caption_font("Bold", 12.)));
             action.set_text(badge);
             let (w, h) = action.pixel_size();
             let dot_space = if current { 11. } else { 0. };
@@ -777,30 +914,16 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
         label.set_width((title_width * f64::from(pango::SCALE)) as i32);
         let (w, h) = label.pixel_size();
         let x = match key.kind {
-            LabelKind::StripButton { .. } | LabelKind::StripViewportLabel => {
-                title_x + (title_width - f64::from(w)) / 2.
-            }
-            LabelKind::LayerAction { .. } => title_x,
+            LabelKind::StripViewportLabel => title_x + (title_width - f64::from(w)) / 2.,
+            LabelKind::Preview { .. } => title_x,
             LabelKind::Button { align_right: true } => width - PADDING - f64::from(w),
             _ => PADDING,
         };
         let y = if key.kind == LabelKind::StripForecast {
             8.
-        } else if status.is_some() {
-            3.
         } else {
             (height - f64::from(h)) / 2.
         };
-        if focus == FocusMarker::Current {
-            cr.arc(
-                x - 9.,
-                y + f64::from(h) / 2.,
-                3.5,
-                0.,
-                std::f64::consts::TAU,
-            );
-            cr.fill()?;
-        }
         cr.move_to(x, y);
         pangocairo::functions::show_layout(&cr, &label);
     }
@@ -809,23 +932,441 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     upload_texture(renderer, surface, pixel_width, pixel_height, key.scale)
 }
 
-fn draw_arrow(
+fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.).min(h / 2.).max(0.);
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.);
+    cr.arc(x + w - r, y + h - r, r, 0., std::f64::consts::FRAC_PI_2);
+    cr.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    cr.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        1.5 * std::f64::consts::PI,
+    );
+    cr.close_path();
+}
+
+/// A soft shadow under a rounded rectangle, built from stacked translucent outlines.
+#[allow(clippy::too_many_arguments)]
+fn soft_shadow(
     cr: &cairo::Context,
     x: f64,
     y: f64,
-    left: bool,
-    span: f64,
+    w: f64,
+    h: f64,
+    r: f64,
+    blur: f64,
+    offset: f64,
+    alpha: f64,
 ) -> Result<(), cairo::Error> {
-    let tip = if left { x - span } else { x + span };
-    let tail = if left { x + span } else { x - span };
-    cr.set_line_cap(cairo::LineCap::Round);
-    cr.set_line_join(cairo::LineJoin::Round);
-    cr.move_to(tail, y);
-    cr.line_to(tip, y);
-    cr.move_to(x, y - span * 0.875);
-    cr.line_to(tip, y);
-    cr.line_to(x, y + span * 0.875);
-    cr.stroke()
+    let steps = 12;
+    for step in 0..steps {
+        let t = f64::from(step) / f64::from(steps);
+        let grow = blur * (1. - t);
+        rounded_rect(
+            cr,
+            x - grow,
+            y - grow + offset,
+            w + 2. * grow,
+            h + 2. * grow,
+            r + grow,
+        );
+        // Inner layers accumulate, so the shadow is darkest under the surface.
+        cr.set_source_rgba(0., 0., 0., alpha / f64::from(steps) * (0.35 + t));
+        cr.fill()?;
+    }
+    Ok(())
+}
+
+fn set_source(cr: &cairo::Context, color: Color, alpha: f64) {
+    cr.set_source_rgba(
+        color.r.into(),
+        color.g.into(),
+        color.b.into(),
+        f64::from(color.a) * alpha,
+    );
+}
+
+fn rasterize_bar(
+    renderer: &mut GlesRenderer,
+    key: &Key,
+) -> anyhow::Result<TextureBuffer<GlesTexture>> {
+    let margin = BAR_SHADOW_MARGIN;
+    let inner_width = f64::from(key.width);
+    let (width, height) = match key.kind {
+        LabelKind::BarTray => (inner_width + 2. * margin, BAR_TRAY_HEIGHT + 2. * margin),
+        LabelKind::BarCard { height } => {
+            (inner_width + 2. * margin, f64::from(height) + 2. * margin)
+        }
+        LabelKind::BarButton {
+            icon: BarIcon::ShowFloating | BarIcon::HideFloating,
+            ..
+        } => (inner_width, BAR_PILL_HEIGHT),
+        LabelKind::BarButton {
+            icon: BarIcon::Left | BarIcon::Right,
+            ..
+        } if !key.text.is_empty() => (inner_width, BAR_PILL_HEIGHT),
+        LabelKind::BarButton { .. } => (BAR_PILL_HEIGHT, BAR_PILL_HEIGHT),
+        LabelKind::Scrim { height, .. } => (inner_width, f64::from(height)),
+        _ => (inner_width, BAR_PILL_HEIGHT),
+    };
+    let pixel_width = (width * key.scale).ceil() as i32;
+    let pixel_height = (height * key.scale).ceil() as i32;
+    anyhow::ensure!(
+        pixel_width > 0 && pixel_height > 0 && pixel_width <= 16384 && pixel_height <= 16384,
+        "window bar texture out of bounds"
+    );
+    let surface = ImageSurface::create(cairo::Format::ARgb32, pixel_width, pixel_height)?;
+    let cr = cairo::Context::new(&surface)?;
+    cr.scale(key.scale, key.scale);
+    let background = key.background;
+    let ink = key.ink;
+    let light = is_light(background);
+
+    match key.kind {
+        LabelKind::BarTray => {
+            let h = BAR_TRAY_HEIGHT;
+            let r = h / 2.;
+            let shadow = if light { 0.16 } else { 0.42 };
+            soft_shadow(&cr, margin, margin, inner_width, h, r, 14., 4., shadow)?;
+            rounded_rect(&cr, margin, margin, inner_width, h, r);
+            set_source(&cr, background, 1.);
+            cr.fill_preserve()?;
+            set_source(&cr, ink, if light { 0.10 } else { 0.12 });
+            cr.set_line_width(1.);
+            cr.stroke()?;
+        }
+        LabelKind::BarCard {
+            height: card_height,
+        } => {
+            let h = f64::from(card_height);
+            let r = 14.;
+            let shadow = if light { 0.14 } else { 0.5 };
+            soft_shadow(&cr, margin, margin, inner_width, h, r, 16., 6., shadow)?;
+            rounded_rect(&cr, margin, margin, inner_width, h, r);
+            set_source(&cr, background, 1.);
+            cr.fill_preserve()?;
+            set_source(&cr, ink, if light { 0.10 } else { 0.14 });
+            cr.set_line_width(1.);
+            cr.stroke()?;
+            let layout = pangocairo::functions::create_layout(&cr);
+            layout.set_font_description(Some(&caption_font("Medium", 13.)));
+            layout.set_single_paragraph_mode(true);
+            layout.set_ellipsize(EllipsizeMode::End);
+            layout.set_text(&key.text);
+            let padding = BAR_CARD_PADDING + 4.;
+            let icon_size = 18.;
+            let has_icon = crate::app_icons::paint(
+                &cr,
+                &key.icon,
+                margin + padding,
+                margin + (BAR_CARD_TITLE_HEIGHT - icon_size) / 2. + 1.,
+                icon_size,
+                key.scale,
+            );
+            let text_x = margin + padding + if has_icon { icon_size + 8. } else { 0. };
+            layout.set_width(
+                ((inner_width - (text_x - margin) - padding) * f64::from(pango::SCALE)) as i32,
+            );
+            let (_, text_height) = layout.pixel_size();
+            set_source(&cr, ink, 1.);
+            cr.move_to(
+                text_x,
+                margin + (BAR_CARD_TITLE_HEIGHT - f64::from(text_height)) / 2. + 1.,
+            );
+            pangocairo::functions::show_layout(&cr, &layout);
+        }
+        LabelKind::BarPill {
+            state,
+            hovered,
+            floating,
+            stacked,
+            tinted,
+        } => {
+            let r = height / 2.;
+            if background.a > 0. {
+                rounded_rect(&cr, 0., 0., width, height, r);
+                set_source(&cr, background, 1.);
+                cr.fill()?;
+            }
+            // Focus is the accent fill and hover a neutral tint; a window on screen gets a short
+            // mark under its name, so the three states never share a shape.
+            if hovered && state != BarPillState::Focused {
+                rounded_rect(&cr, 0., 0., width, height, r);
+                set_source(&cr, ink, 0.16);
+                cr.fill()?;
+            }
+            // A window on screen gets a faint accent tint and edge, the same colour as focus at a
+            // fraction of its weight.
+            if state == BarPillState::Visible && !hovered {
+                let (tint, fill, edge) = if tinted {
+                    (
+                        Color {
+                            a: 1.,
+                            ..background
+                        },
+                        0.12,
+                        0.4,
+                    )
+                } else {
+                    (ink, 0.04, 0.26)
+                };
+                rounded_rect(&cr, 0.5, 0.5, width - 1., height - 1., r - 0.5);
+                set_source(&cr, tint, fill);
+                cr.fill_preserve()?;
+                set_source(&cr, tint, edge);
+                cr.set_line_width(1.);
+                cr.stroke()?;
+            }
+            let text_alpha: f64 = match state {
+                BarPillState::Offscreen if !hovered => 0.78,
+                _ => 1.,
+            };
+            let layout = pangocairo::functions::create_layout(&cr);
+            let weight = if state == BarPillState::Focused {
+                "Semibold"
+            } else {
+                "Medium"
+            };
+            layout.set_font_description(Some(&caption_font(weight, 13.)));
+            layout.set_single_paragraph_mode(true);
+            layout.set_ellipsize(EllipsizeMode::End);
+            layout.set_text(&key.text);
+            let padding = BAR_PILL_PADDING;
+            let icon_size = BAR_ICON_SIZE;
+            let has_icon =
+                crate::app_icons::icon(&key.icon, (icon_size * key.scale).round() as i32).is_some();
+            let icon_space = if has_icon || floating {
+                icon_size + BAR_ICON_GAP
+            } else {
+                0.
+            };
+            let badge = (stacked > 1).then(|| {
+                let badge = pangocairo::functions::create_layout(&cr);
+                badge.set_font_description(Some(&caption_font("Bold", 11.)));
+                badge.set_text(&stacked.to_string());
+                badge
+            });
+            let badge_width = badge
+                .as_ref()
+                .map_or(0., |badge| f64::from(badge.pixel_size().0).max(7.) + 10.);
+            let badge_space = if badge.is_some() {
+                badge_width + 6.
+            } else {
+                0.
+            };
+            let available = (width - 2. * padding - icon_space - badge_space).max(1.);
+            layout.set_width((available * f64::from(pango::SCALE)) as i32);
+            let (text_width, text_height) = layout.pixel_size();
+            let content = f64::from(text_width) + icon_space + badge_space;
+            let x = ((width - content) / 2.).max(padding);
+            if let Some(badge) = &badge {
+                let bx = x + icon_space + f64::from(text_width) + 6.;
+                let bh = 16.;
+                rounded_rect(&cr, bx, (height - bh) / 2., badge_width, bh, bh / 2.);
+                set_source(&cr, ink, 0.16);
+                cr.fill()?;
+                let (bw, bth) = badge.pixel_size();
+                set_source(&cr, ink, text_alpha.max(0.85));
+                cr.move_to(
+                    bx + (badge_width - f64::from(bw)) / 2.,
+                    (height - f64::from(bth)) / 2.,
+                );
+                pangocairo::functions::show_layout(&cr, badge);
+            }
+            set_source(&cr, ink, text_alpha);
+            if has_icon {
+                let _ = cr.save();
+                crate::app_icons::paint(
+                    &cr,
+                    &key.icon,
+                    x,
+                    (height - icon_size) / 2.,
+                    icon_size,
+                    key.scale,
+                );
+                let _ = cr.restore();
+                if text_alpha < 1. {
+                    // Offscreen windows recede, icon included.
+                    rounded_rect(
+                        &cr,
+                        x - 1.,
+                        (height - icon_size) / 2. - 1.,
+                        icon_size + 2.,
+                        icon_size + 2.,
+                        4.,
+                    );
+                    cr.set_source_rgba(0., 0., 0., 1. - text_alpha);
+                    cr.set_operator(cairo::Operator::DestOut);
+                    cr.fill()?;
+                    cr.set_operator(cairo::Operator::Over);
+                }
+                set_source(&cr, ink, text_alpha);
+            } else if floating {
+                // Two overlapping windows.
+                let y = height / 2. - 5.5;
+                cr.set_line_width(1.25);
+                rounded_rect(&cr, x + 0.5, y + 3.5, 8., 7., 1.5);
+                cr.stroke()?;
+                rounded_rect(&cr, x + 3.5, y + 0.5, 8., 7., 1.5);
+                cr.stroke()?;
+            }
+            cr.move_to(x + icon_space, (height - f64::from(text_height)) / 2.);
+            pangocairo::functions::show_layout(&cr, &layout);
+        }
+        LabelKind::BarButton {
+            icon,
+            enabled,
+            hovered,
+        } => {
+            let c = height / 2.;
+            if enabled && hovered {
+                rounded_rect(&cr, 0., 0., width, height, height / 2.);
+                set_source(&cr, ink, 0.12);
+                cr.fill()?;
+            }
+            set_source(&cr, ink, if enabled { 0.92 } else { 0.32 });
+            cr.set_line_width(1.75);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.set_line_join(cairo::LineJoin::Round);
+            match icon {
+                BarIcon::Left | BarIcon::Right => {
+                    let left = icon == BarIcon::Left;
+                    let dir = if left { -1. } else { 1. };
+                    // The chevron sits at the outer end, the count of windows that way beside it.
+                    let cx = if left { c } else { width - c };
+                    let span = 4.5;
+                    cr.move_to(cx - dir * span * 0.6, c - span);
+                    cr.line_to(cx + dir * span * 0.6, c);
+                    cr.line_to(cx - dir * span * 0.6, c + span);
+                    cr.stroke()?;
+                    // The windows that way, as a "+N" badge like the one counting a column's
+                    // stacked windows.
+                    if !key.text.is_empty() {
+                        let count = pangocairo::functions::create_layout(&cr);
+                        count.set_font_description(Some(&caption_font("Bold", 11.)));
+                        count.set_text(&format!("+{}", key.text));
+                        let (cw, ch) = count.pixel_size();
+                        let bw = f64::from(cw).max(7.) + 10.;
+                        let bh = 16.;
+                        let bx = if left { cx + 8. } else { cx - 8. - bw };
+                        rounded_rect(&cr, bx, (height - bh) / 2., bw, bh, bh / 2.);
+                        set_source(&cr, ink, 0.16);
+                        cr.fill()?;
+                        set_source(&cr, ink, 0.92);
+                        cr.move_to(
+                            bx + (bw - f64::from(cw)) / 2.,
+                            (height - f64::from(ch)) / 2.,
+                        );
+                        pangocairo::functions::show_layout(&cr, &count);
+                    }
+                }
+                BarIcon::ShowFloating | BarIcon::HideFloating => {
+                    // Two overlapping windows, alone or followed by the action's name.
+                    let cx = if key.text.is_empty() {
+                        width / 2. + 1.
+                    } else {
+                        BAR_PILL_PADDING + BAR_ICON_SIZE / 2.
+                    };
+                    cr.set_line_width(1.25);
+                    rounded_rect(&cr, cx - 7., c - 2., 10., 8., 2.);
+                    cr.stroke()?;
+                    rounded_rect(&cr, cx - 3., c - 6., 10., 8., 2.);
+                    if icon == BarIcon::HideFloating {
+                        cr.fill()?;
+                    } else {
+                        cr.stroke()?;
+                    }
+                    let layout = pangocairo::functions::create_layout(&cr);
+                    layout.set_font_description(Some(&caption_font("Medium", 13.)));
+                    layout.set_single_paragraph_mode(true);
+                    layout.set_text(&key.text);
+                    let (_, text_h) = layout.pixel_size();
+                    cr.move_to(
+                        BAR_PILL_PADDING + BAR_ICON_SIZE + BAR_ICON_GAP,
+                        (height - f64::from(text_h)) / 2.,
+                    );
+                    pangocairo::functions::show_layout(&cr, &layout);
+                }
+            }
+        }
+        LabelKind::Scrim {
+            round_left,
+            round_right,
+            ..
+        } => {
+            let r = 16_f64.min(width / 2.).min(height / 2.);
+            let (rl, rr) = (
+                if round_left { r } else { 0. },
+                if round_right { r } else { 0. },
+            );
+            cr.new_sub_path();
+            cr.move_to(rl, 0.);
+            cr.line_to(width - rr, 0.);
+            if rr > 0. {
+                cr.arc(width - rr, rr, rr, -std::f64::consts::FRAC_PI_2, 0.);
+            }
+            cr.line_to(width, height - rr);
+            if rr > 0. {
+                cr.arc(width - rr, height - rr, rr, 0., std::f64::consts::FRAC_PI_2);
+            }
+            cr.line_to(rl, height);
+            if rl > 0. {
+                cr.arc(
+                    rl,
+                    height - rl,
+                    rl,
+                    std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::PI,
+                );
+            }
+            cr.line_to(0., rl);
+            if rl > 0. {
+                cr.arc(rl, rl, rl, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+            }
+            cr.close_path();
+            set_source(&cr, background, 1.);
+            cr.fill()?;
+        }
+        LabelKind::Tooltip { right_align } => {
+            let layout = pangocairo::functions::create_layout(&cr);
+            layout.set_font_description(Some(&caption_font("Medium", 13.)));
+            layout.set_single_paragraph_mode(true);
+            layout.set_ellipsize(EllipsizeMode::End);
+            layout.set_width(
+                (((inner_width - 2. * 12. - 2.).max(1.)) * f64::from(pango::SCALE)) as i32,
+            );
+            layout.set_text(&key.text);
+            let (text_w, text_h) = layout.pixel_size();
+            let w = (f64::from(text_w) + 2. * 12.).min(inner_width - 2.);
+            let h = height - 2.;
+            let x = if right_align {
+                inner_width - 1. - w
+            } else {
+                1.
+            };
+            rounded_rect(&cr, x, 1., w, h, h / 2.);
+            set_source(&cr, background, 1.);
+            cr.fill_preserve()?;
+            set_source(&cr, ink, if light { 0.16 } else { 0.18 });
+            cr.set_line_width(1.);
+            cr.stroke()?;
+            set_source(&cr, ink, 1.);
+            cr.move_to(x + 12., (height - f64::from(text_h)) / 2.);
+            pangocairo::functions::show_layout(&cr, &layout);
+        }
+        _ => {}
+    }
+    drop(cr);
+    upload_texture(renderer, surface, pixel_width, pixel_height, key.scale)
 }
 
 fn upload_texture(
@@ -854,8 +1395,9 @@ mod tests {
     #[test]
     fn captions_use_the_workspace_index_and_plain_names() {
         assert_eq!(caption(2, None, false), "Workspace 2");
+        assert_eq!(caption(2, None, true), "Workspace 2 · Empty");
         assert_eq!(caption(3, Some("  "), false), "Workspace 3");
-        assert_eq!(caption(4, Some("Field\nnotes"), false), "4   Field notes");
-        assert_eq!(caption(1, Some(&"x".repeat(160)), false).len(), 132);
+        assert_eq!(caption(4, Some("Field\nnotes"), false), "4 · Field notes");
+        assert_eq!(caption(1, Some(&"x".repeat(160)), false).len(), 133);
     }
 }
