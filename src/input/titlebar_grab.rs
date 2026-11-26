@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use smithay::backend::input::ButtonState;
 use smithay::desktop::Window;
 use smithay::input::pointer::{
@@ -10,6 +12,7 @@ use smithay::input::touch::{
     self, GrabStartData as TouchGrabStartData, TouchGrab, TouchInnerHandle,
 };
 use smithay::input::SeatHandler;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::utils::{Logical, Point};
 
 use super::DOUBLE_CLICK_TIME;
@@ -40,6 +43,9 @@ impl State {
             // them either.
             TitlebarPart::Maximize if fixed_size => return,
             TitlebarPart::Maximize => self.niri.layout.toggle_maximized(window),
+            TitlebarPart::Layout => {
+                self.niri.layout.toggle_layout_menu(window);
+            }
             TitlebarPart::Drag => return,
         }
         self.niri.queue_redraw_all();
@@ -98,6 +104,41 @@ impl State {
         }
     }
 
+    /// Opens the layout menu when the pointer rests on a layout button, like the snap layouts
+    /// of other desktops; moving on before the delay cancels it.
+    fn schedule_layout_menu_on_hover(&mut self, window: Option<Window>) {
+        const DELAY: Duration = Duration::from_millis(450);
+        if self.niri.layout_button_hover.as_ref().map(|(w, _)| w) == window.as_ref() {
+            return;
+        }
+        if let Some((_, token)) = self.niri.layout_button_hover.take() {
+            self.niri.event_loop.remove(token);
+        }
+        let Some(window) = window else {
+            return;
+        };
+        let target = window.clone();
+        let token = self
+            .niri
+            .event_loop
+            .insert_source(Timer::from_duration(DELAY), move |_, _, state| {
+                if state
+                    .niri
+                    .layout_button_hover
+                    .take()
+                    .is_some_and(|(window, _)| window == target)
+                    && state.niri.layout.open_layout_menu_on_hover(&target)
+                {
+                    state.niri.queue_redraw_all();
+                }
+                TimeoutAction::Drop
+            })
+            .ok();
+        if let Some(token) = token {
+            self.niri.layout_button_hover = Some((window, token));
+        }
+    }
+
     fn is_over_titlebar_part(
         &self,
         location: Point<f64, Logical>,
@@ -135,8 +176,23 @@ impl State {
             None => under_pointer
                 .clone()
                 .filter(|(_, part)| free_pointer && *part != TitlebarPart::Drag)
-                .map(|(window, part)| (window, (part, titlebar::ButtonState::Hovered))),
+                .map(|(window, part)| (window, (part, titlebar::ButtonState::Hovered)))
+                // The button stays lit while its menu is open.
+                .or_else(|| {
+                    self.niri.layout.layout_menu_window().map(|window| {
+                        (
+                            window,
+                            (TitlebarPart::Layout, titlebar::ButtonState::Hovered),
+                        )
+                    })
+                }),
         };
+        self.schedule_layout_menu_on_hover(
+            under_pointer
+                .clone()
+                .filter(|(_, part)| free_pointer && *part == TitlebarPart::Layout)
+                .map(|(window, _)| window),
+        );
 
         // Clients set their cursor on pointer enter; a titlebar has no client to do that, so the
         // last client cursor (a text beam, a resize arrow, or none) would otherwise remain.

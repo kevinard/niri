@@ -68,6 +68,9 @@ pub enum TitleAlign {
 
 #[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitlebarButton {
+    /// Opens a menu to set the column width, pin the column, float the window or show the
+    /// column as tabs.
+    Layout,
     Maximize,
     Close,
 }

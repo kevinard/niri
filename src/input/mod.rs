@@ -10,7 +10,7 @@ use niri_config::{
     is_keysym_modifier, Action, Bind, Binds, BoundAction, Config, Key, ModKey, Modifiers,
     MruDirection, SwitchBinds, Trigger,
 };
-use niri_ipc::LayoutSwitchTarget;
+use niri_ipc::{LayoutSwitchTarget, PinSide, SizeChange};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
@@ -52,6 +52,7 @@ use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
+use crate::layout::layout_menu::LayoutMenuItem;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, Niri, PointerVisibility, State};
@@ -812,26 +813,21 @@ impl State {
                 };
 
                 if matches!(res, ShouldInterceptResult::Forward) {
+                    // Escape closes a layout menu before anything else sees it.
+                    if pressed
+                        && modified == Some(Keysym::Escape)
+                        && this.niri.layout.close_layout_menus()
+                    {
+                        this.niri.suppressed_keys.insert(key_code);
+                        this.niri.queue_redraw_all();
+                        return ShouldInterceptResult::InterceptOnly;
+                    }
+
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
-                        let framed = this.niri.config.borrow().overview.framed_workspaces;
                         if let Some(bind) =
-                            modified.and_then(|key| hardcoded_overview_bind(key, modifiers, framed))
+                            modified.and_then(|key| hardcoded_overview_bind(key, modifiers))
                         {
-                            if framed && modified != Some(Keysym::Escape) {
-                                let layout = &mut this.niri.layout;
-                                let window = layout
-                                    .take_overview_pointer_selection()
-                                    .map(|mapped| mapped.window.clone());
-                                if let Some(window) = window {
-                                    layout.activate_window(&window);
-                                }
-                                if modified == Some(Keysym::Return) {
-                                    if let Some(workspace) = layout.active_workspace_mut() {
-                                        workspace.reveal_window_from_navigation();
-                                    }
-                                }
-                            }
                             this.niri.suppressed_keys.insert(key_code);
                             return ShouldInterceptResult::InterceptAndHandle(bind);
                         }
@@ -1089,6 +1085,12 @@ impl State {
 
         if let Some(touch) = self.niri.seat.get_touch() {
             touch.cancel(self);
+        }
+
+        // Moving between windows shows a window bar that is shown on demand, until the moves
+        // stop.
+        if is_window_navigation(&action) && self.niri.layout.reveal_window_bar_for_navigation() {
+            self.niri.queue_redraw_all();
         }
 
         match action {
@@ -2040,6 +2042,11 @@ impl State {
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
+            Action::ToggleWindowBar => {
+                if self.niri.layout.toggle_window_bar() {
+                    self.niri.queue_redraw_all();
+                }
+            }
             Action::TogglePinnedColumn(side) => {
                 self.niri.layout.toggle_pinned_column(None, side);
                 self.maybe_warp_cursor_to_focus();
@@ -2728,13 +2735,6 @@ impl State {
                     self.niri.layout.open_overview()
                 };
                 if changed {
-                    // An on-demand rail can open Overview by IPC after the click
-                    // focused the rail. Hand the picker its keyboard controls.
-                    if self.niri.layout.is_overview_open()
-                        && self.niri.config.borrow().overview.framed_workspaces
-                    {
-                        self.niri.layer_shell_on_demand_focus = None;
-                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -3286,29 +3286,66 @@ impl State {
     fn update_pointer_previews(&mut self) {
         let pointer = self.niri.seat.get_pointer().unwrap();
         let pointer_output = self.niri.output_under(pointer.current_location());
+        let mut menu_changed = false;
         for monitor in self.niri.layout.monitors() {
             let position = pointer_output
                 .filter(|(output, _)| *output == monitor.output())
                 .map(|(_, point)| point);
             monitor.update_navigation_preview_pointer(position);
+            menu_changed |= monitor.update_layout_menu_pointer(position);
+            menu_changed |= monitor.update_bar_reveal_pointer(position);
         }
-
-        let under = &self.niri.pointer_contents;
-        if !under.overview || pointer.is_grabbed() {
-            return;
+        if menu_changed {
+            self.niri.queue_redraw_all();
         }
+    }
 
-        let (Some(output), Some((window, _))) = (&under.output, &under.window) else {
-            return;
-        };
-        if self
-            .niri
-            .layout
-            .monitor_for_output_mut(output)
-            .is_some_and(|mon| mon.select_overview_preview(window))
-        {
-            let output = output.clone();
-            self.niri.queue_redraw(&output);
+    /// Handles a press while a layout menu is open. Returns whether the menu used the press.
+    fn layout_menu_press(&mut self, location: Point<f64, Logical>) -> bool {
+        if self.niri.layout.layout_menu_window().is_none() {
+            return false;
+        }
+        let mut chosen = None;
+        let mut inside = false;
+        let mut on_button = false;
+        if let Some((output, point)) = self.niri.output_under(location) {
+            if let Some(monitor) = self.niri.layout.monitor_for_output(output) {
+                match monitor.layout_menu_under(point) {
+                    Some(item) => {
+                        inside = true;
+                        chosen = item;
+                    }
+                    None => on_button = monitor.layout_menu_anchor_contains(point),
+                }
+            }
+        }
+        if let Some((window, item)) = chosen {
+            self.niri.layout.close_layout_menus();
+            self.apply_layout_menu_item(&window, item);
+            self.niri.queue_redraw_all();
+            return true;
+        }
+        if inside {
+            return true;
+        }
+        // A press on the button that opened the menu closes it on release, as the button does.
+        if !on_button && self.niri.layout.close_layout_menus() {
+            self.niri.queue_redraw_all();
+        }
+        false
+    }
+
+    fn apply_layout_menu_item(&mut self, window: &smithay::desktop::Window, item: LayoutMenuItem) {
+        self.focus_window(window);
+        let layout = &mut self.niri.layout;
+        match item {
+            LayoutMenuItem::Width(percent) => {
+                layout.set_column_width(SizeChange::SetProportion(f64::from(percent)))
+            }
+            LayoutMenuItem::PinLeft => layout.toggle_pinned_column(Some(window), PinSide::Left),
+            LayoutMenuItem::PinRight => layout.toggle_pinned_column(Some(window), PinSide::Right),
+            LayoutMenuItem::Floating => layout.toggle_window_floating(Some(window)),
+            LayoutMenuItem::Tabs => layout.toggle_column_tabbed_display(),
         }
     }
 
@@ -3341,6 +3378,7 @@ impl State {
 
         if let Some(monitor) = self.niri.layout.monitor_for_output(&output) {
             monitor.dismiss_navigation_preview(point);
+            monitor.hide_window_bar();
         }
         self.niri.layer_shell_on_demand_focus = None;
         self.focus_window(&window);
@@ -3588,6 +3626,11 @@ impl State {
             self.niri.tablet_cursor_location = None;
 
             let is_overview_open = self.niri.layout.is_overview_open();
+
+            if !pointer.is_grabbed() && self.layout_menu_press(pointer.current_location()) {
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
 
             if button == Some(MouseButton::Left)
                 && !mod_down
@@ -6207,7 +6250,37 @@ fn overview_typed_text(utf8: &str, mods: Modifiers) -> Option<String> {
     Some(utf8.to_owned())
 }
 
-fn hardcoded_overview_bind(key: Keysym, mods: Modifiers, framed: bool) -> Option<Bind> {
+/// Actions that move focus or columns along the scrolling layout.
+fn is_window_navigation(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::FocusColumnLeft
+            | Action::FocusColumnRight
+            | Action::FocusColumnFirst
+            | Action::FocusColumnLast
+            | Action::FocusColumnRightOrFirst
+            | Action::FocusColumnLeftOrLast
+            | Action::FocusColumnOrMonitorLeft
+            | Action::FocusColumnOrMonitorRight
+            | Action::FocusWindowDown
+            | Action::FocusWindowUp
+            | Action::FocusWindowDownOrColumnLeft
+            | Action::FocusWindowDownOrColumnRight
+            | Action::FocusWindowUpOrColumnLeft
+            | Action::FocusWindowUpOrColumnRight
+            | Action::FocusWindowDownOrTop
+            | Action::FocusWindowUpOrBottom
+            | Action::MoveColumnLeft
+            | Action::MoveColumnRight
+            | Action::MoveColumnToFirst
+            | Action::MoveColumnToLast
+            | Action::MoveColumnLeftOrToMonitorLeft
+            | Action::MoveColumnRightOrToMonitorRight
+            | Action::CenterColumn
+    )
+}
+
+fn hardcoded_overview_bind(key: Keysym, mods: Modifiers) -> Option<Bind> {
     if !mods.is_empty() {
         return None;
     }
@@ -6220,10 +6293,6 @@ fn hardcoded_overview_bind(key: Keysym, mods: Modifiers, framed: bool) -> Option
         }
         Keysym::Left => Action::FocusColumnLeft,
         Keysym::Right => Action::FocusColumnRight,
-        Keysym::Tab if framed => {
-            repeat = false;
-            Action::SwitchFocusBetweenFloatingAndTiling
-        }
         Keysym::Up => Action::FocusWindowOrWorkspaceUp,
         Keysym::Down => Action::FocusWindowOrWorkspaceDown,
         _ => {

@@ -4201,3 +4201,146 @@ fn arbitrary_op_with_pinning() -> impl Strategy<Value = Op> {
         1 => (1..=5usize).prop_map(Op::Communicate),
     ]
 }
+
+#[test]
+fn window_bar_mode_decides_its_reserved_row() {
+    use niri_config::layout::WindowBar;
+
+    let top = |window_bar: WindowBar| {
+        let options = Options {
+            layout: niri_config::Layout {
+                clip_scroll_to_work_area: true,
+                window_bar,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ops = [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ];
+        let layout = check_ops_with_options(options, ops);
+        let ws = layout.active_workspace().unwrap();
+        (ws.scrolling().full_working_area().loc.y, layout)
+    };
+
+    // Shown always, the bar has a row of its own above the windows.
+    let (always, _) = top(WindowBar::Always);
+    assert_eq!(always, scrolling::NAVIGATION_STRIP_HEIGHT);
+    // Shown on demand it slides over the windows, and turned off it takes no space.
+    let (on_demand, layout) = top(WindowBar::OnDemand);
+    assert_eq!(on_demand, 0.);
+    assert_eq!(top(WindowBar::Off).0, 0.);
+
+    // Only a bar shown on demand can be toggled.
+    assert!(layout.toggle_window_bar());
+    assert!(layout.toggle_window_bar());
+    let (_, layout) = top(WindowBar::Always);
+    assert!(!layout.toggle_window_bar());
+}
+
+#[test]
+fn panel_changes_keep_the_leftmost_column_at_the_edge() {
+    let panel = |left: f64| -> Box<niri_config::LayoutPart> {
+        Box::new(niri_config::LayoutPart {
+            struts: Some(Struts {
+                left: FloatOrInt(left),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    };
+    let settle = || {
+        let mut ops: Vec<Op> = (1..=2).map(Op::Communicate).collect();
+        ops.push(Op::Refresh { is_active: true });
+        ops.push(Op::CompleteAnimations);
+        ops
+    };
+    let positions = |layout: &Layout<TestWindow>| -> Vec<f64> {
+        let ws = layout.active_workspace().unwrap();
+        let mut tiles: Vec<_> = ws
+            .tiles_with_render_positions()
+            .map(|(tile, pos, _)| (*tile.window().id(), pos.x))
+            .collect();
+        tiles.sort_by_key(|(id, _)| *id);
+        tiles.into_iter().map(|(_, x)| x).collect()
+    };
+
+    for focus_first in [false, true] {
+        let mut ops = vec![
+            Op::AddOutput(1),
+            Op::UpdateConfig {
+                layout_config: panel(76.),
+            },
+        ];
+        for id in 1..=2 {
+            ops.push(Op::AddWindow {
+                params: TestWindowParams::new(id),
+            });
+            ops.push(Op::SetColumnWidth(SizeChange::SetProportion(50.)));
+        }
+        ops.extend(settle());
+        ops.push(Op::FocusColumnFirst);
+        if !focus_first {
+            ops.push(Op::FocusColumnLast);
+        }
+        ops.extend(settle());
+        let mut layout = check_ops(ops);
+        let gaps = layout.options.layout.gaps;
+        let start = positions(&layout);
+        assert_eq!(start[0], 76. + gaps);
+
+        // The panel hides: the columns take its space back.
+        check_ops_on_layout(
+            &mut layout,
+            [Op::UpdateConfig {
+                layout_config: panel(0.),
+            }],
+        );
+        check_ops_on_layout(&mut layout, settle());
+        assert_eq!(positions(&layout)[0], gaps, "focus_first: {focus_first}");
+
+        // It shows again: the columns move aside rather than under it.
+        check_ops_on_layout(
+            &mut layout,
+            [Op::UpdateConfig {
+                layout_config: panel(76.),
+            }],
+        );
+        check_ops_on_layout(&mut layout, settle());
+        assert_eq!(positions(&layout), start, "focus_first: {focus_first}");
+    }
+}
+
+#[test]
+fn keyboard_navigation_reveals_a_window_bar_shown_on_demand() {
+    use niri_config::layout::WindowBar;
+
+    let layout = |window_bar| {
+        let options = Options {
+            layout: niri_config::Layout {
+                clip_scroll_to_work_area: true,
+                window_bar,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        check_ops_with_options(
+            options,
+            [
+                Op::AddOutput(1),
+                Op::AddWindow {
+                    params: TestWindowParams::new(1),
+                },
+            ],
+        )
+    };
+    let on_demand = layout(WindowBar::OnDemand);
+    assert!(on_demand.reveal_window_bar_for_navigation());
+    // Further moves keep it shown rather than showing it again.
+    assert!(!on_demand.reveal_window_bar_for_navigation());
+    assert!(!layout(WindowBar::Always).reveal_window_bar_for_navigation());
+    assert!(!layout(WindowBar::Off).reveal_window_bar_for_navigation());
+}

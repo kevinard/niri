@@ -19,8 +19,7 @@ use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
-use super::floating::{FloatingSpace, FloatingSpaceRenderElement, OverviewPositions};
-use super::overview_caption::OverviewCaption;
+use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
@@ -94,8 +93,6 @@ pub struct Workspace<W: LayoutElement> {
 
     /// This workspace's shadow in the overview.
     shadow: Shadow,
-
-    pub(super) overview_caption: OverviewCaption,
 
     /// This workspace's background.
     background_buffer: SolidColorBuffer,
@@ -286,7 +283,6 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
-            overview_caption: OverviewCaption::default(),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             output: Some(output),
             clock,
@@ -350,7 +346,6 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
-            overview_caption: OverviewCaption::default(),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             clock,
             base_options,
@@ -1711,26 +1706,12 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn tiles_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
-        self.tile_render_positions(None)
-    }
-
-    pub(super) fn tiles_with_overview_positions<'a>(
-        &'a self,
-        positions: &'a OverviewPositions<W::Id>,
-    ) -> impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)> + 'a {
-        self.tile_render_positions(Some(positions))
-    }
-
-    fn tile_render_positions<'a>(
-        &'a self,
-        overview: Option<&'a OverviewPositions<W::Id>>,
-    ) -> impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)> + 'a {
         let scrolling = self.scrolling.tiles_with_render_positions();
-        let floating = self
-            .floating
-            .tiles_with_preview_positions(overview.unwrap_or(&[]));
-        let visible = self.floating_visible_in(overview.is_some());
+
+        let floating = self.floating.tiles_with_render_positions();
+        let visible = self.is_floating_visible();
         let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
+
         floating.chain(scrolling)
     }
 
@@ -1795,10 +1776,9 @@ impl<W: LayoutElement> Workspace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
-        overview: Option<&OverviewPositions<W::Id>>,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        if !self.floating_visible_in(overview.is_some()) && layer.is_normal() {
+        if !self.is_floating_visible() && layer.is_normal() {
             return;
         }
 
@@ -1810,7 +1790,6 @@ impl<W: LayoutElement> Workspace<W> {
             view_rect,
             floating_focus_ring,
             layer,
-            overview.unwrap_or(&[]),
             &mut |elem| push(elem.into()),
         );
     }
@@ -1836,13 +1815,20 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.fullscreen_window_above_top_layer()
     }
 
-    pub fn is_floating_visible(&self) -> bool {
-        self.floating_visible_in(false)
+    /// How `window` is arranged, for the layout menu.
+    pub fn layout_menu_state(&self, window: &W::Id) -> Option<super::layout_menu::LayoutMenuState> {
+        if self.floating.has_window(window) {
+            return Some(super::layout_menu::LayoutMenuState {
+                floating: true,
+                ..Default::default()
+            });
+        }
+        self.scrolling.layout_menu_state(window)
     }
 
-    fn floating_visible_in(&self, overview: bool) -> bool {
+    pub fn is_floating_visible(&self) -> bool {
         if self.floating_is_active == FloatingActive::NoWithFloatingHidden {
-            return overview;
+            return false;
         }
         // If the focus is on a fullscreen scrolling window, hide the floating windows.
         matches!(
@@ -1926,32 +1912,17 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        self.window_under_at(pos, None)
-    }
-
-    pub(super) fn window_under_in_overview(
-        &self,
-        pos: Point<f64, Logical>,
-        positions: &OverviewPositions<W::Id>,
-    ) -> Option<(&W, HitType)> {
-        self.window_under_at(pos, Some(positions))
-    }
-
-    fn window_under_at(
-        &self,
-        pos: Point<f64, Logical>,
-        overview: Option<&OverviewPositions<W::Id>>,
-    ) -> Option<(&W, HitType)> {
-        // This ordering matches tile_render_positions().
-        if self.floating_visible_in(overview.is_some()) {
+        // This logic is consistent with tiles_with_render_positions().
+        if self.is_floating_visible() {
             if let Some(rv) = self
                 .floating
-                .tiles_with_preview_positions(overview.unwrap_or(&[]))
+                .tiles_with_render_positions()
                 .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
             {
                 return Some(rv);
             }
         }
+
         self.scrolling.window_under(pos)
     }
 

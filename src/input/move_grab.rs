@@ -100,11 +100,6 @@ impl MoveGrab {
                 }
 
                 layout.activate_window(&self.window);
-                if in_overview && data.niri.config.borrow().overview.framed_workspaces {
-                    if let Some(workspace) = layout.active_workspace_mut() {
-                        workspace.reveal_window_from_navigation();
-                    }
-                }
             }
             GestureState::Move => layout.interactive_move_end(&self.window),
             GestureState::ViewOffset => {

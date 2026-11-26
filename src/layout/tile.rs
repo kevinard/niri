@@ -41,7 +41,6 @@ use crate::utils::{
 /// Toplevel window with decorations.
 #[derive(Debug)]
 pub struct Tile<W: LayoutElement> {
-    pub(super) overview_label: super::overview_caption::PreviewLabel,
     /// The toplevel window itself.
     window: W,
 
@@ -50,16 +49,11 @@ pub struct Tile<W: LayoutElement> {
     titlebar_tabs: Option<TitlebarTabs>,
     /// Whether the tile is mostly scrolled out of the visible area.
     peek: bool,
-    /// Opacity for a window leaving the edge of the view; below 1 it renders offscreen.
-    fade: f64,
-    fade_offscreen: OffscreenBuffer,
     /// Width of the tile's start that is scrolled out of the visible area.
     hidden_start: f64,
     /// The horizontal range of the tile, in tile coordinates, that remains in view when it is
     /// partly scrolled away. The tile then draws as a complete card over that range.
     card: Option<(f64, f64)>,
-    /// Whether the overview's caption stands in for the title.
-    hide_title: bool,
     /// Height from the previous commit, needed when a decoration mode changes during a resize.
     last_titlebar_height: f64,
 
@@ -218,16 +212,12 @@ impl<W: LayoutElement> Tile<W> {
         let fullscreen_backdrop_color = options.layout.fullscreen_backdrop_color;
 
         let mut tile = Self {
-            overview_label: Default::default(),
             window,
             titlebar: Titlebar::default(),
             titlebar_tabs: None,
             peek: false,
-            fade: 1.,
-            fade_offscreen: OffscreenBuffer::default(),
             hidden_start: 0.,
             card: None,
-            hide_title: false,
             last_titlebar_height: 0.,
             border: FocusRing::new(border_config.into()),
             focus_ring: FocusRing::new(focus_ring_config),
@@ -1208,20 +1198,6 @@ impl<W: LayoutElement> Tile<W> {
         self.peek = peek;
     }
 
-    pub fn fade(&self) -> f64 {
-        self.fade
-    }
-
-    /// Fades the whole tile, decorations included, toward transparent.
-    pub fn set_fade(&mut self, fade: f64) {
-        self.fade = fade.clamp(0., 1.);
-    }
-
-    /// Hides the title while the overview shows a caption in its place.
-    pub fn set_hide_title(&mut self, hide: bool) {
-        self.hide_title = hide;
-    }
-
     /// Sets the part of the tile that remains in view, or `None` when it is all in view.
     pub fn set_card(&mut self, card: Option<(f64, f64)>) {
         self.card = card;
@@ -1282,6 +1258,17 @@ impl<W: LayoutElement> Tile<W> {
             .tab_rects(&tabs.natural_widths(&self.options.layout.titlebar.font))
             .iter()
             .position(|rect| rect.contains(point))
+    }
+
+    /// The titlebar button `part`, relative to the tile, if the titlebar shows it.
+    pub fn titlebar_button_rect(&self, part: TitlebarPart) -> Option<Rectangle<f64, Logical>> {
+        let frame = self.titlebar_geometry();
+        if frame.size.h <= 0. {
+            return None;
+        }
+        let layout = self.titlebar_layout(frame.size);
+        let (_, rect) = layout.buttons.iter().find(|(p, _)| *p == part)?;
+        Some(Rectangle::new(frame.loc + rect.loc, rect.size))
     }
 
     fn titlebar_hit(&self, point: Point<f64, Logical>) -> Option<TitlebarPart> {
@@ -1408,7 +1395,7 @@ impl<W: LayoutElement> Tile<W> {
                     &self.options.layout.titlebar,
                     location + frame.loc,
                     win_alpha,
-                    (!blocked && !self.hide_title).then_some(title),
+                    (!blocked).then_some(title),
                     &mut push_titlebar,
                 )
             });
@@ -1675,8 +1662,7 @@ impl<W: LayoutElement> Tile<W> {
         let tile_alpha = (self
             .alpha_animation
             .as_ref()
-            .map_or(1., |alpha| alpha.anim.clamped_value())
-            * self.fade) as f32;
+            .map_or(1., |alpha| alpha.anim.clamped_value())) as f32;
 
         let mut pushed = false;
         self.window().set_offscreen_data(None);
@@ -1708,11 +1694,8 @@ impl<W: LayoutElement> Tile<W> {
                     warn!("error rendering window opening animation: {err:?}");
                 }
             }
-        } else if self.alpha_animation.is_some() || self.fade < 0.999 {
-            let offscreen = self
-                .alpha_animation
-                .as_ref()
-                .map_or(&self.fade_offscreen, |alpha| &alpha.offscreen);
+        } else if let Some(alpha) = &self.alpha_animation {
+            let offscreen = &alpha.offscreen;
             let mut ctx = ctx.as_gles();
             let mut elements = Vec::new();
             self.render_inner(

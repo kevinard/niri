@@ -22,6 +22,7 @@ thread_local! {
     static CACHE: RefCell<HashMap<(String, i32), Option<ImageSurface>>> =
         RefCell::new(HashMap::new());
     static PATHS: RefCell<HashMap<String, Option<PathBuf>>> = RefCell::new(HashMap::new());
+    static THEMES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 /// The icon of the application with this Wayland app ID as a square premultiplied ARGB
@@ -136,53 +137,135 @@ fn desktop_icon(app_id: &str) -> Option<String> {
 }
 
 fn user_theme() -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute());
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(".config"));
-    ["gtk-4.0", "gtk-3.0"].iter().find_map(|toolkit| {
-        let text = read_text(&config.join(toolkit).join("settings.ini"))?;
-        text.lines().map(str::trim).find_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            (key.trim() == "gtk-icon-theme-name").then(|| value.trim().trim_matches('"').to_owned())
+        .or_else(|| home.map(|home| home.join(".config")));
+    let system = std::env::var_os("XDG_CONFIG_DIRS")
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| "/etc/xdg".into());
+    // The same files as the Shell reads, so titlebars and the taskbar agree.
+    let dirs: Vec<PathBuf> = config
+        .into_iter()
+        .chain(std::env::split_paths(&system).filter(|path| path.is_absolute()))
+        .take(16)
+        .collect();
+    dirs.iter().find_map(|dir| {
+        ["gtk-4.0", "gtk-3.0"].iter().find_map(|toolkit| {
+            let text = read_text(&dir.join(toolkit).join("settings.ini"))?;
+            text.lines().map(str::trim).find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "gtk-icon-theme-name")
+                    .then(|| value.trim().trim_matches('"').to_owned())
+                    .filter(|value| !value.is_empty())
+            })
         })
     })
 }
 
-fn themes() -> Vec<String> {
-    let mut themes = Vec::new();
-    let mut push = |name: &str| {
-        let valid = !name.is_empty()
-            && !name.contains(['/', '\\'])
-            && !matches!(name, "." | "..")
-            && !themes.iter().any(|theme| theme == name);
-        if valid {
-            themes.push(name.to_owned());
-        }
-    };
-    if let Some(theme) = user_theme() {
-        push(&theme);
-        // One level of inheritance covers the common themes.
-        for dir in data_dirs() {
-            if let Some(text) = read_text(&dir.join("icons").join(&theme).join("index.theme")) {
-                if let Some(parents) = text
-                    .lines()
-                    .find_map(|line| line.trim().strip_prefix("Inherits="))
-                {
-                    for parent in parents.split(',') {
-                        push(parent.trim());
-                    }
-                }
-                break;
+/// The `[Icon Theme]` keys of a theme: its parents and its icon directories.
+fn theme_index(theme: &str) -> Option<(Vec<String>, Vec<String>)> {
+    data_dirs().iter().find_map(|dir| {
+        let text = read_text(&dir.join("icons").join(theme).join("index.theme"))?;
+        let mut parents = Vec::new();
+        let mut directories = Vec::new();
+        let mut in_theme = false;
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_theme = line == "[Icon Theme]";
+                continue;
+            }
+            if !in_theme {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let list = || {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+            };
+            match key.trim() {
+                "Inherits" => parents.extend(list()),
+                "Directories" | "ScaledDirectories" => directories.extend(list()),
+                _ => (),
             }
         }
-    }
-    // The same fallbacks as GTK: its default theme, then hicolor.
-    for theme in ["Adwaita", "hicolor"] {
-        push(theme);
-    }
-    themes
+        Some((parents, directories))
+    })
+}
+
+/// The themes to search, in order: the person's theme and everything it inherits, then
+/// GTK's default theme and its parents, and `hicolor` last, as the icon theme specification
+/// asks.
+fn themes() -> Vec<String> {
+    THEMES.with(|cached| {
+        if let Some(themes) = cached.borrow().as_ref() {
+            return themes.clone();
+        }
+        fn add(theme: &str, themes: &mut Vec<String>, depth: usize) {
+            let valid = !theme.is_empty()
+                && !theme.contains(['/', '\\'])
+                && !matches!(theme, "." | ".." | "hicolor");
+            if !valid || depth > 6 || themes.len() >= 24 || themes.iter().any(|t| t == theme) {
+                return;
+            }
+            themes.push(theme.to_owned());
+            if let Some((parents, _)) = theme_index(theme) {
+                for parent in parents {
+                    add(&parent, themes, depth + 1);
+                }
+            }
+        }
+        let mut themes = Vec::new();
+        if let Some(theme) = user_theme() {
+            add(&theme, &mut themes, 0);
+        }
+        add("Adwaita", &mut themes, 0);
+        themes.push("hicolor".to_owned());
+        *cached.borrow_mut() = Some(themes.clone());
+        themes
+    })
+}
+
+/// The icon directories of a theme, scalable ones first, then from the largest size down.
+fn theme_directories(theme: &str) -> Vec<String> {
+    let mut directories = theme_index(theme)
+        .map(|(_, directories)| directories)
+        .filter(|directories| !directories.is_empty())
+        .unwrap_or_else(|| {
+            // A theme without an index, like some hicolor installations.
+            SIZES
+                .iter()
+                .flat_map(|size| {
+                    ["apps", "places", "devices", "mimetypes"]
+                        .iter()
+                        .flat_map(move |category| {
+                            [format!("{size}/{category}"), format!("{category}/{size}")]
+                        })
+                })
+                .collect()
+        });
+    let rank = |directory: &str| -> u32 {
+        if directory.contains("scalable") {
+            return u32::MAX;
+        }
+        directory
+            .split(['/', 'x', '@'])
+            .find_map(|part| part.parse::<u32>().ok())
+            .unwrap_or(0)
+    };
+    // Prefer application icons over other categories of the same size.
+    let category = |directory: &str| u32::from(!directory.contains("apps"));
+    directories.sort_by(|a, b| rank(b).cmp(&rank(a)).then(category(a).cmp(&category(b))));
+    directories.dedup();
+    directories
 }
 
 fn find_in_themes(name: &str) -> Option<PathBuf> {
@@ -196,23 +279,17 @@ fn find_in_themes(name: &str) -> Option<PathBuf> {
         .chain(dirs.iter().map(|dir| dir.join("icons")))
         .collect();
     for theme in themes() {
+        let directories = theme_directories(&theme);
         for root in &roots {
             let theme_dir = root.join(&theme);
             if !theme_dir.is_dir() {
                 continue;
             }
-            for size in SIZES {
-                for category in ["apps", "places", "devices", "mimetypes"] {
-                    for (sub, ext) in [
-                        (format!("{size}/{category}"), "svg"),
-                        (format!("{size}/{category}"), "png"),
-                        (format!("{category}/{size}"), "svg"),
-                        (format!("{category}/{size}"), "png"),
-                    ] {
-                        let path = theme_dir.join(&sub).join(format!("{name}.{ext}"));
-                        if path.is_file() {
-                            return Some(path);
-                        }
+            for directory in &directories {
+                for ext in ["svg", "png"] {
+                    let path = theme_dir.join(directory).join(format!("{name}.{ext}"));
+                    if path.is_file() {
+                        return Some(path);
                     }
                 }
             }

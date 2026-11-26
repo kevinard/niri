@@ -79,6 +79,7 @@ pub mod closing_window;
 pub mod floating;
 pub mod focus_ring;
 pub mod insert_hint_element;
+pub mod layout_menu;
 pub mod monitor;
 pub mod opening_window;
 mod overview_caption;
@@ -1876,10 +1877,6 @@ impl<W: LayoutElement> Layout<W> {
         Some(&mut monitors[*active_monitor_idx])
     }
 
-    pub fn take_overview_pointer_selection(&mut self) -> Option<&W> {
-        self.active_monitor()?.take_overview_pointer_selection()
-    }
-
     pub fn active_monitor_ref(&self) -> Option<&Monitor<W>> {
         let MonitorSet::Normal {
             monitors,
@@ -1911,6 +1908,64 @@ impl<W: LayoutElement> Layout<W> {
         };
 
         monitors.iter_mut()
+    }
+
+    /// Shows or hides the window bar of the active output, when it is shown on demand.
+    pub fn toggle_window_bar(&self) -> bool {
+        self.active_monitor_ref()
+            .is_some_and(|monitor| monitor.toggle_window_bar())
+    }
+
+    /// Shows the window bar of the active output for a moment while keyboard navigation moves
+    /// between windows, when it is shown on demand.
+    pub fn reveal_window_bar_for_navigation(&self) -> bool {
+        self.active_monitor_ref()
+            .is_some_and(|monitor| monitor.reveal_window_bar_for_navigation())
+    }
+
+    fn monitor_of_window(&self, window: &W::Id) -> Option<&Monitor<W>> {
+        self.monitors()
+            .find(|mon| mon.windows().any(|win| win.id() == window))
+    }
+
+    /// Opens, pins open or closes the layout menu of `window`, from a click on its titlebar
+    /// button. Other layout menus close.
+    pub fn toggle_layout_menu(&self, window: &W::Id) -> bool {
+        let Some(monitor) = self.monitor_of_window(window) else {
+            return false;
+        };
+        let mut changed = false;
+        for other in self.monitors() {
+            if other.output != monitor.output {
+                changed |= other.close_layout_menu();
+            }
+        }
+        monitor.toggle_layout_menu(window) || changed
+    }
+
+    /// Opens the layout menu of `window` because the pointer rests on its titlebar button.
+    pub fn open_layout_menu_on_hover(&self, window: &W::Id) -> bool {
+        if self
+            .monitors()
+            .any(|mon| mon.layout_menu_window().is_some())
+        {
+            return false;
+        }
+        self.monitor_of_window(window)
+            .is_some_and(|monitor| monitor.open_layout_menu(window, true))
+    }
+
+    pub fn close_layout_menus(&self) -> bool {
+        let mut changed = false;
+        for monitor in self.monitors() {
+            changed |= monitor.close_layout_menu();
+        }
+        changed
+    }
+
+    /// The window whose layout menu is open, if any.
+    pub fn layout_menu_window(&self) -> Option<W::Id> {
+        self.monitors().find_map(|mon| mon.layout_menu_window())
     }
 
     pub fn monitor_for_output(&self, output: &Output) -> Option<&Monitor<W>> {
@@ -4042,9 +4097,6 @@ impl<W: LayoutElement> Layout<W> {
             .unwrap();
         let window_offset = tile.window_loc();
 
-        let tile_offset = mon
-            .floating_overview_position(ws, &window_id)
-            .unwrap_or(tile_offset);
         let tile_pos = ws_geo.loc + tile_offset.upscale(zoom);
 
         let pointer_offset_within_window =
@@ -4166,9 +4218,6 @@ impl<W: LayoutElement> Layout<W> {
                             .find(|(tile, _, _)| tile.window().id() == window)
                             .unwrap();
 
-                        let tile_offset = mon
-                            .floating_overview_position(ws, window)
-                            .unwrap_or(tile_offset);
                         let zoom = mon.overview_zoom();
                         tile_pos = Some((ws_geo.loc + tile_offset.upscale(zoom), zoom));
                     }

@@ -29,8 +29,8 @@ Pinning a column to an edge that already has one unpins the old column, which be
   The other columns keep their order.
   Unpinning a column returns it to the scrolling columns at the edge it was pinned to.
 - The other columns get the rest of the working area, as if the pinned column was a [strut](./Configuration:-Layout.md#struts) with an extra gap.
-  Proportional widths like `proportion 0.5` are relative to this remaining area, so two half-width columns still fit next to a pinned column.
-  The pinned column's own proportional width is relative to the whole working area.
+  Proportional widths like `proportion 0.5` stay relative to the whole working area, so pinning a column does not make the others narrower.
+  A column narrows only when it would not fit in the remaining area, which a full-width column then fills.
   Pinned columns together never take more than three quarters of the working area; wider pinned columns overlap the scrolling columns.
 - Focus moves into a pinned column at the end of the workspace: `focus-column-left` from the first scrolling column focuses the column pinned to the left, and `focus-column-first` and `focus-column-last` focus the pinned columns.
   Focusing a pinned column doesn't scroll the view.

@@ -31,8 +31,6 @@ use crate::window::ResolvedWindowRules;
 /// By how many logical pixels the directional move commands move floating windows.
 pub const DIRECTIONAL_MOVE_PX: f64 = 50.;
 
-pub(super) type OverviewPositions<I> = [(I, Point<f64, Logical>)];
-
 /// Space for floating windows.
 #[derive(Debug)]
 pub struct FloatingSpace<W: LayoutElement> {
@@ -320,23 +318,6 @@ impl<W: LayoutElement> FloatingSpace<W> {
             let pos = pos.to_physical_precise_round(scale).to_logical(scale);
             (tile, pos)
         })
-    }
-
-    pub(super) fn tiles_with_preview_positions<'tile, 'positions>(
-        &'tile self,
-        positions: &'positions OverviewPositions<W::Id>,
-    ) -> impl Iterator<Item = (&'tile Tile<W>, Point<f64, Logical>)> + 'positions
-    where
-        'tile: 'positions,
-    {
-        self.tiles_with_render_positions()
-            .map(move |(tile, current)| {
-                let position = positions
-                    .iter()
-                    .find_map(|(id, position)| (id == tile.window().id()).then_some(*position))
-                    .unwrap_or(current);
-                (tile, position)
-            })
     }
 
     pub fn tiles_with_render_positions_mut(
@@ -1123,7 +1104,6 @@ impl<W: LayoutElement> FloatingSpace<W> {
         view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
         layer: RenderLayer,
-        preview_positions: &OverviewPositions<W::Id>,
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
@@ -1139,7 +1119,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         }
 
         let active = self.active_window_id.clone();
-        for (tile, tile_pos) in self.tiles_with_preview_positions(preview_positions) {
+        for (tile, tile_pos) in self.tiles_with_render_positions() {
             // Skip tiles belonging to a different render layer.
             if layer.is_normal() == tile.is_moving_between_workspaces() {
                 continue;

@@ -6,28 +6,27 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
+use niri_config::layout::WindowBar;
 use niri_config::{Color, CornerRadius, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
-use smithay::backend::renderer::element::Kind;
 use smithay::output::Output;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
+use super::layout_menu::{self, LayoutMenuItem, LayoutMenuState, LayoutMenuTexture};
 use super::overview_caption::{
-    caption_background, caption_ink, frame_radius, measure_bar_label, set_caption_font,
-    tint_caption, BarIcon, BarPillState, GroupStyle, LabelKind, PreviewLabel, BAR_CARD_PADDING,
-    BAR_CARD_TITLE_HEIGHT, BAR_PILL_HEIGHT, BAR_SHADOW_MARGIN, BAR_TRAY_HEIGHT,
-    OVERVIEW_CONTROL_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
+    caption_background, caption_ink, measure_bar_label, set_caption_font, tint_caption, BarIcon,
+    BarPillState, LabelKind, PreviewLabel, BAR_CARD_PADDING, BAR_CARD_TITLE_HEIGHT,
+    BAR_PILL_HEIGHT, BAR_SHADOW_MARGIN, BAR_TRAY_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
 };
-use super::scrolling::{
-    navigation_strip_fits, Column, ColumnId, ColumnWidth, NAVIGATION_STRIP_HEIGHT,
-};
+use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
+use super::titlebar::TitlebarPart;
 use super::workspace::{
-    compute_working_area, compute_workspace_shadow_config, OutputId, Workspace,
-    WorkspaceAddWindowTarget, WorkspaceId, WorkspaceRenderElement,
+    compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
+    WorkspaceRenderElement,
 };
 use super::{
     compute_overview_zoom, ActivateWindow, HitType, LayoutElement, LayoutElementRenderElement,
@@ -41,7 +40,6 @@ use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
-use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::rubber_band::RubberBand;
@@ -53,28 +51,13 @@ use crate::utils::{
 /// Amount of touchpad movement to scroll the height of one workspace.
 const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
 
-const OVERVIEW_INSET: f64 = 20.;
-const OVERVIEW_HEADER_OFFSET: f64 = 42.;
-/// Space between framed workspaces in the open overview, for the header of the next one.
-const OVERVIEW_WORKSPACE_GAP: f64 = 76.;
-const OVERVIEW_FRAME_MARGIN: f64 = 12.;
-/// The overview never zooms out further than this to fit a workspace.
-const OVERVIEW_MIN_ZOOM: f64 = 0.24;
-/// Space between window previews in the overview.
-const OVERVIEW_PREVIEW_GAP: f64 = 24.;
-/// Space between the rows of a workspace that wraps in the overview.
-const OVERVIEW_ROW_GAP: f64 = 24.;
-/// Height of a window's title above its preview in the Overview.
-const OVERVIEW_LABEL_HEIGHT: f64 = 22.;
-/// Height of the card of an empty workspace in the overview.
-const OVERVIEW_EMPTY_CARD_HEIGHT: f64 = 40.;
-/// Space between the open workspace and a compact empty one after it.
-const OVERVIEW_EMPTY_GAP: f64 = 40.;
-/// Space between the previews and the edge of their workspace frame in the Overview.
-const OVERVIEW_FRAME_PADDING: f64 = 40.;
-/// Narrowest workspace frame in the Overview.
-const OVERVIEW_FRAME_MIN_WIDTH: f64 = 720.;
 const MAX_NAVIGATION_TITLES: usize = 8;
+/// How long a window bar shown on demand stays after the last keyboard move between windows.
+const NAVIGATION_BAR_LINGER: Duration = Duration::from_millis(1200);
+/// How close to the edge of the scrolling area the pointer brings out a scroll arrow, which
+/// is fully shown within `CUE_FULL_REACH`.
+const CUE_REACH: f64 = 140.;
+const CUE_FULL_REACH: f64 = 64.;
 /// Space between neighboring controls in the window bar.
 const BAR_PILL_GAP: f64 = 4.;
 const BAR_PILL_MIN_WIDTH: f64 = 96.;
@@ -141,19 +124,24 @@ pub struct Monitor<W: LayoutElement> {
     bar_highlight: RefCell<Option<BarHighlight<W::Id>>>,
     bar_highlight_fill: RefCell<BorderRenderElement>,
     bar_highlight_fade: RefCell<BorderRenderElement>,
-    /// Columns that were in view on the desktop when the overview started opening.
-    overview_on_desktop: Option<std::collections::HashSet<ColumnId>>,
     /// Dimming over columns that are mostly out of view.
     peek_scrims: RefCell<Vec<BorderRenderElement>>,
     peek_scrim_labels: RefCell<Vec<PreviewLabel>>,
-    /// Dimming over the wallpaper in the overview.
-    overview_dim: RefCell<SolidColorBuffer>,
     arrow_tooltips: [PreviewLabel; 2],
     strip_edge_labels: [PreviewLabel; 2],
     dismissed_preview_arrow: Cell<Option<Rectangle<f64, Logical>>>,
+    /// The pointer on this output, which brings the scroll arrows out near the edges.
+    cue_pointer: Cell<Option<Point<f64, Logical>>>,
+    /// Scroll arrows, left and right, that the pointer reached through the gap at their edge
+    /// and that are open as full, clickable pills.
+    /// The height at which each opened, so it stays put under the pointer.
+    cue_armed: Cell<[Option<f64>; 2]>,
+    /// How far the window bar shown on demand is revealed.
+    bar_reveal: RefCell<BarReveal>,
+    /// The layout menu open under a titlebar's layout button.
+    layout_menu: RefCell<Option<OpenLayoutMenu<W::Id>>>,
+    layout_menu_texture: LayoutMenuTexture,
     layer_action_label: PreviewLabel,
-    overview_command_label: PreviewLabel,
-    overview_shortcuts_label: PreviewLabel,
     scroll_cue_labels: [PreviewLabel; 2],
     additional_scroll_cue_labels: [PreviewLabel; 2],
     scroll_edge_fades: [PreviewLabel; 2],
@@ -163,7 +151,6 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) overview_open: bool,
     /// Progress of the overview zoom animation, 1 is fully in overview.
     overview_progress: Option<OverviewProgress>,
-    overview_pointer_selection: Option<W::Id>,
     /// Clock for driving animations.
     pub(super) clock: Clock,
     /// Configurable properties of the layout as received from the parent layout.
@@ -234,23 +221,6 @@ pub(super) struct InsertHint {
 struct InsertHintRenderLoc {
     workspace: InsertWorkspace,
     location: Point<f64, Logical>,
-}
-
-/// The arrangement of a workspace's previews in the open overview.
-#[derive(Debug, Clone, Copy)]
-struct OverviewPlan {
-    rows: usize,
-    /// Columns in the first row.
-    split: usize,
-    /// The largest zoom at which this arrangement fits.
-    zoom: f64,
-}
-
-struct OverviewGroup {
-    range: Range<f64>,
-    title: &'static str,
-    minimum_width: f64,
-    style: GroupStyle,
 }
 
 struct NavigationStrip<'a, W> {
@@ -351,6 +321,8 @@ struct ScrollCue<'a, W> {
     opacity: f32,
     offscreen_columns: usize,
     additional: Option<(Rectangle<f64, Logical>, &'a W)>,
+    /// Open as a full pill naming the window, rather than a slim handle in the gap.
+    armed: bool,
 }
 
 #[derive(Debug)]
@@ -509,76 +481,45 @@ fn navigation_title<W: LayoutElement>(window: &W, target: RenderTarget, fallback
     })
 }
 
-fn window_title_suffix(title: &str) -> &str {
-    title
-        .rsplit_once(" — ")
-        .map(|(_, suffix)| suffix.trim())
-        .filter(|suffix| !suffix.is_empty())
-        .unwrap_or(title)
+/// The window bar shown on demand: whether it is wanted, and its slide.
+#[derive(Debug, Default)]
+struct BarReveal {
+    shown: bool,
+    /// Shown with `toggle-window-bar` rather than by the pointer, so it stays until toggled.
+    by_key: bool,
+    anim: Option<Animation>,
+    /// Shown while keyboard navigation moves between windows: when to hide it again.
+    hide_at: Option<Duration>,
 }
 
-fn compact_window_title(title: &str, distinct_app: bool) -> &str {
-    let name = if distinct_app {
-        window_title_suffix(title)
-    } else {
-        title
-            .rsplit_once(" — ")
-            .map(|(context, _)| context.trim())
-            .filter(|context| !context.is_empty())
-            .unwrap_or(title)
-    };
-    name.strip_prefix("Canopa ").unwrap_or(name)
-}
-
-fn visible_extent<'a, W: LayoutElement + 'a>(
-    tiles: impl Iterator<Item = (&'a Tile<W>, Point<f64, Logical>, bool)>,
-) -> Option<Range<f64>> {
-    tiles
-        .filter(|(_, _, shown)| *shown)
-        .map(|(tile, pos, _)| pos.x..pos.x + tile.tile_size().w)
-        .reduce(|extent, next| extent.start.min(next.start)..extent.end.max(next.end))
-}
-
-/// Center the complete strip in the overview when it fits at the configured
-/// zoom. Wider strips keep the scrolling layout's camera position.
-fn fit_overview_strip(
-    extent: Range<f64>,
-    viewport: &Range<f64>,
-    zoom: f64,
-    final_zoom: f64,
-) -> Option<f64> {
-    let width = extent.end - extent.start;
-    let available = viewport.end - viewport.start;
-    // Allow for rounding: the overview zoom is chosen to fit the strip exactly.
-    if width * final_zoom > available + 1. {
-        return None;
+impl BarReveal {
+    fn progress(&self) -> f64 {
+        match &self.anim {
+            Some(anim) => anim.value().clamp(0., 1.),
+            None if self.shown => 1.,
+            None => 0.,
+        }
     }
-    let center = (viewport.start + viewport.end) / 2.;
-    Some(center - (extent.start + extent.end) / 2. * zoom)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::fit_overview_strip;
+/// A layout menu opened from a titlebar.
+#[derive(Debug)]
+struct OpenLayoutMenu<Id> {
+    window: Id,
+    /// Opened by pointing at the button rather than clicking it; it closes when the pointer
+    /// leaves.
+    hover: bool,
+    hovered: Option<LayoutMenuItem>,
+}
 
-    #[test]
-    fn overview_strip_centers_within_the_area_beside_the_rail() {
-        let viewport = 100. ..1300.;
-        let extent = -512. ..1408.;
-        let zoom = 0.5;
-        let x = fit_overview_strip(extent.clone(), &viewport, zoom, zoom).unwrap();
-
-        let left_gap = x + extent.start * zoom - viewport.start;
-        let right_gap = viewport.end - (x + extent.end * zoom);
-        assert_eq!(left_gap, 120.);
-        assert_eq!(left_gap, right_gap);
-    }
-
-    #[test]
-    fn overview_strip_retains_the_scroll_position_if_it_cannot_fit() {
-        let viewport = 100. ..1300.;
-        assert_eq!(fit_overview_strip(0. ..2500., &viewport, 0.5, 0.5), None);
-    }
+/// Where an open layout menu is and what it shows.
+struct LayoutMenuGeometry<Id> {
+    window: Id,
+    anchor: Rectangle<f64, Logical>,
+    rect: Rectangle<f64, Logical>,
+    state: LayoutMenuState,
+    hover: bool,
+    hovered: Option<LayoutMenuItem>,
 }
 
 impl<W: LayoutElement> Monitor<W> {
@@ -641,23 +582,23 @@ impl<W: LayoutElement> Monitor<W> {
             bar_highlight: RefCell::new(None),
             bar_highlight_fill: RefCell::new(BorderRenderElement::empty()),
             bar_highlight_fade: RefCell::new(BorderRenderElement::empty()),
-            overview_on_desktop: None,
             peek_scrims: RefCell::new(Vec::new()),
             peek_scrim_labels: RefCell::new(Vec::new()),
-            overview_dim: RefCell::new(SolidColorBuffer::default()),
             arrow_tooltips: Default::default(),
             strip_edge_labels: Default::default(),
             dismissed_preview_arrow: Cell::new(None),
+            cue_pointer: Cell::new(None),
+            cue_armed: Cell::new([None; 2]),
+            bar_reveal: RefCell::new(BarReveal::default()),
+            layout_menu: RefCell::new(None),
+            layout_menu_texture: LayoutMenuTexture::default(),
             layer_action_label: PreviewLabel::default(),
-            overview_command_label: PreviewLabel::default(),
-            overview_shortcuts_label: PreviewLabel::default(),
             scroll_cue_labels: Default::default(),
             additional_scroll_cue_labels: Default::default(),
             scroll_edge_fades: Default::default(),
             insert_hint_render_loc: None,
             overview_open: false,
             overview_progress: None,
-            overview_pointer_selection: None,
             workspace_switch: None,
             clock,
             base_options,
@@ -1381,6 +1322,21 @@ impl<W: LayoutElement> Monitor<W> {
             None => (),
         }
 
+        {
+            let mut reveal = self.bar_reveal.borrow_mut();
+            if reveal.anim.as_ref().is_some_and(|anim| anim.is_done()) {
+                reveal.anim = None;
+            }
+        }
+        let linger_over = self
+            .bar_reveal
+            .borrow()
+            .hide_at
+            .is_some_and(|at| self.clock.now_unadjusted() >= at);
+        if linger_over {
+            self.set_bar_shown(false, false);
+        }
+
         for ws in &mut self.workspaces {
             ws.advance_animations();
         }
@@ -1395,6 +1351,10 @@ impl<W: LayoutElement> Monitor<W> {
                 .borrow()
                 .as_ref()
                 .is_some_and(|highlight| !highlight.anim.is_done())
+            || {
+                let reveal = self.bar_reveal.borrow();
+                reveal.anim.is_some() || reveal.hide_at.is_some()
+            }
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1406,64 +1366,7 @@ impl<W: LayoutElement> Monitor<W> {
                 .any(|ws| ws.are_transitions_ongoing())
     }
 
-    /// Slides partly visible columns out past the edges of the view as it settles, whole,
-    /// instead of cutting them along the edge.
-    fn update_edge_shifts(&mut self) {
-        let active_idx = self.active_workspace_idx;
-        let mut shifts: Vec<(usize, f64)> = Vec::new();
-        if let Some(ws) = self.workspaces.get(active_idx) {
-            let gaps = ws.options.layout.gaps;
-            let span = (self.workspace_switch.is_none() && self.navigation_strip_top().is_some())
-                .then(|| self.scroll_clip(ws))
-                .flatten()
-                .map(|bounds| bounds.start + gaps..bounds.end - gaps);
-            if let Some(span) = span {
-                let (_, _, settle) = self.resting_edges(ws, &span);
-                let scrolling = ws.scrolling();
-                let active = scrolling.active_column().map(|column| column.id());
-                for (idx, (column, pos)) in scrolling.columns_with_render_positions().enumerate() {
-                    // Where the column would be without its own shift.
-                    let start = pos.x - column.edge_shift();
-                    let end = start + column.width();
-                    // A column that only reaches into the gap beside a panel, as rounding at
-                    // fractional scales can leave it, still counts as on screen.
-                    let shift = if Some(column.id()) == active {
-                        0.
-                    } else if start < span.start - gaps && end > span.start + 0.5 {
-                        -(end - span.start + gaps) * settle
-                    } else if start < span.end - 0.5 && end > span.end + gaps {
-                        (span.end - start + gaps) * settle
-                    } else {
-                        0.
-                    };
-                    shifts.push((idx, shift));
-                }
-            }
-        }
-        for (idx, ws) in self.workspaces.iter_mut().enumerate() {
-            let scrolling = ws.scrolling_mut();
-            for (col_idx, (column, _)) in scrolling.columns_with_render_positions_mut().enumerate()
-            {
-                let shift = if idx == active_idx {
-                    shifts
-                        .iter()
-                        .find(|(i, _)| *i == col_idx)
-                        .map_or(0., |(_, shift)| *shift)
-                } else {
-                    0.
-                };
-                column.set_edge_shift(shift);
-            }
-        }
-    }
-
     pub fn update_render_elements(&mut self, is_active: bool) {
-        self.update_edge_shifts();
-        let showing_previews = self.has_framed_overview()
-            && self
-                .overview_progress_value()
-                .is_some_and(|progress| progress >= 0.82);
-        let is_active = is_active && !showing_previews;
         let mut insert_hint_ws_geo = None;
         let insert_hint_ws_id = self
             .insert_hint
@@ -1741,12 +1644,7 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn workspace_gap(&self, zoom: f64) -> f64 {
         let scale = self.scale.fractional_scale();
-        let mut gap = self.view_size.h * 0.1 * zoom;
-        if self.options.overview.framed_workspaces {
-            // Grow toward the header space as the overview zooms out.
-            let opened = ((1. - zoom) / 0.5).clamp(0., 1.);
-            gap = gap.max(OVERVIEW_WORKSPACE_GAP * opened);
-        }
+        let gap = self.view_size.h * 0.1 * zoom;
         round_logical_in_physical_max1(scale, gap)
     }
 
@@ -1756,122 +1654,13 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn overview_zoom(&self) -> f64 {
-        let Some(progress) = self.overview_progress.as_ref().map(|p| p.value()) else {
-            return 1.;
-        };
-        let zoom = self.overview_target_zoom();
-        (1. - progress * (1. - zoom)).max(0.0001)
-    }
-
-    /// The zoom of the open overview. Framed overviews zoom out further when needed, so that
-    /// every window of the widest workspace fits beside the panels, wrapping into two rows when
-    /// that keeps the previews larger.
-    pub fn overview_target_zoom(&self) -> f64 {
-        let zoom = compute_overview_zoom(&self.options, Some(1.));
-        if !self.options.overview.framed_workspaces {
-            return zoom;
-        }
-        let fit = self
-            .workspaces
-            .iter()
-            .filter_map(|ws| self.overview_plan(ws).map(|plan| plan.zoom))
-            .fold(f64::INFINITY, f64::min);
-        if !fit.is_finite() {
-            return zoom;
-        }
-        zoom.min(fit).max(OVERVIEW_MIN_ZOOM.min(zoom))
-    }
-
-    /// How a workspace lays out its previews in the open overview.
-    fn overview_plan(&self, ws: &Workspace<W>) -> Option<OverviewPlan> {
-        let config = compute_overview_zoom(&self.options, Some(1.));
-        let available = self.overview_usable_area(1.).size.w - 2. * OVERVIEW_FRAME_PADDING;
-        if available <= 0. {
-            return None;
-        }
-        let gaps = self.options.layout.gaps;
-        // The zoom at which a row of these widths fits, keeping a fixed on-screen gutter.
-        let row_zoom = |widths: &[f64], extra: f64| {
-            let joins = widths.len().saturating_sub(1) as f64;
-            let width = widths.iter().sum::<f64>() + extra;
-            (width > 0.).then(|| (available - joins * OVERVIEW_PREVIEW_GAP) / width)
-        };
-        let scrolling = ws.scrolling();
-        let widths = scrolling.column_widths();
-        let pinned = widths.len() != scrolling.columns().count();
-
-        if !ws.floating().is_empty() || pinned {
-            // Floating previews line up after the strip; keep a single row.
-            let positions = self.floating_overview_layout(ws, 1.);
-            let extent = visible_extent(ws.tiles_with_overview_positions(&positions))?;
-            let joins = scrolling.columns().count().saturating_sub(1) as f64;
-            let width = extent.end - extent.start - joins * (gaps + scrolling.overview_spread());
-            let zoom = (available - joins * OVERVIEW_PREVIEW_GAP) / width.max(1.);
-            return Some(OverviewPlan {
-                rows: 1,
-                split: widths.len(),
-                zoom: zoom.min(config),
-            });
-        }
-        if widths.is_empty() {
-            return None;
-        }
-        let one = row_zoom(&widths, 0.)?.min(config);
-        let mut best = OverviewPlan {
-            rows: 1,
-            split: widths.len(),
-            zoom: one,
-        };
-        if widths.len() >= 3 {
-            // Two rows of nearly equal width, if the taller card still fits on screen. A row
-            // is as tall as the tallest column, with its titles above.
-            let height = scrolling
-                .columns()
-                .map(|column| {
-                    let tiles: Vec<f64> =
-                        column.tiles().map(|(tile, _)| tile.tile_size().h).collect();
-                    tiles.iter().sum::<f64>() + gaps * tiles.len().saturating_sub(1) as f64
-                })
-                .fold(0., f64::max)
-                .max(1.);
-            let room =
-                self.working_area.size.h * 0.8 - OVERVIEW_ROW_GAP - 2. * OVERVIEW_LABEL_HEIGHT;
-            let tall = room / (2. * height);
-            let total: f64 = widths.iter().sum();
-            let mut first = 0.;
-            // On a tie the first row takes the extra column: three over two, not two over three.
-            let split = (1..widths.len())
-                .rev()
-                .min_by(|a, b| {
-                    let wa: f64 = widths[..*a].iter().sum();
-                    let wb: f64 = widths[..*b].iter().sum();
-                    (wa - total / 2.).abs().total_cmp(&(wb - total / 2.).abs())
-                })
-                .unwrap_or(1);
-            first += widths[..split].iter().sum::<f64>();
-            let _ = first;
-            let wide = row_zoom(&widths[..split], 0.)?.min(row_zoom(&widths[split..], 0.)?);
-            let two = wide.min(tall).min(config);
-            // From five windows on, rows keep the grid steady as windows come and go, unless
-            // the previews would get noticeably smaller.
-            if two > one * 1.12 || (widths.len() >= 5 && two >= one * 0.9) {
-                best = OverviewPlan {
-                    rows: 2,
-                    split,
-                    zoom: two,
-                };
-            }
-        }
-        Some(best)
+        let progress = self.overview_progress.as_ref().map(|p| p.value());
+        compute_overview_zoom(&self.options, progress)
     }
 
     pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
-        if !self.overview_open {
-            self.overview_pointer_selection = None;
-        }
         let prev_render_idx = self.workspace_render_idx();
         self.overview_progress = progress.map(OverviewProgress::from);
-        self.update_overview_spread();
         let new_render_idx = self.workspace_render_idx();
 
         // If the view jumped (can happen when going from corrected to uncorrected render_idx, for
@@ -1885,161 +1674,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    fn update_overview_spread(&mut self) {
-        let progress = self
-            .overview_progress_value()
-            .unwrap_or_default()
-            .clamp(0., 1.);
-        let framed = self.options.overview.framed_workspaces && progress > 0.;
-        for ws in &mut self.workspaces {
-            ws.scrolling_mut().set_overview_spread(0.);
-            ws.scrolling_mut().set_overview_layout(Vec::new(), 0.);
-        }
-        // Windows out of view on the desktop fade in on their way to the grid, rather than
-        // sweeping across the ones you can see.
-        // They wait in their own slots and appear while the zoom is under way, so the grid forms
-        // as one movement without previews crossing each other.
-        let view_width = self.view_size.w;
-        let arriving = ((progress - 0.55) / 0.4).clamp(0., 1.);
-        let arriving = arriving * arriving * (3. - 2. * arriving);
-        // Decided once, from the desktop as it was when the overview started opening.
-        if progress <= 0. {
-            self.overview_on_desktop = None;
-        } else if self.overview_on_desktop.is_none() {
-            let mut seen = std::collections::HashSet::new();
-            for ws in &self.workspaces {
-                let active = ws.scrolling().active_column().map(|column| column.id());
-                // A column cut by a screen edge had slid out of sight on the desktop.
-                for (column, pos) in ws.scrolling().columns_with_render_positions() {
-                    let start = pos.x - column.edge_shift();
-                    if Some(column.id()) == active
-                        || (start >= -1. && start + column.width() <= view_width + 1.)
-                    {
-                        seen.insert(column.id());
-                    }
-                }
-            }
-            self.overview_on_desktop = Some(seen);
-        }
-        let mut on_desktop = Vec::with_capacity(self.workspaces.len());
-        for ws in &mut self.workspaces {
-            let visible: Vec<bool> = ws
-                .scrolling()
-                .columns()
-                .map(|column| {
-                    self.overview_on_desktop
-                        .as_ref()
-                        .is_none_or(|seen| seen.contains(&column.id()))
-                })
-                .collect();
-            // By id: the render order puts the active column first.
-            let seen = self.overview_on_desktop.as_ref();
-            for (column, _) in ws.scrolling_mut().columns_with_render_positions_mut() {
-                let visible = seen.is_none_or(|seen| seen.contains(&column.id()));
-                let fade = if progress <= 0. || visible {
-                    1.
-                } else {
-                    arriving
-                };
-                for (tile, _) in column.tiles_mut() {
-                    tile.set_fade(fade);
-                }
-            }
-            on_desktop.push(visible);
-        }
-        let zoom = framed.then(|| self.overview_target_zoom());
-        // Offsets live in workspace space, which shrinks as the overview zooms out; scale them
-        // so that every preview moves on screen in a straight line at an even pace.
-        let current_zoom = self.overview_zoom();
-        let travel = |target: f64| (progress * target / current_zoom).min(1.);
-        let plans: Vec<_> = self
-            .workspaces
-            .iter()
-            .map(|ws| framed.then(|| self.overview_plan(ws)).flatten())
-            .collect();
-        let gaps = self.options.layout.gaps;
-        for ((ws, plan), visible) in zip(zip(&mut self.workspaces, plans), on_desktop) {
-            let Some(zoom) = zoom else { continue };
-            // Windows that were out of view wait in their slots rather than crossing the grid.
-            let travel_to = |idx: usize, travel: f64| {
-                if visible.get(idx).copied().unwrap_or(true) {
-                    travel
-                } else {
-                    1.
-                }
-            };
-            // Grow the gutters as the overview zooms out, so they stay the same on screen.
-            let spread = (OVERVIEW_PREVIEW_GAP / zoom - gaps).max(0.);
-            let widths = ws.scrolling().column_widths();
-            let pinned = widths.len() != ws.scrolling().columns().count();
-            // The overview strip starts at the workspace origin, wherever the view had
-            // scrolled, so the workspace's geometry covers its previews.
-            let origin = -ws.scrolling().strip_origin();
-            match plan {
-                Some(plan) if plan.rows == 2 && !pinned => {
-                    // The second row starts under the first, each row centred on the other.
-                    let row_width = |widths: &[f64]| {
-                        widths.iter().sum::<f64>()
-                            + (widths.len().saturating_sub(1)) as f64 * (gaps + spread)
-                    };
-                    let first = row_width(&widths[..plan.split]);
-                    let second = row_width(&widths[plan.split..]);
-                    let start_second: f64 =
-                        widths[..plan.split].iter().map(|width| width + gaps).sum();
-                    let row_gap = OVERVIEW_ROW_GAP / zoom;
-                    // Rows stack by the height of their tallest column and its label, so the
-                    // gap between rows matches the gap between columns.
-                    let height = ws
-                        .scrolling()
-                        .columns()
-                        .map(|column| {
-                            let tiles: Vec<f64> =
-                                column.tiles().map(|(tile, _)| tile.tile_size().h).collect();
-                            tiles.iter().sum::<f64>() + gaps * tiles.len().saturating_sub(1) as f64
-                        })
-                        .fold(0., f64::max)
-                        .max(1.)
-                        + OVERVIEW_LABEL_HEIGHT / zoom;
-                    let travel = travel(zoom);
-                    let offsets = (0..widths.len())
-                        .map(|idx| {
-                            let point = if idx < plan.split {
-                                Point::from((origin + idx as f64 * spread, 0.))
-                            } else {
-                                let j = (idx - plan.split) as f64;
-                                Point::from((
-                                    origin - start_second + j * spread + (first - second) / 2.,
-                                    height + row_gap,
-                                ))
-                            };
-                            // Straight from the desktop to the grid.
-                            point.upscale(travel_to(idx, travel))
-                        })
-                        .collect();
-                    let extra = (height + row_gap) * travel;
-                    ws.scrolling_mut().set_overview_layout(offsets, extra);
-                }
-                _ if !pinned && ws.floating().is_empty() => {
-                    let travel = travel(zoom);
-                    let offsets = (0..widths.len())
-                        .map(|idx| {
-                            Point::from((origin + idx as f64 * spread, 0.))
-                                .upscale(travel_to(idx, travel))
-                        })
-                        .collect();
-                    ws.scrolling_mut().set_overview_layout(offsets, 0.);
-                }
-                _ => ws.scrolling_mut().set_overview_spread(spread * progress),
-            }
-        }
-        // Captions take over from the titlebars as soon as they start to fade in.
-        let captions = self.options.overview.framed_workspaces && progress > 0.6;
-        for ws in &mut self.workspaces {
-            ws.scrolling_mut().set_overview_captions(captions);
-            ws.scrolling_mut().set_overview_open(progress > 0.);
-        }
-    }
-
+    #[cfg(test)]
     pub(super) fn overview_progress_value(&self) -> Option<f64> {
         self.overview_progress.as_ref().map(|p| p.value())
     }
@@ -2119,87 +1754,6 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    fn floating_overview_positions(
-        &self,
-        ws: &Workspace<W>,
-        progress: f64,
-    ) -> Vec<(W::Id, Point<f64, Logical>)> {
-        if !self.has_framed_overview() || progress <= 0. || ws.floating().is_empty() {
-            return Vec::new();
-        }
-        let positions = self.floating_overview_layout(ws, progress);
-        let extent = visible_extent(
-            ws.tiles_with_overview_positions(&self.floating_overview_layout(ws, 1.)),
-        );
-        let fits = extent.is_some_and(|extent| {
-            (extent.end - extent.start) * self.overview_target_zoom()
-                <= self.overview_usable_area(1.).size.w - 2. * OVERVIEW_FRAME_PADDING + 0.5
-        });
-        if fits {
-            positions
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Floating windows lined up after the tiled strip, without checking that they fit.
-    fn floating_overview_layout(
-        &self,
-        ws: &Workspace<W>,
-        progress: f64,
-    ) -> Vec<(W::Id, Point<f64, Logical>)> {
-        if !self.options.overview.framed_workspaces || progress <= 0. || ws.floating().is_empty() {
-            return Vec::new();
-        }
-        let extent = visible_extent(ws.scrolling().tiles_with_render_positions());
-        let gap = ws.options.layout.gaps.max(22.);
-        let y = ws.working_area().loc.y + ws.options.layout.gaps + self.overview_strip_offset(ws);
-        let left = extent.as_ref().map_or(0., |range| range.start);
-        let mut x = extent
-            .as_ref()
-            .map_or(left, |range| range.end + gap.max(42.));
-        let mut floating = ws
-            .floating()
-            .tiles_with_render_positions()
-            .collect::<Vec<_>>();
-        floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-
-        let scale = self.scale.fractional_scale();
-        let progress = progress.clamp(0., 1.);
-        floating
-            .into_iter()
-            .map(|(tile, current)| {
-                let destination = Point::from((x, y)) + tile.interactive_move_offset;
-                x += tile.tile_size().w + gap;
-                let position = current + (destination - current).upscale(progress);
-                let position = position.to_physical_precise_round(scale).to_logical(scale);
-                (tile.window().id().clone(), position)
-            })
-            .collect()
-    }
-
-    fn overview_strip_offset(&self, ws: &Workspace<W>) -> f64 {
-        if ws.options.layout.clip_scroll_to_work_area
-            && !ws.scrolling().is_empty()
-            && self.navigation_strip_top().is_some()
-        {
-            NAVIGATION_STRIP_HEIGHT
-        } else {
-            0.
-        }
-    }
-
-    pub(super) fn floating_overview_position(
-        &self,
-        ws: &Workspace<W>,
-        window: &W::Id,
-    ) -> Option<Point<f64, Logical>> {
-        let progress = self.overview_progress_value()?;
-        self.floating_overview_positions(ws, progress)
-            .into_iter()
-            .find_map(|(id, position)| (id == *window).then_some(position))
-    }
-
     pub fn workspaces_render_geo(&self) -> impl Iterator<Item = Rectangle<f64, Logical>> {
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
@@ -2208,113 +1762,18 @@ impl<W: LayoutElement> Monitor<W> {
         let gap = self.workspace_gap(zoom);
         let ws_height_with_gap = ws_size.h + gap;
 
-        let mut static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
-        if self.options.overview.framed_workspaces {
-            // Zoom toward the center of the usable area when a panel occupies an edge.
-            let offset = self.working_area.loc
-                + (self.working_area.size.to_point() - self.view_size.to_point()).downscale(2.);
-            static_offset += offset.upscale(1. - zoom);
-        }
+        let static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
         let static_offset = static_offset
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let progress = self
-            .overview_progress_value()
-            .unwrap_or_default()
-            .clamp(0., 1.);
-        let mut first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
-        // The empty workspace at the end is a compact row that sits close under the others.
-        let last = self.workspaces.len() - 1;
-        let compact_last = self.options.overview.framed_workspaces
-            && last != self.active_workspace_idx
-            && !self.workspaces[last].has_windows_or_name();
-        let pull = if compact_last {
-            (gap - OVERVIEW_EMPTY_GAP).max(0.) * progress
-        } else {
-            0.
-        };
-        if self.options.overview.framed_workspaces
-            && self.active_workspace_idx + 1 < self.workspaces.len()
-        {
-            // Center the open workspace together with the header above it and the card of
-            // the workspace below it.
-            let below = OVERVIEW_EMPTY_CARD_HEIGHT.min(ws_size.h);
-            let below_gap = if self.active_workspace_idx + 1 == last {
-                gap - pull
-            } else {
-                gap
-            };
-            first_ws_y -= (below_gap + below - OVERVIEW_HEADER_OFFSET) / 2. * progress;
-        }
-        // In the overview, a workspace's geometry spans all its previews.
-        let spans: Vec<f64> = if self.options.overview.framed_workspaces && progress > 0. {
-            self.workspaces
-                .iter()
-                .map(|ws| {
-                    let positions = self.floating_overview_positions(ws, progress);
-                    visible_extent(ws.tiles_with_overview_positions(&positions))
-                        .map_or(0., |extent| extent.end.max(0.) * zoom)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Workspaces that wrap into rows take more height; keep the open one centred.
-        let extras: Vec<f64> = self
-            .workspaces
-            .iter()
-            .map(|ws| ws.scrolling().overview_extra_height() * zoom)
-            .collect();
-        if let Some(extra) = extras.get(self.active_workspace_idx) {
-            first_ws_y -= extra / 2.;
-        }
-
+        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
-
-        let overview_origins: Vec<_> = if self.options.overview.framed_workspaces && progress > 0. {
-            let final_zoom = self.overview_target_zoom();
-            let usable = self.overview_usable_area(1.);
-            let viewport = usable.loc.x + OVERVIEW_FRAME_PADDING
-                ..usable.loc.x + usable.size.w - OVERVIEW_FRAME_PADDING;
-            self.workspaces
-                .iter()
-                .enumerate()
-                .map(|(idx, ws)| {
-                    let top = static_offset.y + first_ws_y + idx as f64 * ws_height_with_gap;
-                    if top + ws_size.h < 0. || top > self.view_size.h {
-                        return None;
-                    }
-
-                    let positions = self.floating_overview_positions(ws, 1.);
-                    let extent = visible_extent(ws.tiles_with_overview_positions(&positions))?;
-                    fit_overview_strip(extent.clone(), &viewport, zoom, final_zoom).map(|_| {
-                        let center = (viewport.start + viewport.end) / 2.;
-                        (center, (extent.start + extent.end) / 2.)
-                    })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
 
         // Return position for one-past-last workspace too.
         (0..=self.workspaces.len()).map(move |idx| {
-            let mut y = first_ws_y + idx as f64 * ws_height_with_gap;
-            if idx >= last {
-                y -= pull;
-            }
-            y += extras[..idx.min(extras.len())].iter().sum::<f64>();
-            let mut ws_size = ws_size;
-            ws_size.h += extras.get(idx).copied().unwrap_or(0.);
-            ws_size.w = ws_size.w.max(spans.get(idx).copied().unwrap_or(0.));
-            let mut loc = Point::from((0., y)) + static_offset;
-            if let Some(Some((center, mid))) = overview_origins.get(idx) {
-                // Move the middle of the strip straight to the middle of the overview while it
-                // zooms, so it never overshoots and slides back.
-                let start = loc.x + mid;
-                loc.x = start + (center - start) * progress - mid * zoom;
-            }
+            let y = first_ws_y + idx as f64 * ws_height_with_gap;
+            let loc = Point::from((0., y)) + static_offset;
 
             // Even though all components that go into loc are rounded to physical pixels, the
             // floating point addition may lose precision. This can result for example in the
@@ -2386,36 +1845,17 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<&Workspace<W>> {
-        if self.has_framed_overview() && !self.overview_content().contains(pos_within_output) {
-            return None;
-        }
-        self.workspaces_with_render_geo_idx()
-            .find_map(|((index, ws), geo)| {
-                let geo = if self.has_framed_overview() {
-                    self.overview_frame_geometry(ws, index, geo)?
-                } else {
-                    geo
-                };
-                geo.contains(pos_within_output).then_some(ws)
-            })
+        self.workspaces_with_render_geo()
+            .find_map(|(ws, geo)| geo.contains(pos_within_output).then_some(ws))
     }
 
     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
         let (ws, geo) = self.workspace_under(pos_within_output)?;
 
         if self.overview_progress.is_some() {
-            if self.options.overview.framed_workspaces
-                && !self.overview_content().contains(pos_within_output)
-            {
-                return None;
-            }
             let zoom = self.overview_zoom();
             let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
-            let positions = self.floating_overview_positions(
-                ws,
-                self.overview_progress_value().unwrap_or_default(),
-            );
-            let (win, hit) = ws.window_under_in_overview(pos_within_workspace, &positions)?;
+            let (win, hit) = ws.window_under(pos_within_workspace)?;
             // During the overview animation, we cannot do input hits because we cannot really
             // represent scaled windows properly.
             Some((win, hit.to_activate()))
@@ -2464,12 +1904,10 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn scrolling_visible_span(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
         let bounds = self.scroll_clip(ws)?;
-        if self.navigation_strip_top().is_some() {
-            // Partly visible columns are cut one gap in from the panels while the view moves,
-            // and retract behind an edge tab once it settles.
+        if self.window_bar_available() {
+            // Partly visible columns are cut one gap in from the panels, so their visible part
+            // keeps the same margin as the other windows.
             let gaps = ws.options.layout.gaps;
-            // Partly visible columns slide out whole as the view settles (see
-            // `update_edge_shifts`), so the cut stays at the edge.
             let span = bounds.start + gaps..bounds.end - gaps;
             return Some(span);
         }
@@ -2479,45 +1917,13 @@ impl<W: LayoutElement> Monitor<W> {
         Some(bounds)
     }
 
-    /// Where partly visible columns end once the view settles, and how settled it is.
-    fn resting_edges(
-        &self,
-        ws: &Workspace<W>,
-        span: &Range<f64>,
-    ) -> (Option<f64>, Option<f64>, f64) {
-        let scrolling = ws.scrolling();
-        let settle = scrolling.remaining_view_movement().map_or(0., |distance| {
-            (1. - distance.abs() / 80.).clamp(0., 1.).powi(2)
-        });
-        if settle <= 0. || self.overview_progress.is_some() {
-            return (None, None, 0.);
-        }
-        let gaps = ws.options.layout.gaps;
-        let active = scrolling.active_column().map(|column| column.id());
-        let columns = || {
-            scrolling
-                .columns_with_render_positions()
-                .filter(|(column, _)| Some(column.id()) != active)
-                .map(|(column, pos)| (pos.x, pos.x + column.width()))
-        };
-        let left = columns()
-            .filter(|(start, end)| *start < span.start - 0.5 && *end > span.start + 0.5)
-            .map(|(_, end)| end + gaps / 2.)
-            .reduce(f64::max);
-        let right = columns()
-            .filter(|(start, end)| *start < span.end - 0.5 && *end > span.end + 0.5)
-            .map(|(start, _)| start - gaps / 2.)
-            .reduce(f64::min);
-        (left, right, settle)
-    }
-
     /// Tiles of the active workspace that lie mostly beyond the panels, with how strongly to
     /// dim them.
     fn peek_scrims(&self) -> Vec<(Rectangle<f64, Logical>, f32, bool, bool)> {
         let ws = self.active_workspace_ref();
         if self.workspace_switch.is_some()
             || self.overview_progress.is_some()
-            || self.navigation_strip_top().is_none()
+            || !self.window_bar_available()
         {
             return Vec::new();
         }
@@ -2542,7 +1948,6 @@ impl<W: LayoutElement> Monitor<W> {
                 let strength = ((1. - fraction) / 0.06).clamp(0., 1.) as f32;
                 let strength = if modal { strength.max(0.35) } else { strength };
                 // A window fading out at the edge takes its shade with it.
-                let strength = strength * tile.fade() as f32;
                 (strength > 0.).then(|| {
                     let loc = self.workspace_origin(ws) + pos + tile.bob_offset();
                     // Only the visible part; the clipped side ends square like the window.
@@ -2683,9 +2088,124 @@ impl<W: LayoutElement> Monitor<W> {
             .map_or(Point::default(), |(_, geo)| geo.loc)
     }
 
+    /// Whether the window bar arranges this output: the columns then slide out at the edges
+    /// and its arrows reach the windows out of view, even while a bar shown on demand is
+    /// hidden.
+    fn window_bar_available(&self) -> bool {
+        let layout = &self.options.layout;
+        layout.clip_scroll_to_work_area
+            && layout.window_bar != WindowBar::Off
+            && navigation_strip_fits(self.working_area)
+    }
+
+    /// The top of the row reserved for the window bar above the columns.
+    fn bar_row_top(&self) -> Option<f64> {
+        (self.window_bar_available() && self.options.layout.window_bar == WindowBar::Always)
+            .then_some(self.working_area.loc.y)
+    }
+
+    /// Where the window bar is drawn, while it is shown.
     fn navigation_strip_top(&self) -> Option<f64> {
+        if !self.window_bar_available() {
+            return None;
+        }
+        let top = self.working_area.loc.y;
+        if self.options.layout.window_bar == WindowBar::Always {
+            return Some(top);
+        }
+        // Shown on demand, it slides down from above the work area, over the windows.
+        let progress = self.bar_reveal.borrow().progress();
+        (progress > 0.).then(|| top - (1. - progress) * (NAVIGATION_STRIP_HEIGHT + 12.))
+    }
+
+    fn set_bar_shown(&self, shown: bool, by_key: bool) -> bool {
+        let mut reveal = self.bar_reveal.borrow_mut();
+        reveal.by_key = shown && by_key;
+        reveal.hide_at = None;
+        if reveal.shown == shown {
+            return false;
+        }
+        let from = reveal.progress();
+        reveal.shown = shown;
+        reveal.anim = Some(Animation::new(
+            self.clock.clone(),
+            from,
+            if shown { 1. } else { 0. },
+            0.,
+            self.options.animations.horizontal_view_movement.0,
+        ));
+        true
+    }
+
+    /// Shows or hides the window bar shown on demand. Returns whether it changed.
+    pub fn toggle_window_bar(&self) -> bool {
+        if self.options.layout.window_bar != WindowBar::OnDemand || !self.window_bar_available() {
+            return false;
+        }
+        let shown = self.bar_reveal.borrow().shown;
+        self.set_bar_shown(!shown, true)
+    }
+
+    /// Shows the window bar shown on demand while keyboard navigation moves between windows,
+    /// and hides it again shortly after the last move. A bar shown with the shortcut or the
+    /// pointer stays as it is.
+    pub fn reveal_window_bar_for_navigation(&self) -> bool {
+        if self.options.layout.window_bar != WindowBar::OnDemand || !self.window_bar_available() {
+            return false;
+        }
+        let (shown, held) = {
+            let reveal = self.bar_reveal.borrow();
+            (reveal.shown, reveal.shown && reveal.hide_at.is_none())
+        };
+        if held {
+            return false;
+        }
+        let changed = !shown && self.set_bar_shown(true, false);
+        self.bar_reveal.borrow_mut().hide_at =
+            Some(self.clock.now_unadjusted() + NAVIGATION_BAR_LINGER);
+        changed
+    }
+
+    /// Hides a window bar shown on demand once it served its purpose: a window was chosen.
+    pub fn hide_window_bar(&self) -> bool {
+        self.options.layout.window_bar == WindowBar::OnDemand && self.set_bar_shown(false, false)
+    }
+
+    /// Reveals the window bar shown on demand when the pointer touches the top edge of the work
+    /// area, and hides it once the pointer moves well below it. Returns whether it changed.
+    pub fn update_bar_reveal_pointer(&self, position: Option<Point<f64, Logical>>) -> bool {
+        if self.options.layout.window_bar != WindowBar::OnDemand || !self.window_bar_available() {
+            return self.set_bar_shown(false, false);
+        }
+        let (shown, by_key) = {
+            let reveal = self.bar_reveal.borrow();
+            (reveal.shown, reveal.by_key)
+        };
+        if by_key {
+            return false;
+        }
         let area = self.working_area;
-        navigation_strip_fits(area).then_some(area.loc.y)
+        let Some(position) = position else {
+            return shown && self.set_bar_shown(false, false);
+        };
+        let within = (area.loc.x..area.loc.x + area.size.w).contains(&position.x);
+        // The top edge of the screen, or of the work area when a panel sits above it.
+        let at_edge = within
+            && (position.y <= 0.5 || (position.y - area.loc.y).abs() <= 1.)
+            && self.workspace_switch.is_none()
+            && self.overview_progress.is_none();
+        if !shown && at_edge {
+            return self.set_bar_shown(true, false);
+        }
+        let below = position.y > area.loc.y + NAVIGATION_STRIP_HEIGHT + 24.;
+        if shown && (below || !within) {
+            return self.set_bar_shown(false, false);
+        }
+        if shown {
+            // The pointer on a bar shown for keyboard navigation keeps it.
+            self.bar_reveal.borrow_mut().hide_at = None;
+        }
+        false
     }
 
     fn scrolling_clip_excludes(
@@ -2696,7 +2216,7 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> bool {
         self.scrolling_visible_span(ws).is_some_and(|bounds| {
             !bounds.contains(&location.x)
-                || self.navigation_strip_top().is_some_and(|top| {
+                || self.bar_row_top().is_some_and(|top| {
                     location.y - workspace_origin.y < top + NAVIGATION_STRIP_HEIGHT
                 })
         })
@@ -2782,132 +2302,189 @@ impl<W: LayoutElement> Monitor<W> {
         let card_progress = scrolling
             .distance_to_stationary_view()
             .map_or(0., |distance| (1. - distance / 62.).clamp(0., 1.).powi(2));
-        let make_cue =
-            |(column, pos): (&'a Column<W>, Point<f64, Logical>), x, width: f64, left| {
-                let edge = if left { pos.x + column.width() } else { pos.x };
-                let exposed = if left {
-                    edge - bounds.start
+        let make_cue = |(column, pos): (&'a Column<W>, Point<f64, Logical>),
+                        x,
+                        width: f64,
+                        left| {
+            let edge = if left { pos.x + column.width() } else { pos.x };
+            let exposed = if left {
+                edge - bounds.start
+            } else {
+                bounds.end - edge
+            };
+            let unclipped = active_x.is_some_and(|x| {
+                if left {
+                    edge <= x
                 } else {
-                    bounds.end - edge
-                };
-                let unclipped = active_x.is_some_and(|x| {
-                    if left {
-                        edge <= x
-                    } else {
-                        edge >= x + active.width()
-                    }
-                });
-                let space = if left {
-                    fully_visible.0 - x - inset
+                    edge >= x + active.width()
+                }
+            });
+            let space = if left {
+                fully_visible.0 - x - inset
+            } else {
+                right_edge - fully_visible.1 - inset
+            };
+            let width = width.min(space.floor().max(36.));
+            // Keep the live strip during a gesture. Reveal the resting control
+            // as the camera approaches its final position.
+            let can_clip = card_progress > 0. && unclipped;
+            let card = can_clip
+                && width >= 144.
+                && self.working_area.size.h >= SCROLL_CARD_HEIGHT
+                && exposed < column.width() * 0.60;
+            // With the strip available, retract the last part of a clipped
+            // column before its titlebar buttons become detached slivers.
+            let peek_width = (column.width() * 0.30).min(168.);
+            let strip_peek =
+                self.window_bar_available() && unclipped && exposed > 0. && exposed < peek_width;
+            let clip_progress = if strip_peek {
+                let progress = ((peek_width - exposed) / (peek_width * 0.36))
+                    .max(card_progress)
+                    .min(1.);
+                if exposed * (1. - progress) < 64. {
+                    1.
                 } else {
-                    right_edge - fully_visible.1 - inset
-                };
-                let width = width.min(space.floor().max(36.));
-                // Keep the live strip during a gesture. Reveal the resting control
-                // as the camera approaches its final position.
-                let can_clip = card_progress > 0. && unclipped;
-                let card = can_clip
-                    && width >= 144.
-                    && self.working_area.size.h >= SCROLL_CARD_HEIGHT
-                    && exposed < column.width() * 0.60;
-                // With the strip available, retract the last part of a clipped
-                // column before its titlebar buttons become detached slivers.
-                let peek_width = (column.width() * 0.30).min(168.);
-                let strip_peek = self.navigation_strip_top().is_some()
-                    && unclipped
-                    && exposed > 0.
-                    && exposed < peek_width;
-                let clip_progress = if strip_peek {
-                    let progress = ((peek_width - exposed) / (peek_width * 0.36))
-                        .max(card_progress)
-                        .min(1.);
-                    if exposed * (1. - progress) < 64. {
-                        1.
-                    } else {
-                        progress
-                    }
-                } else if card {
-                    card_progress
+                    progress
+                }
+            } else if card {
+                card_progress
+            } else {
+                0.
+            };
+            let compact = !card && width < 102.;
+            let width = if compact && card_progress == 1. {
+                ((bounds.end - bounds.start) / 4.).floor().clamp(36., 182.)
+            } else {
+                width
+            };
+            let height = if card { SCROLL_CARD_HEIGHT } else { height };
+            let available = self.working_area.size.h - height;
+            let top = self.working_area.loc.y;
+            // An arrow comes out beside the pointer as it nears its edge, and stays out of the
+            // way otherwise.
+            let pointer = self
+                .cue_pointer
+                .get()
+                .filter(|point| point.y >= top && point.y <= top + self.working_area.size.h);
+            let reach = pointer.map_or(0., |point| {
+                let distance = if left {
+                    point.x - bounds.start
                 } else {
-                    0.
+                    bounds.end - point.x
                 };
-                let compact = !card && width < 102.;
-                let width = if compact && card_progress == 1. {
-                    ((bounds.end - bounds.start) / 4.).floor().clamp(36., 182.)
+                ((CUE_REACH - distance) / (CUE_REACH - CUE_FULL_REACH)).clamp(0., 1.)
+            });
+            let armed_at = (!card)
+                .then(|| self.cue_armed.get()[usize::from(!left)])
+                .flatten();
+            let y = if card {
+                top + available * 0.30
+            } else if let Some(at) = armed_at {
+                (at - height / 2.).clamp(top + inset, (top + available - inset).max(top))
+            } else if let Some(point) = pointer {
+                (point.y - height / 2.).clamp(top + inset, (top + available - inset).max(top))
+            } else {
+                top + (available - inset).max(0.)
+            };
+            let rect = Rectangle::new(
+                Point::from((
+                    match (left, card) {
+                        (true, true) => bounds.start,
+                        (false, true) => bounds.end - width,
+                        (true, false) => x,
+                        (false, false) => right_edge - width,
+                    },
+                    y,
+                )),
+                Size::from((width, height)),
+            );
+            // Until the pointer reaches it through the gap beside its edge, the arrow is a slim
+            // handle in that gap, clear of the windows, so it never takes their clicks.
+            let armed = armed_at.is_some();
+            let rect = if card {
+                rect
+            } else if armed {
+                // Open, it reaches the edge, so it can be clicked anywhere from the edge to its
+                // label.
+                let (start, end) = if left {
+                    (bounds.start, rect.loc.x + rect.size.w)
                 } else {
-                    width
+                    (rect.loc.x, bounds.end)
                 };
-                let height = if card { SCROLL_CARD_HEIGHT } else { height };
-                let available = self.working_area.size.h - height;
-                let y = self.working_area.loc.y
-                    + if card {
-                        available * 0.30
-                    } else if compact {
-                        (available - inset).max(0.)
-                    } else {
-                        available.min(72.)
-                    };
-                let rect = Rectangle::new(
-                    Point::from((
-                        match (left, card) {
-                            (true, true) => bounds.start,
-                            (false, true) => bounds.end - width,
-                            (true, false) => x,
-                            (false, false) => right_edge - width,
-                        },
-                        y,
-                    )),
-                    Size::from((width, height)),
-                );
-                let additional_top = y + height + 10.;
-                let has_space = additional_top + SCROLL_CARD_HEIGHT
-                    <= self.working_area.loc.y + self.working_area.size.h;
-                let additional = if card && has_space {
-                    let id = column.id();
-                    let next = if left {
-                        left_columns()
-                            .filter(|(column, _)| column.id() != id)
-                            .max_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
-                    } else {
-                        right_columns()
-                            .filter(|(column, _)| column.id() != id)
-                            .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
-                    };
-                    next.map(|(column, _)| {
-                        (
-                            Rectangle::new(
-                                Point::from((rect.loc.x, additional_top)),
-                                Size::from((width, SCROLL_CARD_HEIGHT)),
-                            ),
-                            column.active_window(),
-                        )
-                    })
+                Rectangle::new(
+                    Point::from((start, rect.loc.y)),
+                    Size::from((end - start, rect.size.h)),
+                )
+            } else {
+                let gaps = ws.options.layout.gaps;
+                let tab = (gaps - 6.).clamp(4., 10.);
+                let gutter = if left {
+                    bounds.start
                 } else {
-                    None
+                    bounds.end - gaps
                 };
-                ScrollCue {
-                    rect,
-                    destination: column.active_window(),
-                    // With the window bar, partly visible columns stay in view.
-                    clipped_column_edge: (clip_progress > 0.
-                        && self.navigation_strip_top().is_none())
-                    .then(|| {
+                Rectangle::new(
+                    Point::from((gutter + (gaps - tab) / 2., y)),
+                    Size::from((tab, height)),
+                )
+            };
+            let additional_top = y + height + 10.;
+            let has_space = additional_top + SCROLL_CARD_HEIGHT
+                <= self.working_area.loc.y + self.working_area.size.h;
+            let additional = if card && has_space {
+                let id = column.id();
+                let next = if left {
+                    left_columns()
+                        .filter(|(column, _)| column.id() != id)
+                        .max_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
+                } else {
+                    right_columns()
+                        .filter(|(column, _)| column.id() != id)
+                        .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
+                };
+                next.map(|(column, _)| {
+                    (
+                        Rectangle::new(
+                            Point::from((rect.loc.x, additional_top)),
+                            Size::from((width, SCROLL_CARD_HEIGHT)),
+                        ),
+                        column.active_window(),
+                    )
+                })
+            } else {
+                None
+            };
+            ScrollCue {
+                rect,
+                destination: column.active_window(),
+                // With the window bar, partly visible columns stay in view.
+                clipped_column_edge: (clip_progress > 0. && !self.window_bar_available()).then(
+                    || {
                         let boundary = if left { bounds.start } else { bounds.end };
                         boundary + (edge - boundary) * clip_progress
-                    }),
-                    opacity: if card { card_progress as f32 } else { 1. },
-                    offscreen_columns: if left {
-                        left_columns().count()
-                    } else {
-                        right_columns().count()
                     },
-                    additional,
-                }
-            };
+                ),
+                opacity: if card {
+                    card_progress as f32
+                } else if armed {
+                    1.
+                } else {
+                    reach as f32
+                },
+                armed,
+                offscreen_columns: if left {
+                    left_columns().count()
+                } else {
+                    right_columns().count()
+                },
+                additional,
+            }
+        };
         [
             left.map(|column| make_cue(column, left_edge, left_width, true)),
             right.map(|column| make_cue(column, right_edge - right_width, right_width, false)),
         ]
+        .map(|cue| cue.filter(|cue| cue.opacity > 0.))
     }
 
     /// Normal tiled windows leave a row for the strip, so the same controls
@@ -3244,93 +2821,9 @@ impl<W: LayoutElement> Monitor<W> {
         })
     }
 
-    pub fn select_overview_preview(&mut self, id: &W::Id) -> bool {
-        if !self.overview_open
-            || !self.has_framed_overview()
-            || self.overview_progress_value().is_none_or(|p| p < 0.82)
-            || self.overview_pointer_selection.as_ref() == Some(id)
-            || !self
-                .active_workspace_ref()
-                .windows()
-                .any(|window| window.id() == id)
-        {
-            return false;
-        }
-        self.overview_pointer_selection = Some(id.clone());
-        true
-    }
-
-    pub(super) fn take_overview_pointer_selection(&mut self) -> Option<&W> {
-        let id = self.overview_pointer_selection.take()?;
-        self.active_workspace_ref()
-            .windows()
-            .find(|window| window.id() == &id)
-    }
-
-    fn overview_selected_window(&self) -> Option<&W> {
-        let ws = self.active_workspace_ref();
-        self.overview_pointer_selection
-            .as_ref()
-            .and_then(|id| ws.windows().find(|window| window.id() == id))
-            .or_else(|| ws.active_window())
-    }
-
-    fn overview_command(&self) -> Option<(Rectangle<f64, Logical>, &W)> {
-        if !self.overview_open || !self.has_framed_overview() {
-            return None;
-        }
-
-        let progress = self.overview_progress_value()?;
-        if progress < 0.35 {
-            return None;
-        }
-
-        let window = self.overview_selected_window()?;
-        let ((_, ws), geo) = self
-            .workspaces_with_render_geo_idx()
-            .find(|((idx, _), _)| *idx == self.active_workspace_idx)?;
-        let zoom = self.overview_zoom();
-        let positions = self.floating_overview_positions(ws, progress);
-        let previews = || {
-            ws.tiles_with_overview_positions(&positions)
-                .filter_map(|(tile, pos, visible)| {
-                    visible.then_some((
-                        tile.window().id(),
-                        Rectangle::new(geo.loc + pos.upscale(zoom), tile.tile_size().upscale(zoom)),
-                    ))
-                })
-        };
-        let (_, preview) = previews().find(|(id, _)| *id == window.id())?;
-        let area = self.overview_content();
-        let width = 216.;
-        // The command sits at the end of the workspace header, above the previews.
-        let rect = Rectangle::new(
-            Point::from((
-                self.overview_frame_columns().1 - OVERVIEW_INSET - width,
-                geo.loc.y - OVERVIEW_HEADER_OFFSET - 2.,
-            )),
-            Size::from((width, OVERVIEW_CONTROL_HEIGHT)),
-        );
-        let fits = |part: Rectangle<f64, Logical>| {
-            part.loc.x >= area.loc.x
-                && part.loc.y >= area.loc.y
-                && part.loc.x + part.size.w <= area.loc.x + area.size.w
-                && part.loc.y + part.size.h <= area.loc.y + area.size.h
-        };
-        // Judged on the settled layout, so the command appears with the other hints.
-        let clear = progress < 1.
-            || fits(rect)
-                && fits(preview)
-                && previews().all(|(_, preview)| preview.intersection(rect).is_none());
-        clear.then_some((rect, window))
-    }
-
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
         if self.overview_open {
-            return self
-                .overview_command()
-                .filter(|(rect, _)| rect.contains(position))
-                .map(|(_, window)| window);
+            return None;
         }
 
         if let Some(strip) = self.navigation_strip() {
@@ -3381,7 +2874,45 @@ impl<W: LayoutElement> Monitor<W> {
         self.dismissed_preview_arrow.set(arrow);
     }
 
+    /// Which scroll arrows open for the pointer at `position`: an arrow opens when the pointer
+    /// enters the gap between its edge and the windows, and stays open while the pointer is
+    /// on it.
+    fn cue_arming(&self, position: Option<Point<f64, Logical>>) -> [Option<f64>; 2] {
+        let Some(point) = position else {
+            return [None; 2];
+        };
+        let ws = self.active_workspace_ref();
+        let Some(bounds) = self.scroll_clip(ws) else {
+            return [None; 2];
+        };
+        let area = self.working_area;
+        if point.y < area.loc.y || point.y > area.loc.y + area.size.h {
+            return [None; 2];
+        }
+        let gutter = ws.options.layout.gaps.max(8.);
+        let current = self.cue_armed.get();
+        let cues = self.scroll_cues();
+        std::array::from_fn(|side| {
+            let Some(cue) = &cues[side] else {
+                return None;
+            };
+            let in_gap = if side == 0 {
+                (bounds.start - 1.0..=bounds.start + gutter).contains(&point.x)
+            } else {
+                (bounds.end - gutter..=bounds.end + 1.).contains(&point.x)
+            };
+            if in_gap {
+                // In the gap, it follows the pointer up and down.
+                Some(point.y)
+            } else {
+                current[side].filter(|_| cue.rect.contains(point))
+            }
+        })
+    }
+
     pub fn update_navigation_preview_pointer(&self, position: Option<Point<f64, Logical>>) {
+        self.cue_pointer.set(position);
+        self.cue_armed.set(self.cue_arming(position));
         if self
             .dismissed_preview_arrow
             .get()
@@ -3392,10 +2923,8 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn window_has_navigation_caption(&self, id: &W::Id) -> bool {
-        self.has_framed_overview()
-            || self
-                .navigation_strip()
-                .is_some_and(|strip| strip.titles.iter().any(|title| title.window.id() == id))
+        self.navigation_strip()
+            .is_some_and(|strip| strip.titles.iter().any(|title| title.window.id() == id))
             || self.scroll_cues().into_iter().flatten().any(|cue| {
                 cue.destination.id() == id
                     || cue.additional.is_some_and(|(_, window)| window.id() == id)
@@ -3527,6 +3056,9 @@ impl<W: LayoutElement> Monitor<W> {
         pointer: Option<Point<f64, Logical>>,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
+        // While the window bar slides in or out, its entries pass under a still pointer; they
+        // only react to it once the bar has settled, so previews do not flicker.
+        let pointer = pointer.filter(|_| self.bar_reveal.borrow().anim.is_none());
         let preview_pointer = pointer.filter(|point| {
             self.dismissed_preview_arrow
                 .get()
@@ -4050,6 +3582,8 @@ impl<W: LayoutElement> Monitor<W> {
             };
             let text = if card {
                 title
+            } else if !cue.armed {
+                String::new()
             } else if title.is_empty() {
                 if left { "←" } else { "→" }.to_owned()
             } else if left {
@@ -4076,7 +3610,13 @@ impl<W: LayoutElement> Monitor<W> {
                         },
                     }
                 } else {
-                    LabelKind::Button { align_right: !left }
+                    if cue.armed {
+                        LabelKind::Button { align_right: !left }
+                    } else {
+                        LabelKind::EdgeHandle {
+                            height: cue.rect.size.h.round() as u32,
+                        }
+                    }
                 },
                 cue.rect.size.w,
                 scale,
@@ -4242,464 +3782,6 @@ impl<W: LayoutElement> Monitor<W> {
             });
     }
 
-    fn overview_content(&self) -> Rectangle<f64, Logical> {
-        let progress = self
-            .overview_progress_value()
-            .unwrap_or_default()
-            .clamp(0., 1.);
-        self.overview_usable_area(progress)
-    }
-
-    /// Interpolate the crop from the entire output to the space clear of panels.
-    fn overview_usable_area(&self, progress: f64) -> Rectangle<f64, Logical> {
-        let area = self.working_area;
-        let margin = OVERVIEW_FRAME_MARGIN.min(area.size.w / 2.);
-        let loc = (area.loc + Point::from((margin, 0.))).upscale(progress);
-        let usable_width = area.size.w - 2. * margin;
-        let size = Size::from((
-            self.view_size.w + (usable_width - self.view_size.w) * progress,
-            self.view_size.h + (area.size.h - self.view_size.h) * progress,
-        ));
-        Rectangle::new(loc, size)
-    }
-
-    fn overview_crop(
-        &self,
-        geo: Rectangle<f64, Logical>,
-        scale: f64,
-        zoom: f64,
-        height: i32,
-    ) -> Rectangle<i32, Physical> {
-        let area = self.overview_content();
-        let near = (area.loc - geo.loc).downscale(zoom).upscale(scale);
-        let far = near + area.size.upscale(scale / zoom).to_point();
-        let left = near.x.ceil() as i32;
-        let right = far.x.floor() as i32;
-        let top = (near.y.ceil() as i32).clamp(0, height);
-        let bottom = (far.y.floor() as i32).clamp(top, height);
-        Rectangle::new(
-            Point::from((left, top)),
-            Size::from((right.saturating_sub(left).max(0), bottom - top)),
-        )
-    }
-
-    fn desktop_window_groups(
-        &self,
-        ws: &Workspace<W>,
-        geo: Rectangle<f64, Logical>,
-    ) -> Option<[Range<f64>; 3]> {
-        if !ws.floating().is_empty() {
-            return None;
-        }
-        let tiles = || ws.scrolling().tiles_with_render_positions();
-        let extent = visible_extent(tiles())?;
-        let view = ws.working_area();
-        let bounds = if ws.options.layout.clip_scroll_to_work_area {
-            let bounds = self.scroll_view_bounds();
-            Self::exclude_narrow_peeks(bounds.clone(), &self.scroll_cues_for(ws, &bounds))
-        } else {
-            view.loc.x..view.loc.x + view.size.w
-        };
-        let pixel = 1. / self.scale.fractional_scale();
-        let visible = visible_extent(tiles().filter(|(tile, pos, _)| {
-            pos.x < bounds.end - pixel && pos.x + tile.tile_size().w > bounds.start + pixel
-        }))?;
-        if visible == extent {
-            return None;
-        }
-        let area = self.overview_content();
-        let left = area.loc.x;
-        let right = area.loc.x + area.size.w;
-        let zoom = self.overview_zoom();
-        let project = |range: Range<f64>| {
-            let x = |x: f64| (geo.loc.x + zoom * x).clamp(left, right);
-            x(range.start)..x(range.end)
-        };
-        let visible = project(visible);
-        (visible.end - visible.start >= pixel).then(|| {
-            let before = visible_extent(
-                tiles().filter(|(tile, pos, _)| pos.x + tile.tile_size().w <= bounds.start + pixel),
-            )
-            .map_or(visible.start..visible.start, project);
-            let after = visible_extent(tiles().filter(|(_, pos, _)| pos.x >= bounds.end - pixel))
-                .map_or(visible.end..visible.end, project);
-            [before, visible, after]
-        })
-    }
-
-    fn overview_groups(
-        &self,
-        ws: &Workspace<W>,
-        geo: Rectangle<f64, Logical>,
-        progress: f64,
-    ) -> Option<[Option<OverviewGroup>; 3]> {
-        if ws.floating().is_empty() {
-            // A quiet backing marks the windows that are on screen, like the highlight in the
-            // window bar; the windows on either side need no label.
-            let [_, visible, _] = self.desktop_window_groups(ws, geo)?;
-            return Some([
-                None,
-                (!visible.is_empty()).then_some(OverviewGroup {
-                    range: visible,
-                    title: "",
-                    minimum_width: 0.,
-                    style: GroupStyle::Desktop,
-                }),
-                None,
-            ]);
-        }
-
-        let positions = self.floating_overview_positions(ws, progress);
-        if positions.is_empty() {
-            return None;
-        }
-        let zoom = self.overview_zoom();
-        let area = self.overview_content();
-        let project = |range: Range<f64>| {
-            let x = |x: f64| (geo.loc.x + zoom * x).clamp(area.loc.x, area.loc.x + area.size.w);
-            x(range.start)..x(range.end)
-        };
-        let tiled = visible_extent(ws.scrolling().tiles_with_render_positions()).map(|extent| {
-            let view = ws.working_area();
-            let tolerance = 1. / self.scale.fractional_scale();
-            let on_desktop = extent.start >= view.loc.x - tolerance
-                && extent.end <= view.loc.x + view.size.w + tolerance;
-            OverviewGroup {
-                range: project(extent),
-                title: if on_desktop {
-                    "On desktop · Tiled"
-                } else {
-                    "Some offscreen · Tiled"
-                },
-                minimum_width: 168.,
-                style: if on_desktop {
-                    GroupStyle::Desktop
-                } else {
-                    GroupStyle::Offscreen
-                },
-            }
-        });
-        let floating = visible_extent(
-            ws.tiles_with_overview_positions(&positions)
-                .filter(|(tile, _, _)| ws.is_floating(tile.window().id())),
-        )?;
-        let (title, minimum_width, style) = if ws.is_floating_visible() {
-            ("On desktop · Floating", 172., GroupStyle::Desktop)
-        } else {
-            ("Hidden on desktop · Floating", 228., GroupStyle::Hidden)
-        };
-        Some([
-            tiled,
-            Some(OverviewGroup {
-                range: project(floating),
-                title,
-                minimum_width,
-                style,
-            }),
-            None,
-        ])
-    }
-
-    fn render_overview_captions<R: NiriRenderer>(
-        &self,
-        renderer: &mut R,
-        target: RenderTarget,
-        pointer: Option<Point<f64, Logical>>,
-        push: &mut dyn FnMut(MonitorRenderElement<R>),
-    ) {
-        let Some(progress) = self.overview_progress_value() else {
-            return;
-        };
-        let alpha = ((progress - 0.6) / 0.4).clamp(0., 1.) as f32;
-        if progress <= 0. {
-            return;
-        }
-        let label_alpha = ((progress - 0.6) / 0.3).clamp(0., 1.) as f32;
-        let scale = self.scale.fractional_scale();
-        let zoom = self.overview_zoom();
-        let area = self.overview_content();
-        let left = area.loc.x;
-        let right = area.loc.x + area.size.w;
-        let contains_y = |y, height| y >= area.loc.y && y + height <= area.loc.y + area.size.h;
-        let mut draw = |element| {
-            let element = RescaleRenderElement::from_element(element, Point::default(), 1.);
-            push(RelocateRenderElement::from_element(
-                element,
-                Point::default(),
-                Relocate::Relative,
-            ));
-        };
-
-        for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
-            let active = index == self.active_workspace_idx;
-            let accent = ws.options.layout.border.active_color;
-            let backdrop = ws.options.layout.background_color;
-            let empty = !ws.has_windows_or_name();
-            // An empty workspace is a single row with its label inside.
-            let top = if empty && !active {
-                geo.loc.y + (OVERVIEW_EMPTY_CARD_HEIGHT.min(geo.size.h) - 28.) / 2.
-            } else {
-                geo.loc.y - OVERVIEW_HEADER_OFFSET
-            };
-            // Labels appear at their final place rather than travelling in from the panel,
-            // aligned with the frames' left edge.
-            let x = self.overview_frame_columns().0 + OVERVIEW_INSET;
-            let width = (right - x - OVERVIEW_INSET).min(235.);
-            if contains_y(top, 28.) && width >= 36. {
-                if let Some(caption) = ws.overview_caption.render(
-                    renderer.as_gles_renderer(),
-                    index + 1,
-                    ws.name().map(String::as_str),
-                    empty,
-                    // Inside an empty slot the label is plain text, not a second outline.
-                    if empty && !active {
-                        Color {
-                            a: 0.,
-                            ..caption_background(accent, backdrop, active)
-                        }
-                    } else {
-                        caption_background(accent, backdrop, active)
-                    },
-                    width,
-                    scale,
-                    Point::from((x, top)),
-                    alpha,
-                ) {
-                    draw(MonitorInnerRenderElement::Caption(caption));
-                }
-            }
-
-            let command = active.then(|| self.overview_command()).flatten();
-            if let Some((rect, window)) = command {
-                let hovered = pointer.is_some_and(|point| rect.contains(point));
-                // A neutral chip; the accent belongs to the selected preview.
-                let surface = caption_background(accent, backdrop, false);
-                // A keyboard hint until hovered, not a button.
-                let background = if hovered {
-                    tint_caption(surface, accent)
-                } else {
-                    Color { a: 0., ..surface }
-                };
-                let action = if ws
-                    .active_window()
-                    .is_some_and(|active| active.id() == window.id())
-                {
-                    "Return to window".to_owned()
-                } else {
-                    let title = navigation_title(window, target, "window");
-                    let suffix = window_title_suffix(&title);
-                    let distinct = ws
-                        .windows()
-                        .filter(|other| other.id() != window.id())
-                        .map(|other| navigation_title(other, target, "window"))
-                        .all(|other| window_title_suffix(&other) != suffix);
-                    format!("Switch to {}", compact_window_title(&title, distinct))
-                };
-                if let Some(command) = self.overview_command_label.render(
-                    renderer.as_gles_renderer(),
-                    action,
-                    background,
-                    LabelKind::OverviewCommand,
-                    rect.size.w,
-                    scale,
-                    rect.loc,
-                    label_alpha,
-                ) {
-                    draw(MonitorInnerRenderElement::Caption(command));
-                }
-            }
-            if active && ws.active_window().is_some() && contains_y(top, OVERVIEW_CONTROL_HEIGHT) {
-                let surface = caption_background(accent, backdrop, false);
-                let mixed_layers = !ws.scrolling().is_empty() && !ws.floating().is_empty();
-                let tab = mixed_layers.then(|| {
-                    let selected_is_floating = self
-                        .overview_selected_window()
-                        .is_some_and(|window| ws.is_floating(window.id()));
-                    if selected_is_floating {
-                        "Select a tiled window"
-                    } else {
-                        "Select a floating window"
-                    }
-                });
-                let width = if mixed_layers { 350. } else { 154. };
-                let header = Point::from((
-                    self.overview_frame_columns().1 - OVERVIEW_INSET - width,
-                    top,
-                ));
-                let position = command
-                    .map(|(rect, _)| Point::from((rect.loc.x - 12. - width, rect.loc.y)))
-                    .filter(|point| point.x >= x)
-                    .or_else(|| (header.x >= x + 235.).then_some(header));
-                if let Some(position) = position {
-                    if let Some(label) = self.overview_shortcuts_label.render(
-                        renderer.as_gles_renderer(),
-                        "Select window".into(),
-                        Color { a: 0., ..surface },
-                        LabelKind::NavigationHint { tab },
-                        width,
-                        scale,
-                        position,
-                        label_alpha,
-                    ) {
-                        draw(MonitorInnerRenderElement::Caption(label));
-                    }
-                }
-            }
-
-            let mut hidden_group_labeled = false;
-            if let Some(groups) = active
-                .then(|| self.overview_groups(ws, geo, progress))
-                .flatten()
-            {
-                let y = geo.loc.y + self.overview_strip_offset(ws) * zoom - 36.;
-                if contains_y(y, 28.) {
-                    let surface = caption_background(accent, backdrop, false);
-                    for (group, label) in
-                        groups.into_iter().zip(&ws.overview_caption.desktop_labels)
-                    {
-                        let Some(group) = group else { continue };
-                        let width = group.range.end - group.range.start;
-                        if group.title.is_empty() || width < group.minimum_width {
-                            continue;
-                        }
-                        if let Some(caption) = label.render(
-                            renderer.as_gles_renderer(),
-                            group.title.into(),
-                            surface,
-                            LabelKind::GroupTitle,
-                            group.minimum_width,
-                            scale,
-                            Point::from((group.range.start, y)),
-                            label_alpha,
-                        ) {
-                            hidden_group_labeled |= group.style == GroupStyle::Hidden;
-                            draw(MonitorInnerRenderElement::Caption(caption));
-                        }
-                    }
-                }
-            }
-
-            let mut in_front: Vec<Rectangle<f64, Logical>> = Vec::new();
-            let focused = active.then(|| self.overview_selected_window()).flatten();
-            let preview_positions = self.floating_overview_positions(ws, progress);
-            for (tile, pos, visible) in ws.tiles_with_overview_positions(&preview_positions) {
-                if !visible {
-                    continue;
-                }
-                let location = geo.loc + pos.upscale(zoom);
-                let size = tile.tile_size().upscale(zoom);
-                if location.x + size.w < left || location.x > right {
-                    continue;
-                }
-                let rect = Rectangle::new(location, size);
-                // The label replaces the window's own (tiny) titlebar: it ends where the titlebar
-                // ends, rising above the preview instead of covering its contents.
-                let titlebar = tile.titlebar_height() * zoom;
-                let label = Rectangle::new(
-                    location + Point::from((1., titlebar.min(22.) - 22. + 1.)),
-                    Size::from((size.w - 2., 22.)),
-                );
-                let covered = in_front
-                    .iter()
-                    .any(|front| front.intersection(label).is_some());
-                in_front.push(rect);
-                let window = tile.window();
-                if covered
-                    || size.h < 40.
-                    || label.size.w < 65.
-                    || !contains_y(label.loc.y, label.size.h)
-                    || location.x < left
-                    || location.x + size.w > right
-                    || target.should_block_out(window.rules().block_out_from)
-                {
-                    continue;
-                }
-
-                let selected = focused.is_some_and(|focused| focused.id() == window.id());
-                let hidden = !hidden_group_labeled
-                    && !ws.is_floating_visible()
-                    && ws.is_floating(window.id());
-                let desktop_focus = active
-                    && ws
-                        .active_window()
-                        .is_some_and(|active_window| active_window.id() == window.id());
-                let current = desktop_focus && !selected;
-                let surface = caption_background(accent, backdrop, false);
-                let selection_color = if desktop_focus {
-                    accent
-                } else {
-                    caption_ink(surface)
-                };
-                let badge = if hidden {
-                    Some("Hidden")
-                } else if current {
-                    Some(if label.size.w < 220. {
-                        "Current"
-                    } else {
-                        "Current focus"
-                    })
-                } else if selected && !desktop_focus && label.size.w >= 164. {
-                    Some("Selected")
-                } else {
-                    None
-                };
-                if selected && contains_y(rect.loc.y, rect.size.h) {
-                    // Around the label too, which rises above the preview.
-                    let top = rect.loc.y.min(label.loc.y - 1.);
-                    let outline = Rectangle::new(
-                        Point::from((rect.loc.x, top)),
-                        Size::from((rect.size.w, rect.loc.y + rect.size.h - top)),
-                    );
-                    // The selection ring is there from the first frame, so the window you
-                    // came from stays easy to follow into the grid.
-                    ws.overview_caption.render_selection(
-                        renderer,
-                        outline,
-                        selection_color,
-                        (progress as f32 * 4.).min(1.),
-                        scale,
-                        &mut |outline| draw(MonitorInnerRenderElement::Decoration(outline)),
-                    );
-                }
-                // Read the app ID first: both accessors lock the toplevel's role.
-                let app_id = window.with_app_id(str::to_owned);
-                window.with_overview_title(|title| {
-                    let title: String = title
-                        .chars()
-                        .take(512)
-                        .map(|c| if c.is_control() { ' ' } else { c })
-                        .collect();
-                    if title.trim().is_empty() {
-                        return;
-                    }
-                    let background = if current {
-                        tint_caption(surface, accent)
-                    } else if desktop_focus {
-                        accent
-                    } else if selected {
-                        tint_caption(surface, selection_color)
-                    } else {
-                        surface
-                    };
-                    if let Some(label) = tile.overview_label.render_with_ink(
-                        renderer.as_gles_renderer(),
-                        title,
-                        app_id.clone(),
-                        background,
-                        caption_ink(background),
-                        LabelKind::Preview { badge, current },
-                        label.size.w,
-                        scale,
-                        label.loc,
-                        label_alpha,
-                    ) {
-                        draw(MonitorInnerRenderElement::Caption(label));
-                    }
-                });
-            }
-        }
-    }
-
     pub fn render_workspaces<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
@@ -4715,9 +3797,8 @@ impl<W: LayoutElement> Monitor<W> {
 
         let zoom = self.overview_zoom();
 
-        if self.options.overview.framed_workspaces {
-            self.render_overview_captions(ctx.renderer, ctx.target, pointer, push);
-        }
+        // Elements pushed first draw in front: the menu covers everything else.
+        self.render_layout_menu(ctx.renderer, push);
         self.render_scroll_cues(ctx.renderer, ctx.target, pointer, push);
 
         let insert_hint_render_loc = self
@@ -4776,16 +3857,7 @@ impl<W: LayoutElement> Monitor<W> {
                 };
 
             for (ws, geo) in self.workspaces_with_render_geo_cull(cull) {
-                let mut crop_bounds = if cull
-                    && self.options.overview.framed_workspaces
-                    && self.overview_progress.is_some()
-                {
-                    // Include the rows a workspace wraps into below its first.
-                    let rows = (ws.scrolling().overview_extra_height() * scale).ceil() as i32;
-                    self.overview_crop(geo, scale, zoom, height.saturating_add(rows))
-                } else {
-                    crop_bounds
-                };
+                let mut crop_bounds = crop_bounds;
                 if pass == 3 && ws.id() == self.active_workspace_ref().id() {
                     self.render_peek_scrims(ctx.renderer, ws, &mut |elem| push(elem));
                 }
@@ -4798,7 +3870,7 @@ impl<W: LayoutElement> Monitor<W> {
                     let right = ((bounds.end - geo.loc.x) * scale).floor() as i32;
                     crop_bounds.loc.x = left;
                     crop_bounds.size.w = right.saturating_sub(left).max(0);
-                    if let Some(top) = self.navigation_strip_top() {
+                    if let Some(top) = self.bar_row_top() {
                         let boundary = ((top + NAVIGATION_STRIP_HEIGHT) * scale).ceil() as i32;
                         for crop in [&mut crop_bounds, &mut shadow_crop] {
                             let bottom = crop.loc.y.saturating_add(crop.size.h);
@@ -4830,12 +3902,6 @@ impl<W: LayoutElement> Monitor<W> {
 
                 let xray_pos = XrayPos::new(geo.loc, zoom);
 
-                let floating_positions = if pass < 2 {
-                    self.overview_progress_value()
-                        .map(|progress| self.floating_overview_positions(ws, progress))
-                } else {
-                    None
-                };
                 match pass {
                     0 => {
                         ws.render_floating(
@@ -4843,7 +3909,6 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::MovingBetweenWorkspaces,
-                            floating_positions.as_deref(),
                             push!(),
                         );
                     }
@@ -4853,7 +3918,6 @@ impl<W: LayoutElement> Monitor<W> {
                             xray_pos,
                             focus_ring,
                             RenderLayer::Normal,
-                            floating_positions.as_deref(),
                             push!(),
                         );
 
@@ -4904,255 +3968,10 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn has_navigation_controls(&self) -> bool {
-        self.has_framed_overview()
-            || self
-                .active_workspace_ref()
-                .options
-                .layout
-                .clip_scroll_to_work_area
-    }
-
-    pub fn has_framed_overview(&self) -> bool {
-        self.options.overview.framed_workspaces && self.overview_progress.is_some()
-    }
-
-    fn overview_frame_geometry(
-        &self,
-        ws: &Workspace<W>,
-        index: usize,
-        geo: Rectangle<f64, Logical>,
-    ) -> Option<Rectangle<f64, Logical>> {
-        if !self.has_framed_overview() {
-            return None;
-        }
-        let progress = self.overview_progress_value()?.clamp(0., 1.);
-        let area = self.overview_content();
-        let (left, right) = self.overview_frame_columns();
-        let empty = index != self.active_workspace_idx && !ws.has_windows_or_name();
-        // An empty workspace is a short, open slot as wide as the others.
-        let width = right - left;
-        let height = if empty {
-            geo.size.h.min(OVERVIEW_EMPTY_CARD_HEIGHT)
-        } else {
-            // The geometry already includes the height of any extra rows.
-            geo.size.h + self.overview_strip_offset(ws) * self.overview_zoom()
-        };
-        let y = geo.loc.y;
-        let position = Point::from((geo.loc.x + (left - geo.loc.x) * progress, y));
-        let size = Size::from((
-            geo.size.w + (width - geo.size.w) * progress,
-            geo.size.h + (height - geo.size.h) * progress,
-        ));
-        let scale = self.scale.fractional_scale();
-        Rectangle::new(position, size)
-            .intersection(area)
-            .map(|rect| rect.to_physical_precise_round(scale).to_logical(scale))
-    }
-
-    /// The horizontal extent shared by the workspace frames in the Overview: the previews of
-    /// every workspace with a comfortable margin, never wider than the space clear of panels.
-    fn overview_frame_columns(&self) -> (f64, f64) {
-        let usable = self.overview_usable_area(1.);
-        let (min_x, max_x) = (usable.loc.x, usable.loc.x + usable.size.w);
-        let zoom = self.overview_zoom();
-        let mut span: Option<(f64, f64)> = None;
-        for (ws, geo) in zip(&self.workspaces, self.workspaces_render_geo()) {
-            let positions = self.floating_overview_positions(ws, 1.);
-            for (tile, pos, visible) in ws.tiles_with_overview_positions(&positions) {
-                if !visible {
-                    continue;
-                }
-                let start = geo.loc.x + pos.x * zoom;
-                let end = start + tile.tile_size().w * zoom;
-                span = Some(span.map_or((start, end), |(a, b)| (a.min(start), b.max(end))));
-            }
-        }
-        let Some((start, end)) = span else {
-            return (min_x, max_x);
-        };
-        let mut left = (start - OVERVIEW_FRAME_PADDING).max(min_x);
-        let mut right = (end + OVERVIEW_FRAME_PADDING).min(max_x);
-        // Room for the headings and hints even when there is little to show.
-        let min_width = OVERVIEW_FRAME_MIN_WIDTH.min(max_x - min_x);
-        if right - left < min_width {
-            let centre = (left + right) / 2.;
-            left = (centre - min_width / 2.).clamp(min_x, max_x - min_width);
-            right = left + min_width;
-        }
-        (left, right)
-    }
-
-    pub fn render_overview_frames<R: NiriRenderer>(
-        &self,
-        renderer: &mut R,
-        push: &mut dyn FnMut(MonitorRenderElement<R>),
-    ) {
-        let progress = self
-            .overview_progress_value()
-            .unwrap_or_default()
-            .clamp(0., 1.);
-        let scale = self.scale.fractional_scale();
-        let shadow_config = compute_workspace_shadow_config(
-            self.options.overview.workspace_shadow,
-            self.workspace_size(self.overview_zoom()),
-        );
-        for ((index, ws), geo) in self.workspaces_with_render_geo_idx() {
-            let Some(rect) = self.overview_frame_geometry(ws, index, geo) else {
-                continue;
-            };
-            let active = index == self.active_workspace_idx;
-            let group_alpha = ((progress - 0.80) / 0.20).clamp(0., 1.) as f32;
-            let groups = active
-                .then(|| self.overview_groups(ws, geo, progress))
-                .flatten();
-            let strip_offset = self.overview_strip_offset(ws) * self.overview_zoom();
-            let mut draw = |elem| {
-                let elem = MonitorInnerRenderElement::Decoration(elem);
-                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
-                push(RelocateRenderElement::from_element(
-                    elem,
-                    Point::default(),
-                    Relocate::Relative,
-                ));
-            };
-            let groups = groups.filter(|_| group_alpha > 0.).map(|groups| {
-                std::array::from_fn::<_, 3, _>(|index| {
-                    let group = groups[index].as_ref()?;
-                    let range = &group.range;
-                    if range.is_empty() {
-                        return None;
-                    }
-                    Rectangle::new(
-                        Point::from((range.start, geo.loc.y + strip_offset - 7.)),
-                        Size::from((range.end - range.start, 2.)),
-                    )
-                    .intersection(self.overview_content())
-                    .map(|rect| {
-                        (
-                            rect.to_physical_precise_round(scale).to_logical(scale),
-                            group.style,
-                            !group.title.is_empty(),
-                        )
-                    })
-                })
-            });
-
-            if let Some(groups) = &groups {
-                let zoom = self.overview_zoom();
-                let positions = self.floating_overview_positions(ws, progress);
-                for (index, group) in groups.iter().enumerate() {
-                    let Some((group, style, titled)) = group else {
-                        continue;
-                    };
-                    if *titled {
-                        ws.overview_caption.render_group_rule(
-                            index,
-                            *group,
-                            *style,
-                            ws.options.layout.background_color,
-                            ws.options.layout.border.active_color,
-                            group_alpha,
-                            &mut draw,
-                        );
-                    }
-                    if !*titled {
-                        // The previews' order and the window bar already say what is on screen.
-                        continue;
-                    }
-                    let top = geo.loc.y + strip_offset - 39.;
-                    let bottom = ws
-                        .tiles_with_overview_positions(&positions)
-                        .filter_map(|(tile, pos, visible)| {
-                            let left = geo.loc.x + pos.x * zoom;
-                            let right = left + tile.tile_size().w * zoom;
-                            let inside = left < group.loc.x + group.size.w && right > group.loc.x;
-                            (visible && inside)
-                                .then_some(geo.loc.y + (pos.y + tile.tile_size().h) * zoom)
-                        })
-                        .reduce(f64::max)
-                        .unwrap_or(geo.loc.y + geo.size.h)
-                        + 6.;
-                    let backing = Rectangle::new(
-                        Point::from((group.loc.x, top)),
-                        Size::from((group.size.w, (bottom - top).max(0.))),
-                    );
-                    if let Some(backing) = backing.intersection(self.overview_content()) {
-                        ws.overview_caption.render_group_backing(
-                            renderer,
-                            index,
-                            backing,
-                            *style,
-                            ws.options.layout.background_color,
-                            group_alpha,
-                            scale,
-                            &mut draw,
-                        );
-                    }
-                }
-            }
-            // The workspace card stays from the first frame to the last, so the windows never
-            // change layers while the overview opens.
-            // The card fades in with the zoom, a step behind the windows, so it is already in
-            // place when they land.
-            let frame_alpha = ((progress - 0.1) / 0.7).clamp(0., 1.);
-            let frame_alpha = (frame_alpha * frame_alpha * (3. - 2. * frame_alpha)) as f32;
-            if frame_alpha > 0. {
-                ws.overview_caption.render_frame(
-                    renderer,
-                    rect,
-                    ws.options.layout.background_color,
-                    active,
-                    frame_alpha,
-                    scale,
-                    &mut draw,
-                );
-            }
-            // A compact empty row has no shadow, so it stays quieter than the workspaces.
-            let compact = index != self.active_workspace_idx && !ws.has_windows_or_name();
-            if !shadow_config.on || frame_alpha == 0. || compact {
-                continue;
-            }
-            let mut shadow = ws.overview_caption.shadow.borrow_mut();
-            shadow.update_config(shadow_config);
-            shadow.update_render_elements(
-                rect.size,
-                active,
-                frame_radius(rect, progress as f32),
-                scale,
-                frame_alpha,
-            );
-            shadow.render(renderer, rect.loc, &mut |elem| {
-                let elem = MonitorInnerRenderElement::Shadow(elem);
-                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
-                push(RelocateRenderElement::from_element(
-                    elem,
-                    Point::default(),
-                    Relocate::Relative,
-                ));
-            });
-        }
-        // Dim the wallpaper behind the workspace cards as the overview opens.
-        if progress > 0. {
-            let backdrop = self.options.layout.background_color;
-            let light = 0.2126 * backdrop.r + 0.7152 * backdrop.g + 0.0722 * backdrop.b >= 0.55;
-            // A green-grey veil in light, so the pale wallpaper settles without going muddy.
-            let color = if light {
-                Color::new_unpremul(0.145, 0.227, 0.192, 0.16 * progress as f32)
-            } else {
-                Color::new_unpremul(0., 0., 0., 0.34 * progress as f32)
-            };
-            let mut dim = self.overview_dim.borrow_mut();
-            dim.update(self.view_size, color);
-            let elem = MonitorInnerRenderElement::Decoration(
-                SolidColorRenderElement::from_buffer(&dim, Point::default(), 1., Kind::Unspecified)
-                    .into(),
-            );
-            push(RelocateRenderElement::from_element(
-                RescaleRenderElement::from_element(elem, Point::default(), 1.),
-                Point::default(),
-                Relocate::Relative,
-            ));
-        }
+        self.active_workspace_ref()
+            .options
+            .layout
+            .clip_scroll_to_work_area
     }
 
     pub fn render_workspace_shadows<R: NiriRenderer>(
@@ -5568,5 +4387,189 @@ impl<W: LayoutElement> Monitor<W> {
             assert_abs_diff_eq!(pos.x, rounded_pos.x, epsilon = 1e-5);
             assert_abs_diff_eq!(pos.y, rounded_pos.y, epsilon = 1e-5);
         }
+    }
+}
+
+impl<W: LayoutElement> Monitor<W> {
+    /// The layout button of `window`'s titlebar, in output coordinates, while it is on screen.
+    fn layout_button_rect(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        if self.overview_progress.is_some() || self.workspace_switch.is_some() {
+            return None;
+        }
+        let active = self.active_workspace_ref().id();
+        let (ws, geo) = self
+            .workspaces_with_render_geo()
+            .find(|(ws, _)| ws.id() == active)?;
+        let (tile, pos, visible) = ws
+            .tiles_with_render_positions()
+            .find(|(tile, _, _)| tile.window().id() == window)?;
+        if !visible {
+            return None;
+        }
+        let rect = tile.titlebar_button_rect(TitlebarPart::Layout)?;
+        let rect = Rectangle::new(geo.loc + pos + rect.loc, rect.size);
+        Rectangle::from_size(self.view_size)
+            .intersection(rect)
+            .filter(|visible| visible.size.w >= rect.size.w / 2.)
+            .map(|_| rect)
+    }
+
+    fn layout_menu_geometry(&self) -> Option<LayoutMenuGeometry<W::Id>> {
+        let menu = self.layout_menu.borrow();
+        let menu = menu.as_ref()?;
+        let anchor = self.layout_button_rect(&menu.window)?;
+        let state = self
+            .active_workspace_ref()
+            .layout_menu_state(&menu.window)?;
+        Some(LayoutMenuGeometry {
+            window: menu.window.clone(),
+            anchor,
+            rect: layout_menu::place(anchor, self.working_area),
+            state,
+            hover: menu.hover,
+            hovered: menu.hovered,
+        })
+    }
+
+    /// Opens the layout menu of `window`. A menu opened by pointing (`hover`) closes again when
+    /// the pointer leaves it.
+    pub fn open_layout_menu(&self, window: &W::Id, hover: bool) -> bool {
+        if self.layout_button_rect(window).is_none() {
+            return false;
+        }
+        let mut menu = self.layout_menu.borrow_mut();
+        if hover && menu.as_ref().is_some_and(|menu| menu.window == *window) {
+            return false;
+        }
+        *menu = Some(OpenLayoutMenu {
+            window: window.clone(),
+            hover,
+            hovered: None,
+        });
+        true
+    }
+
+    /// Clicking the layout button opens its menu, keeps open a menu that opened from pointing
+    /// at it, or closes it.
+    pub fn toggle_layout_menu(&self, window: &W::Id) -> bool {
+        let open = self
+            .layout_menu
+            .borrow()
+            .as_ref()
+            .filter(|menu| menu.window == *window)
+            .map(|menu| menu.hover);
+        match open {
+            Some(true) => {
+                if let Some(menu) = self.layout_menu.borrow_mut().as_mut() {
+                    menu.hover = false;
+                }
+                true
+            }
+            Some(false) => self.close_layout_menu(),
+            None => self.open_layout_menu(window, false),
+        }
+    }
+
+    pub fn close_layout_menu(&self) -> bool {
+        self.layout_menu.borrow_mut().take().is_some()
+    }
+
+    /// The window whose layout menu is open.
+    pub fn layout_menu_window(&self) -> Option<W::Id> {
+        self.layout_menu
+            .borrow()
+            .as_ref()
+            .map(|menu| menu.window.clone())
+    }
+
+    /// What a press at `position` reaches in the layout menu: `None` outside the menu, and the
+    /// item under it, if any, inside.
+    pub fn layout_menu_under(
+        &self,
+        position: Point<f64, Logical>,
+    ) -> Option<Option<(W::Id, LayoutMenuItem)>> {
+        let menu = self.layout_menu_geometry()?;
+        if !menu.rect.contains(position) {
+            return None;
+        }
+        Some(
+            layout_menu::item_at(&menu.state, position - menu.rect.loc)
+                .map(|item| (menu.window, item)),
+        )
+    }
+
+    /// Whether `position` is on the layout button that opened the menu.
+    pub fn layout_menu_anchor_contains(&self, position: Point<f64, Logical>) -> bool {
+        self.layout_menu_geometry()
+            .is_some_and(|menu| menu.anchor.contains(position))
+    }
+
+    /// Follows the pointer: highlights the item under it, and closes a menu that opened from
+    /// pointing once the pointer leaves the button and the menu. Returns whether anything
+    /// changed.
+    pub fn update_layout_menu_pointer(&self, position: Option<Point<f64, Logical>>) -> bool {
+        if self.layout_menu.borrow().is_none() {
+            return false;
+        }
+        let Some(menu) = self.layout_menu_geometry() else {
+            // The window closed, scrolled away or lost its titlebar.
+            return self.close_layout_menu();
+        };
+        if menu.hover {
+            // The span between the button and the menu keeps it open on the way across.
+            let span = menu.anchor.merge(menu.rect);
+            if position.is_none_or(|position| !span.contains(position)) {
+                return self.close_layout_menu();
+            }
+        }
+        let hovered = position
+            .filter(|position| menu.rect.contains(*position))
+            .and_then(|position| layout_menu::item_at(&menu.state, position - menu.rect.loc));
+        if hovered == menu.hovered {
+            return false;
+        }
+        if let Some(open) = self.layout_menu.borrow_mut().as_mut() {
+            open.hovered = hovered;
+        }
+        true
+    }
+
+    fn render_layout_menu<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let Some(menu) = self.layout_menu_geometry() else {
+            return;
+        };
+        let ws = self.active_workspace_ref();
+        let titlebar = &ws.options.layout.titlebar;
+        // Opaque, like the window bar.
+        let background = Color {
+            a: 1.,
+            ..titlebar.background_color(false)
+        };
+        let ink = titlebar.text_color(true);
+        let accent = ws.options.layout.border.active_color;
+        let scale = self.scale.fractional_scale();
+        let Some(element) = self.layout_menu_texture.render(
+            renderer.as_gles_renderer(),
+            menu.state,
+            menu.hovered,
+            background,
+            ink,
+            accent,
+            scale,
+            menu.rect.loc,
+            1.,
+        ) else {
+            return;
+        };
+        let element = MonitorInnerRenderElement::Caption(element);
+        push(RelocateRenderElement::from_element(
+            RescaleRenderElement::from_element(element, Point::default(), 1.),
+            Point::default(),
+            Relocate::Relative,
+        ));
     }
 }

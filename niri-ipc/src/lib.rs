@@ -497,6 +497,8 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg())]
         side: PinSide,
     },
+    /// Show or hide the window bar when it is shown on demand (`window-bar "on-demand"`).
+    ToggleWindowBar {},
     /// Center the focused column on the screen.
     CenterColumn {},
     /// Center a window on the screen.

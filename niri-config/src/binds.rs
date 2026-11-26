@@ -336,6 +336,7 @@ pub enum Action {
     PinColumn(#[knuffel(argument, str)] PinSide),
     UnpinColumn,
     TogglePinnedColumn(#[knuffel(argument, str)] PinSide),
+    ToggleWindowBar,
     CenterColumn,
     CenterWindow,
     #[knuffel(skip)]
@@ -638,6 +639,7 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::PinColumn { side } => Self::PinColumn(side),
             niri_ipc::Action::UnpinColumn {} => Self::UnpinColumn,
             niri_ipc::Action::TogglePinnedColumn { side } => Self::TogglePinnedColumn(side),
+            niri_ipc::Action::ToggleWindowBar {} => Self::ToggleWindowBar,
             niri_ipc::Action::CenterColumn {} => Self::CenterColumn,
             niri_ipc::Action::CenterWindow { id: None } => Self::CenterWindow,
             niri_ipc::Action::CenterWindow { id: Some(id) } => Self::CenterWindowById(id),

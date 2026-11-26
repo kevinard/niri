@@ -12,6 +12,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
+use super::layout_menu::{width_choice, LayoutMenuState};
 use super::monitor::InsertPosition;
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
@@ -108,17 +109,6 @@ pub struct ScrollingSpace<W: LayoutElement> {
     /// Used for popup unconstraining. Popups can go over struts, but they shouldn't go over
     /// the layer-shell top layer (which renders on top of popups).
     parent_area: Rectangle<f64, Logical>,
-
-    /// Extra space between columns in the overview.
-    overview_spread: f64,
-    /// Where each column moves in the overview, which may wrap the strip into rows.
-    overview_offsets: Vec<Point<f64, Logical>>,
-    /// Height the overview adds to the workspace for its extra rows.
-    overview_extra_height: f64,
-    /// Whether the overview's captions replace the titles in titlebars.
-    overview_captions: bool,
-    /// Whether the overview is open or animating, when windows show whole.
-    overview_open: bool,
 
     /// Scale of the output the space is on (and rounds its sizes to).
     scale: f64,
@@ -253,10 +243,6 @@ pub struct Column<W: LayoutElement> {
 
     /// Animation of the render offset during window swapping.
     move_x_animation: Option<MoveAnimation>,
-
-    /// How far the column has slid out past the edge of the view, once the view settles with
-    /// it only partly on screen.
-    edge_shift: f64,
 
     /// Animation of a column visually moving vertically.
     move_y_animation: Option<MoveAnimation>,
@@ -394,11 +380,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             working_area,
             full_working_area: working_area,
             parent_area,
-            overview_spread: 0.,
-            overview_offsets: Vec::new(),
-            overview_extra_height: 0.,
-            overview_captions: false,
-            overview_open: false,
             scale,
             clock,
             options,
@@ -413,6 +394,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         options: Rc<Options>,
     ) {
         let full_working_area = compute_scrolling_area(parent_area, scale, &options);
+        let old_area = self.working_area;
+        // The leftmost column that starts in view, and where, to keep it in place.
+        let anchor = self
+            .column_view_xs()
+            .into_iter()
+            .zip(&self.columns)
+            .filter(|(_, col)| col.pinned.is_none())
+            .map(|((id, x), _)| (id, x))
+            .find(|(_, x)| *x >= old_area.loc.x - 1.)
+            .map(|(id, x)| (id, x - old_area.loc.x));
+        let before = self.column_view_xs();
 
         // Pinned columns size themselves within the whole working area.
         for (column, data) in zip(&mut self.columns, &mut self.data) {
@@ -445,8 +437,66 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             }
         }
 
-        // Apply always-center and such right away.
-        if !self.columns.is_empty() && !self.view_offset.is_gesture() {
+        // When a panel appears, hides or changes size, the leftmost column in view keeps its
+        // place relative to the edge of the working area, so the columns neither slide under
+        // the panel nor leave its space empty. Windows take their new widths only once they
+        // respond, so the view is set from the widths the columns are about to take.
+        let moved = working_area.loc.x != old_area.loc.x || working_area.size.w != old_area.size.w;
+        let mut placed = false;
+        let anchor_idx = anchor.and_then(|(id, offset)| {
+            let idx = self.columns.iter().position(|col| col.id() == id)?;
+            Some((idx, offset))
+        });
+        if let Some((anchor_idx, offset)) =
+            anchor_idx.filter(|_| moved && !self.view_offset.is_gesture())
+        {
+            let gaps = self.options.layout.gaps;
+            let upcoming = |col: &Column<W>| {
+                let width = if col.is_full_width {
+                    ColumnWidth::Proportion(1.)
+                } else {
+                    col.width
+                };
+                col.resolve_column_width(width) + gaps
+            };
+            let active = self.active_column_idx;
+            let span = |range: std::ops::Range<usize>| -> f64 {
+                self.columns[range]
+                    .iter()
+                    .filter(|col| col.pinned.is_none())
+                    .map(upcoming)
+                    .sum()
+            };
+            let anchor_x = working_area.loc.x + offset;
+            let active_x = if active >= anchor_idx {
+                anchor_x + span(anchor_idx..active)
+            } else {
+                anchor_x - span(active..anchor_idx)
+            };
+            // The active column is drawn at minus the view offset.
+            let fits = active_x + upcoming(&self.columns[active])
+                <= working_area.loc.x + working_area.size.w + 0.5;
+            if self.columns[active].pinned.is_none() {
+                placed = fits
+                    && self.options.layout.center_focused_column != CenterFocusedColumn::Always;
+                let delta = -active_x - self.view_offset.target();
+                self.view_offset.offset(delta);
+                let after = self.column_view_xs();
+                let config = self.options.animations.window_movement.0;
+                for (col, (id, x)) in zip(&mut self.columns, after) {
+                    let Some((_, from)) = before.iter().find(|(old, _)| *old == id) else {
+                        continue;
+                    };
+                    if col.pinned.is_none() && (from - x).abs() > 0.5 {
+                        col.animate_move_x_from_with_config(from - x, config);
+                    }
+                }
+            }
+        }
+
+        // Apply always-center and such right away, unless the columns were just placed for
+        // their upcoming widths.
+        if !placed && !self.columns.is_empty() && !self.view_offset.is_gesture() {
             self.animate_view_offset_to_column(None, self.active_column_idx, None);
         }
     }
@@ -553,13 +603,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // Partly visible columns are cut straight at the gutter by the monitor; they keep
             // their own frame and title where they are.
             let card: Option<(f64, f64)> = None;
-            let _ = (gaps, self.overview_open);
-            let hide_title = self.overview_captions;
+            let _ = gaps;
             for tile in &mut col.tiles {
                 tile.set_peek(peek);
                 tile.set_hidden_start(0.);
                 tile.set_card(card);
-                tile.set_hide_title(hide_title);
             }
             col.update_render_elements(is_active, view_rect);
         }
@@ -724,68 +772,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     fn column_render_xs(&self, view_pos: f64) -> Vec<f64> {
         let area = self.full_working_area;
         let gaps = self.options.layout.gaps;
-        let spread = self.overview_spread;
         zip(self.column_xs(self.data.iter().copied()), &self.data)
-            .enumerate()
-            .map(|(idx, (x, data))| match data.pinned {
+            .map(|(x, data)| match data.pinned {
                 Some(side) => view_pos + pinned_view_x(area, gaps, side, data.width),
-                None => match self.overview_offsets.get(idx) {
-                    Some(offset) => x + offset.x,
-                    None => x + idx as f64 * spread,
-                },
+                None => x,
             })
             .collect()
-    }
-
-    /// Extra space between columns while the overview is open, so that previews keep a
-    /// readable gutter when zoomed out.
-    pub fn set_overview_spread(&mut self, spread: f64) {
-        self.overview_spread = spread.max(0.);
-    }
-
-    pub fn overview_spread(&self) -> f64 {
-        self.overview_spread
-    }
-
-    /// Moves each column in the overview; empty restores the strip.
-    pub fn set_overview_layout(&mut self, offsets: Vec<Point<f64, Logical>>, extra_height: f64) {
-        self.overview_offsets = offsets;
-        self.overview_extra_height = extra_height.max(0.);
-    }
-
-    pub fn overview_extra_height(&self) -> f64 {
-        self.overview_extra_height
-    }
-
-    /// Where the strip starts, relative to the view, before any overview offsets.
-    pub fn strip_origin(&self) -> f64 {
-        let view_pos = self.view_pos();
-        self.column_xs(self.data.iter().copied())
-            .next()
-            .map_or(0., |x| x - view_pos)
-    }
-
-    /// The widths of the scrolling columns, in order.
-    pub fn column_widths(&self) -> Vec<f64> {
-        self.data
-            .iter()
-            .filter(|data| data.pinned.is_none())
-            .map(|data| data.width)
-            .collect()
-    }
-
-    fn overview_dy(&self, idx: usize) -> f64 {
-        self.overview_offsets.get(idx).map_or(0., |offset| offset.y)
-    }
-
-    /// Hides titlebar titles while the overview shows its own captions over the windows.
-    pub fn set_overview_captions(&mut self, captions: bool) {
-        self.overview_captions = captions;
-    }
-
-    /// Windows show whole in the overview, without the desktop's edge treatment.
-    pub fn set_overview_open(&mut self, open: bool) {
-        self.overview_open = open;
     }
 
     /// Returns each column's position in the view, excluding render offsets.
@@ -820,16 +812,26 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             order.push(active);
         }
         order.extend((0..len).filter(|&idx| idx != active && self.data[idx].pinned.is_none()));
-        // Columns still fading in, as the overview opens, pass behind the ones already shown.
-        let fading = |idx: &usize| {
-            self.columns[*idx]
-                .tiles()
-                .any(|(tile, _)| tile.fade() < 0.999)
-        };
-        let (shown, fading): (Vec<_>, Vec<_>) = order.into_iter().partition(|idx| !fading(idx));
-        let mut order = shown;
-        order.extend(fading);
         order
+    }
+
+    /// How the column of `window` is arranged, for the layout menu.
+    pub fn layout_menu_state(&self, window: &W::Id) -> Option<LayoutMenuState> {
+        let column = self.columns.iter().find(|col| col.contains(window))?;
+        let width = if column.is_full_width {
+            Some(100)
+        } else {
+            match column.width {
+                ColumnWidth::Proportion(proportion) => width_choice(proportion),
+                ColumnWidth::Fixed(_) => None,
+            }
+        };
+        Some(LayoutMenuState {
+            floating: false,
+            pinned: column.pinned,
+            width,
+            tabbed: column.display_mode == ColumnDisplay::Tabbed,
+        })
     }
 
     /// Pins the column to an edge of the view.
@@ -3132,51 +3134,44 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.columns.iter()
     }
 
-    fn columns_in_render_order(&self) -> impl Iterator<Item = (&Column<W>, f64, f64)> + '_ {
+    fn columns_in_render_order(&self) -> impl Iterator<Item = (&Column<W>, f64)> + '_ {
         let col_xs = self.column_render_xs(self.view_pos());
         self.column_render_order()
             .into_iter()
-            .map(move |idx| (&self.columns[idx], col_xs[idx], self.overview_dy(idx)))
+            .map(move |idx| (&self.columns[idx], col_xs[idx]))
     }
 
-    fn columns_in_render_order_mut(
-        &mut self,
-    ) -> impl Iterator<Item = (&mut Column<W>, f64, f64)> + '_ {
+    fn columns_in_render_order_mut(&mut self) -> impl Iterator<Item = (&mut Column<W>, f64)> + '_ {
         let col_xs = self.column_render_xs(self.view_pos());
-        let dys: Vec<_> = (0..self.columns.len())
-            .map(|idx| self.overview_dy(idx))
-            .collect();
         let order = self.column_render_order();
         let mut columns: Vec<_> = self.columns.iter_mut().map(Some).collect();
         order
             .into_iter()
-            .map(move |idx| (columns[idx].take().unwrap(), col_xs[idx], dys[idx]))
+            .map(move |idx| (columns[idx].take().unwrap(), col_xs[idx]))
     }
 
     pub fn columns_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Column<W>, Point<f64, Logical>)> {
         let view_off = Point::from((-self.view_pos(), 0.));
-        self.columns_in_render_order()
-            .map(move |(col, col_x, col_y)| {
-                let col_off = Point::from((col_x, col_y));
-                let col_render_off = col.render_offset();
-                let pos = view_off + col_off + col_render_off;
-                (col, pos)
-            })
+        self.columns_in_render_order().map(move |(col, col_x)| {
+            let col_off = Point::from((col_x, 0.));
+            let col_render_off = col.render_offset();
+            let pos = view_off + col_off + col_render_off;
+            (col, pos)
+        })
     }
 
     pub fn columns_with_render_positions_mut(
         &mut self,
     ) -> impl Iterator<Item = (&mut Column<W>, Point<f64, Logical>)> {
         let view_off = Point::from((-self.view_pos(), 0.));
-        self.columns_in_render_order_mut()
-            .map(move |(col, col_x, col_y)| {
-                let col_off = Point::from((col_x, col_y));
-                let col_render_off = col.render_offset();
-                let pos = view_off + col_off + col_render_off;
-                (col, pos)
-            })
+        self.columns_in_render_order_mut().map(move |(col, col_x)| {
+            let col_off = Point::from((col_x, 0.));
+            let col_render_off = col.render_offset();
+            let pos = view_off + col_off + col_render_off;
+            (col, pos)
+        })
     }
 
     pub fn tiles_with_render_positions(
@@ -4917,7 +4912,6 @@ impl<W: LayoutElement> Column<W> {
             display_mode,
             tab_indicator: TabIndicator::new(options.layout.tab_indicator),
             move_x_animation: None,
-            edge_shift: 0.,
             move_y_animation: None,
             view_size,
             working_area,
@@ -5185,7 +5179,7 @@ impl<W: LayoutElement> Column<W> {
     }
 
     pub fn render_offset(&self) -> Point<f64, Logical> {
-        let mut offset = Point::from((self.edge_shift, 0.));
+        let mut offset = Point::from((0., 0.));
 
         if let Some(move_) = &self.move_x_animation {
             offset.x += move_.from * move_.anim.value();
@@ -5195,14 +5189,6 @@ impl<W: LayoutElement> Column<W> {
         }
 
         offset
-    }
-
-    pub fn edge_shift(&self) -> f64 {
-        self.edge_shift
-    }
-
-    pub fn set_edge_shift(&mut self, shift: f64) {
-        self.edge_shift = shift;
     }
 
     pub fn animate_move_from(&mut self, from: Point<f64, Logical>) {
@@ -5489,9 +5475,18 @@ impl<W: LayoutElement> Column<W> {
         }
     }
 
+    /// Width that proportional column widths refer to: the whole working area, so that pinning a
+    /// column does not shrink the others. See [`Self::resolve_column_width`].
+    fn proportion_basis(&self) -> f64 {
+        compute_scrolling_area(self.parent_area, self.scale, &self.options)
+            .size
+            .w
+            .max(self.working_area.size.w)
+    }
+
     fn resolve_preset_width(&self, preset: PresetSize) -> ResolvedSize {
         let extra = self.extra_size();
-        resolve_preset_size(preset, &self.options, self.working_area.size.w, extra.w)
+        resolve_preset_size(preset, &self.options, self.proportion_basis(), extra.w)
     }
 
     fn resolve_preset_height(&self, preset: PresetSize) -> ResolvedSize {
@@ -5506,7 +5501,10 @@ impl<W: LayoutElement> Column<W> {
 
         match width {
             ColumnWidth::Proportion(proportion) => {
-                (working_size.w - gaps) * proportion - gaps - extra.w
+                // Proportions refer to the whole working area, so a column keeps its width when
+                // another one is pinned beside it, and only narrows to fit the space left.
+                let width = (self.proportion_basis() - gaps) * proportion - gaps - extra.w;
+                width.min(working_size.w - gaps * 2. - extra.w)
             }
             ColumnWidth::Fixed(width) => width,
         }
@@ -5994,7 +5992,7 @@ impl<W: LayoutElement> Column<W> {
                 ColumnWidth::Proportion(proportion)
             }
             (ColumnWidth::Fixed(_), SizeChange::AdjustProportion(delta)) => {
-                let full = self.working_area.size.w - self.options.layout.gaps;
+                let full = self.proportion_basis() - self.options.layout.gaps;
                 let current = if full == 0. {
                     1.
                 } else {
@@ -6642,7 +6640,11 @@ fn compute_scrolling_area(
     options: &Options,
 ) -> Rectangle<f64, Logical> {
     let mut struts = options.layout.struts;
-    if options.layout.clip_scroll_to_work_area && navigation_strip_fits(parent_area) {
+    // The window bar shown on demand slides over the windows instead.
+    if options.layout.clip_scroll_to_work_area
+        && options.layout.window_bar == niri_config::layout::WindowBar::Always
+        && navigation_strip_fits(parent_area)
+    {
         struts.top.0 = struts.top.0.max(NAVIGATION_STRIP_HEIGHT);
     }
     compute_working_area(parent_area, scale, struts)

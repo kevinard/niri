@@ -370,6 +370,8 @@ pub struct Niri {
     pub(crate) pointer_buttons: crate::input::pointer_buttons::Buttons,
     /// Titlebar control held by a compositor grab, and whether the input is still over it.
     pub titlebar_press: Option<(Window, crate::layout::titlebar::TitlebarPart, bool)>,
+    /// Layout button the pointer rests on, with the timer that opens its menu.
+    pub layout_button_hover: Option<(Window, RegistrationToken)>,
     /// Window whose titlebar shows a hovered or pressed control.
     pub titlebar_interaction_window: Option<Window>,
     /// Whether the pointer was over a titlebar at the last refresh.
@@ -2888,6 +2890,7 @@ impl Niri {
             suppressed_tablet_buttons: HashSet::new(),
             pointer_buttons: Default::default(),
             titlebar_press: None,
+            layout_button_hover: None,
             titlebar_interaction_window: None,
             pointer_over_titlebar: false,
             titlebar_last_press: None,
@@ -4825,17 +4828,11 @@ impl Niri {
                 push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
-                if !mon.has_framed_overview() {
-                    process!(geo)(ws.render_background());
-                }
+                process!(geo)(ws.render_background());
             }
         }
 
-        if mon.has_framed_overview() {
-            mon.render_overview_frames(ctx.renderer, &mut |elem| push(elem.into()));
-        } else {
-            mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
-        }
+        mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
 
         // Then the backdrop.
         push_popups_from_layer!(Layer::Background, true);

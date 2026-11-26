@@ -286,8 +286,10 @@ fn view_width_accounting() {
     assert_eq!(area.loc.x, full.loc.x + w1 + gaps);
     assert_eq!(area.size.w, full.size.w - w1 - gaps);
 
-    // Proportional widths are relative to the area left for scrolling.
-    assert_eq!(tile_width(&layout, 2), (area.size.w - gaps) * 0.5 - gaps);
+    // Proportional widths stay relative to the whole working area, so pinning a column does
+    // not narrow the others; they only narrow to fit the area left for scrolling.
+    let half = ((full.size.w - gaps) * 0.5 - gaps).min(area.size.w - 2. * gaps);
+    assert_eq!(tile_width(&layout, 2), half);
 
     // The new column opens right of the pinned one, at the start of the scrolling area.
     assert_eq!(column_of(&layout, 2), 2);
@@ -310,7 +312,8 @@ fn view_width_accounting() {
     assert_eq!(area.loc.x, full.loc.x + w1 + gaps);
     assert_eq!(area.size.w, full.size.w - w1 - w3 - gaps * 2.);
     assert_eq!(tile_x(&layout, 3), full.loc.x + full.size.w - gaps - w3);
-    assert_eq!(tile_width(&layout, 2), (area.size.w - gaps) * 0.5 - gaps);
+    let half = ((full.size.w - gaps) * 0.5 - gaps).min(area.size.w - 2. * gaps);
+    assert_eq!(tile_width(&layout, 2), half);
 
     // Unpinning gives the space back.
     let mut ops = vec![
@@ -658,4 +661,45 @@ fn closing_focused_right_pinned_column_keeps_view() {
     assert_eq!(focused(&layout), 3);
     let after: Vec<f64> = (1..=3).map(|id| tile_x(&layout, id)).collect();
     assert_eq!(after, xs);
+}
+
+#[test]
+fn pinning_keeps_proportional_widths_of_scrolling_columns() {
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=3 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+        ops.push(Op::SetColumnWidth(SizeChange::SetProportion(50.)));
+    }
+    ops.extend(settle());
+    let mut layout = check_ops(ops);
+    let half = tile_width(&layout, 2);
+
+    check_ops_on_layout(&mut layout, [Op::FocusColumnFirst]);
+    check_ops_on_layout(
+        &mut layout,
+        [Op::PinColumn {
+            id: None,
+            side: PinSide::Left,
+        }],
+    );
+    check_ops_on_layout(&mut layout, settle());
+
+    // Half-width columns stay half the working area wide beside the pinned column.
+    assert_eq!(tile_width(&layout, 2), half);
+    assert_eq!(tile_width(&layout, 3), half);
+
+    // A full-width column still fits in the space the pinned column leaves.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::FocusColumnRight,
+            Op::SetColumnWidth(SizeChange::SetProportion(100.)),
+        ],
+    );
+    check_ops_on_layout(&mut layout, settle());
+    let area = scrolling(&layout).working_area();
+    let gaps = layout.options.layout.gaps;
+    assert!(tile_width(&layout, 2) <= area.size.w - 2. * gaps);
 }

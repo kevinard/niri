@@ -48,6 +48,8 @@ const TAB_MAX_WIDTH: f64 = 240.;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitlebarPart {
     Drag,
+    /// Opens the window layout menu.
+    Layout,
     Maximize,
     Close,
 }
@@ -88,6 +90,7 @@ impl TitlebarLayout {
             .iter()
             .filter_map(|button| match button {
                 TitlebarButton::Close => Some(TitlebarPart::Close),
+                TitlebarButton::Layout => Some(TitlebarPart::Layout),
                 TitlebarButton::Maximize => can_maximize.then_some(TitlebarPart::Maximize),
             })
             .collect();
@@ -309,6 +312,7 @@ struct TabKey {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Icon {
     Close,
+    Layout,
     Maximize,
     Restore,
 }
@@ -475,6 +479,7 @@ impl Titlebar {
         for (part, rect) in &params.layout.buttons {
             let icon = match part {
                 TitlebarPart::Close => Icon::Close,
+                TitlebarPart::Layout => Icon::Layout,
                 TitlebarPart::Maximize if params.maximized => Icon::Restore,
                 TitlebarPart::Maximize => Icon::Maximize,
                 TitlebarPart::Drag => continue,
@@ -997,6 +1002,16 @@ fn contrasting(background: Color, fallback: Color) -> Color {
     }
 }
 
+fn rounded_square(cr: &cairo::Context, x: f64, y: f64, side: f64, r: f64) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    cr.new_sub_path();
+    cr.arc(x + side - r, y + r, r, -FRAC_PI_2, 0.);
+    cr.arc(x + side - r, y + side - r, r, 0., FRAC_PI_2);
+    cr.arc(x + r, y + side - r, r, FRAC_PI_2, PI);
+    cr.arc(x + r, y + r, r, PI, 1.5 * PI);
+    cr.close_path();
+}
+
 fn rasterize_icon(
     renderer: &mut GlesRenderer,
     key: &IconKey,
@@ -1043,31 +1058,18 @@ fn rasterize_icon(
         // with softened corners.
         Icon::Maximize => {
             let side = icon * 0.94;
-            let (x, y, r) = (cx - side / 2., cy - side / 2., 1.5);
-            cr.new_sub_path();
-            cr.arc(x + side - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.);
-            cr.arc(
-                x + side - r,
-                y + side - r,
-                r,
-                0.,
-                std::f64::consts::FRAC_PI_2,
-            );
-            cr.arc(
-                x + r,
-                y + side - r,
-                r,
-                std::f64::consts::FRAC_PI_2,
-                std::f64::consts::PI,
-            );
-            cr.arc(
-                x + r,
-                y + r,
-                r,
-                std::f64::consts::PI,
-                1.5 * std::f64::consts::PI,
-            );
-            cr.close_path();
+            rounded_square(&cr, cx - side / 2., cy - side / 2., side, 1.5);
+        }
+        // A window split into a wide pane and two stacked ones, as in the menu it opens.
+        Icon::Layout => {
+            let side = icon * 0.94;
+            let (x, y) = (cx - side / 2., cy - side / 2.);
+            rounded_square(&cr, x, y, side, 1.5);
+            let split = (x + side * 0.45).round() + 0.5 / key.scale;
+            cr.move_to(split, y);
+            cr.line_to(split, y + side);
+            cr.move_to(split, cy);
+            cr.line_to(x + side, cy);
         }
         Icon::Restore => {
             let small = icon * 0.8;
