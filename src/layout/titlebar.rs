@@ -232,9 +232,23 @@ impl TitlebarLayout {
 }
 
 /// Everything that the titlebar of one tile needs for rendering, refreshed every frame.
+/// How the window is arranged, which the layout button's icon shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TitlebarBadge {
+    #[default]
+    None,
+    /// Its column is pinned to an edge.
+    Pinned,
+    Floating,
+    /// It belongs to the scratchpad.
+    Scratchpad,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameParams {
     pub layout: TitlebarLayout,
+    /// The window's arrangement, shown by the layout button.
+    pub badge: TitlebarBadge,
     pub scale: f64,
     pub radius: CornerRadius,
     pub active: bool,
@@ -313,6 +327,9 @@ struct TabKey {
 enum Icon {
     Close,
     Layout,
+    Pin,
+    Floating,
+    Scratchpad,
     Maximize,
     Restore,
 }
@@ -479,7 +496,12 @@ impl Titlebar {
         for (part, rect) in &params.layout.buttons {
             let icon = match part {
                 TitlebarPart::Close => Icon::Close,
-                TitlebarPart::Layout => Icon::Layout,
+                TitlebarPart::Layout => match params.badge {
+                    TitlebarBadge::None => Icon::Layout,
+                    TitlebarBadge::Pinned => Icon::Pin,
+                    TitlebarBadge::Floating => Icon::Floating,
+                    TitlebarBadge::Scratchpad => Icon::Scratchpad,
+                },
                 TitlebarPart::Maximize if params.maximized => Icon::Restore,
                 TitlebarPart::Maximize => Icon::Maximize,
                 TitlebarPart::Drag => continue,
@@ -1070,6 +1092,39 @@ fn rasterize_icon(
             cr.line_to(split, y + side);
             cr.move_to(split, cy);
             cr.line_to(x + side, cy);
+        }
+        // A push pin: its head, the collar and the point, for a pinned column.
+        Icon::Pin => {
+            let top = cy - half;
+            cr.move_to(cx - half * 0.45, top + 0.5);
+            cr.line_to(cx + half * 0.45, top + 0.5);
+            cr.move_to(cx - half * 0.3, top + 0.5);
+            cr.line_to(cx - half * 0.3, cy + half * 0.05);
+            cr.move_to(cx + half * 0.3, top + 0.5);
+            cr.line_to(cx + half * 0.3, cy + half * 0.05);
+            cr.move_to(cx - half * 0.75, cy + half * 0.1);
+            cr.line_to(cx + half * 0.75, cy + half * 0.1);
+            cr.move_to(cx, cy + half * 0.1);
+            cr.line_to(cx, cy + half);
+        }
+        // A window floating over another, for a floating window.
+        Icon::Floating => {
+            let side = icon * 0.94;
+            let (x, y) = (cx - side / 2., cy - side / 2.);
+            let small = side * 0.62;
+            cr.move_to(x + small * 0.4, y + side);
+            cr.line_to(x, y + side);
+            cr.line_to(x, y + side - small * 0.6);
+            rounded_square(&cr, x + side - small, y, small, 1.5);
+        }
+        // A window dropping down from the top edge, for a scratchpad window.
+        Icon::Scratchpad => {
+            let side = icon * 0.94;
+            let (x, y) = (cx - side / 2., cy - side / 2.);
+            cr.move_to(x, y + 0.5);
+            cr.line_to(x + side, y + 0.5);
+            let inner = side * 0.72;
+            rounded_square(&cr, cx - inner / 2., y + side - inner, inner, 1.5);
         }
         Icon::Restore => {
             let small = icon * 0.8;

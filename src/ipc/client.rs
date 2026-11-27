@@ -754,6 +754,7 @@ fn print_window(window: &Window) {
         tile_pos_in_workspace_view,
         window_offset_in_tile,
         pinned,
+        in_scratchpad,
     } = window.layout;
 
     println!("  Layout:");
@@ -771,6 +772,10 @@ fn print_window(window: &Window) {
         Some(PinSide::Left) => println!("    Pinned: left"),
         Some(PinSide::Right) => println!("    Pinned: right"),
         None => (),
+    }
+
+    if in_scratchpad {
+        println!("    In the scratchpad");
     }
 
     if let Some(pos) = tile_pos_in_workspace_view {

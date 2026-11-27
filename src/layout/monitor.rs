@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use niri_config::layout::WindowBar;
 use niri_config::{Color, CornerRadius, LayoutPart};
+use niri_ipc::PinSide;
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
@@ -28,6 +29,7 @@ use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
     WorkspaceRenderElement,
 };
+use super::SnapLines;
 use super::{
     compute_overview_zoom, ActivateWindow, HitType, LayoutElement, LayoutElementRenderElement,
     Options,
@@ -142,7 +144,15 @@ pub struct Monitor<W: LayoutElement> {
     layout_menu: RefCell<Option<OpenLayoutMenu<W::Id>>>,
     layout_menu_texture: LayoutMenuTexture,
     layer_action_label: PreviewLabel,
+    scratchpad_label: PreviewLabel,
+    /// How many windows the scratchpad holds, on every output.
+    scratchpad_count: Cell<usize>,
     scroll_cue_labels: [PreviewLabel; 2],
+    /// Tabs of folded pinned columns, left and right, and their name pills.
+    folded_tab_labels: [PreviewLabel; 2],
+    folded_name_labels: [PreviewLabel; 2],
+    /// The folded tab the pointer is on, which shows the column's name.
+    folded_hover: Cell<Option<PinSide>>,
     additional_scroll_cue_labels: [PreviewLabel; 2],
     scroll_edge_fades: [PreviewLabel; 2],
     /// Location to render the insert hint element.
@@ -229,6 +239,8 @@ struct NavigationStrip<'a, W> {
     edge_actions: [Option<NavigationArrow<'a, W>>; 2],
     titles: Vec<NavigationTitle<'a, W>>,
     layer_action: Option<(Rectangle<f64, Logical>, &'a W)>,
+    /// The scratchpad's button, while it holds windows.
+    scratchpad_action: Option<Rectangle<f64, Logical>>,
     /// The separate bar of floating windows.
     floating_tray: Option<Rectangle<f64, Logical>>,
 }
@@ -502,6 +514,40 @@ impl BarReveal {
     }
 }
 
+/// The tab a folded pinned column leaves in the gap at its edge.
+struct FoldedTab<'a, W> {
+    side: PinSide,
+    window: &'a W,
+    /// The tab itself, in the gap beside the windows.
+    tab: Rectangle<f64, Logical>,
+    /// The pill naming the column, shown while the pointer is on the tab.
+    name: Rectangle<f64, Logical>,
+}
+
+impl<W> FoldedTab<'_, W> {
+    /// The tab as drawn: a slim accent handle in the middle of its gap.
+    fn drawn_tab(&self) -> Rectangle<f64, Logical> {
+        let width = (self.tab.size.w - 4.).clamp(4., 12.);
+        Rectangle::new(
+            Point::from((
+                self.tab.loc.x + (self.tab.size.w - width) / 2.,
+                self.tab.loc.y,
+            )),
+            Size::from((width, self.tab.size.h)),
+        )
+    }
+
+    /// Where the tab takes the pointer: the whole gap beside it, and its name pill while
+    /// that shows.
+    fn hit_area(&self, hover: Option<PinSide>) -> Rectangle<f64, Logical> {
+        if hover == Some(self.side) {
+            self.tab.merge(self.name)
+        } else {
+            self.tab
+        }
+    }
+}
+
 /// A layout menu opened from a titlebar.
 #[derive(Debug)]
 struct OpenLayoutMenu<Id> {
@@ -593,7 +639,12 @@ impl<W: LayoutElement> Monitor<W> {
             layout_menu: RefCell::new(None),
             layout_menu_texture: LayoutMenuTexture::default(),
             layer_action_label: PreviewLabel::default(),
+            scratchpad_label: PreviewLabel::default(),
+            scratchpad_count: Cell::new(0),
             scroll_cue_labels: Default::default(),
+            folded_tab_labels: Default::default(),
+            folded_name_labels: Default::default(),
+            folded_hover: Cell::new(None),
             additional_scroll_cue_labels: Default::default(),
             scroll_edge_fades: Default::default(),
             insert_hint_render_loc: None,
@@ -1850,6 +1901,12 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
+        // The compositor's own controls drawn over the windows take the pointer, so the
+        // titlebar buttons beneath them do not react.
+        if self.overlay_contains(pos_within_output) {
+            return None;
+        }
+
         let (ws, geo) = self.workspace_under(pos_within_output)?;
 
         if self.overview_progress.is_some() {
@@ -2240,10 +2297,20 @@ impl<W: LayoutElement> Monitor<W> {
         if self.workspace_switch.is_some() {
             return [None, None];
         }
-        let Some(bounds) = self.scroll_clip(ws) else {
+        let Some(bounds) = self.cue_bounds(ws) else {
             return [None, None];
         };
         self.scroll_cues_for(ws, &bounds)
+    }
+
+    /// The span the scroll arrows mark the edges of: between the panels, and between the
+    /// pinned columns in view, since columns scroll under those too.
+    fn cue_bounds(&self, ws: &Workspace<W>) -> Option<Range<f64>> {
+        let bounds = self.scroll_clip(ws)?;
+        let area = ws.scrolling().working_area();
+        let start = bounds.start.max(area.loc.x);
+        let end = bounds.end.min(area.loc.x + area.size.w);
+        (start < end).then_some(start..end)
     }
 
     fn scroll_cues_for<'a>(
@@ -2267,10 +2334,11 @@ impl<W: LayoutElement> Monitor<W> {
             .columns_with_render_positions()
             .find_map(|(column, pos)| (column.id() == active.id()).then_some(pos.x));
         let tolerance = 1. / self.scale.fractional_scale();
+        // Pinned columns are always in view; the others can scroll under them.
         let columns = || {
             scrolling
                 .columns_with_render_positions()
-                .filter(|(column, _)| column.id() != active.id())
+                .filter(|(column, _)| column.id() != active.id() && !column.is_pinned_in_place())
         };
         let left_columns = || columns().filter(|(_, pos)| pos.x < bounds.start - tolerance);
         let right_columns =
@@ -2327,7 +2395,9 @@ impl<W: LayoutElement> Monitor<W> {
             let width = width.min(space.floor().max(36.));
             // Keep the live strip during a gesture. Reveal the resting control
             // as the camera approaches its final position.
-            let can_clip = card_progress > 0. && unclipped;
+            // The large card for a clipped column belongs to layouts without the window bar;
+            // with it, the slim handle and its pill do the job.
+            let can_clip = card_progress > 0. && unclipped && !self.window_bar_available();
             let card = can_clip
                 && width >= 144.
                 && self.working_area.size.h >= SCROLL_CARD_HEIGHT
@@ -2484,7 +2554,10 @@ impl<W: LayoutElement> Monitor<W> {
             left.map(|column| make_cue(column, left_edge, left_width, true)),
             right.map(|column| make_cue(column, right_edge - right_width, right_width, false)),
         ]
-        .map(|cue| cue.filter(|cue| cue.opacity > 0.))
+        .map(|cue| {
+            // Arrows belong to the tiled windows: shown floating windows cover them.
+            cue.filter(|cue| cue.opacity > 0. && !self.covered_by_floating(ws, cue.rect))
+        })
     }
 
     /// Normal tiled windows leave a row for the strip, so the same controls
@@ -2532,6 +2605,7 @@ impl<W: LayoutElement> Monitor<W> {
         let mut floating = ws
             .floating()
             .tiles_with_render_positions()
+            .filter(|(tile, _)| !tile.is_hidden())
             .collect::<Vec<_>>();
         floating.sort_by(|(_, a), (_, b)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
         windows.extend(floating.iter().map(|(tile, position)| {
@@ -2544,7 +2618,8 @@ impl<W: LayoutElement> Monitor<W> {
                 position.x,
             )
         }));
-        if windows.len() == 1 && floating.is_empty() {
+        let scratchpad = self.scratchpad_count.get() > 0;
+        if windows.len() == 1 && floating.is_empty() && !scratchpad {
             return None;
         }
         let floating_visible = ws.is_floating_visible() && !floating.is_empty();
@@ -2555,7 +2630,9 @@ impl<W: LayoutElement> Monitor<W> {
             Point::from((bounds.start, tray_y)),
             Size::from((bounds.end - bounds.start, BAR_TRAY_HEIGHT)),
         );
+        // Shown on demand, the bar is called up over the windows, floating ones included.
         if floating_visible
+            && self.options.layout.window_bar == WindowBar::Always
             && floating.iter().any(|(tile, position)| {
                 row.intersection(Rectangle::new(*position, tile.tile_size()))
                     .is_some()
@@ -2609,13 +2686,12 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             0.
         };
-        // The floating layer's control is a round icon button, set apart from the windows.
-        let toggle_width = layer_destination.map_or(0., |_| BAR_PILL_HEIGHT);
-        let toggle_space = if layer_destination.is_some() {
-            toggle_width + gap
-        } else {
-            0.
-        };
+        // The floating layer's control is a round icon button, set apart from the windows. The
+        // scratchpad's button follows it while the scratchpad holds windows.
+        let toggles = usize::from(layer_destination.is_some()) + usize::from(scratchpad);
+        let toggle_width =
+            toggles as f64 * BAR_PILL_HEIGHT + toggles.saturating_sub(1) as f64 * gap;
+        let toggle_space = if toggles > 0 { toggle_width + gap } else { 0. };
         let divider_space = 2. * BAR_DIVIDER_GAP + 1. - gap;
         // Each name gets the width of its label, within limits; the bar grows with them up to
         // a share of the output, then the names shrink and finally the bar shows fewer windows.
@@ -2717,7 +2793,7 @@ impl<W: LayoutElement> Monitor<W> {
             0.
         };
         let tiled_inset = (tiled_width - natural_tiled) / 2.;
-        let floating_width = if shown_floating > 0 || layer_destination.is_some() {
+        let floating_width = if shown_floating > 0 || toggles > 0 {
             let pills = if shown_floating > 0 {
                 row(&widths[shown_tiled..]) + gap
             } else {
@@ -2752,13 +2828,13 @@ impl<W: LayoutElement> Monitor<W> {
         let left_arrow = show_arrows.then(|| rect(tray_x + pad, arrow_widths[0]));
         let right_arrow =
             show_arrows.then(|| rect(tray_x + tray_width - pad - arrow_widths[1], arrow_widths[1]));
-        let layer_action = layer_destination.map(|window| {
-            (
-                rect(
-                    floating_x + floating_width - pad - toggle_width,
-                    toggle_width,
-                ),
-                window,
+        let toggles_x = floating_x + floating_width - pad - toggle_width;
+        let layer_action =
+            layer_destination.map(|window| (rect(toggles_x, BAR_PILL_HEIGHT), window));
+        let scratchpad_action = scratchpad.then(|| {
+            rect(
+                floating_x + floating_width - pad - BAR_PILL_HEIGHT,
+                BAR_PILL_HEIGHT,
             )
         });
         let mut x = tray_x
@@ -2817,13 +2893,35 @@ impl<W: LayoutElement> Monitor<W> {
             edge_actions,
             titles,
             layer_action,
+            scratchpad_action,
             floating_tray,
         })
+    }
+
+    /// Sets how many windows the scratchpad holds, which the window bar shows.
+    pub(super) fn set_scratchpad_count(&self, count: usize) {
+        self.scratchpad_count.set(count);
+    }
+
+    /// Whether `position` is on the window bar's scratchpad button.
+    pub fn scratchpad_button_under(&self, position: Point<f64, Logical>) -> bool {
+        !self.overview_open
+            && self
+                .navigation_strip()
+                .and_then(|strip| strip.scratchpad_action)
+                .is_some_and(|rect| rect.contains(position))
     }
 
     pub fn navigation_window_under(&self, position: Point<f64, Logical>) -> Option<&W> {
         if self.overview_open {
             return None;
+        }
+        if let Some(tab) = self
+            .folded_tabs()
+            .into_iter()
+            .find(|tab| tab.hit_area(self.folded_hover.get()).contains(position))
+        {
+            return Some(tab.window);
         }
 
         if let Some(strip) = self.navigation_strip() {
@@ -2882,11 +2980,15 @@ impl<W: LayoutElement> Monitor<W> {
             return [None; 2];
         };
         let ws = self.active_workspace_ref();
-        let Some(bounds) = self.scroll_clip(ws) else {
+        let Some(bounds) = self.cue_bounds(ws) else {
             return [None; 2];
         };
         let area = self.working_area;
         if point.y < area.loc.y || point.y > area.loc.y + area.size.h {
+            return [None; 2];
+        }
+        // A folded pinned column's tab takes the pointer before the arrows do.
+        if self.folded_hover.get().is_some() {
             return [None; 2];
         }
         let gutter = ws.options.layout.gaps.max(8.);
@@ -2912,6 +3014,14 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn update_navigation_preview_pointer(&self, position: Option<Point<f64, Logical>>) {
         self.cue_pointer.set(position);
+        let hover = self.folded_hover.get();
+        let hover = position.and_then(|point| {
+            self.folded_tabs()
+                .into_iter()
+                .find(|tab| tab.hit_area(hover).contains(point))
+                .map(|tab| tab.side)
+        });
+        self.folded_hover.set(hover);
         self.cue_armed.set(self.cue_arming(position));
         if self
             .dismissed_preview_arrow
@@ -3215,6 +3325,33 @@ impl<W: LayoutElement> Monitor<W> {
                     arrow.rect.size.w,
                     scale,
                     arrow.rect.loc,
+                    1.,
+                ) {
+                    draw(MonitorInnerRenderElement::Caption(element));
+                }
+            }
+            if let Some(rect) = strip.scratchpad_action {
+                let hovered = pointer.is_some_and(|point| rect.contains(point));
+                let shown = ws.scratchpad_windows().any(|(_, hidden)| !hidden);
+                let count = self.scratchpad_count.get();
+                if let Some(element) = self.scratchpad_label.render_with_ink(
+                    renderer.as_gles_renderer(),
+                    if count > 1 {
+                        count.to_string()
+                    } else {
+                        String::new()
+                    },
+                    String::new(),
+                    Color { a: 0., ..surface },
+                    ink,
+                    LabelKind::BarButton {
+                        icon: BarIcon::Scratchpad { shown },
+                        enabled: true,
+                        hovered,
+                    },
+                    rect.size.w,
+                    scale,
+                    rect.loc,
                     1.,
                 ) {
                     draw(MonitorInnerRenderElement::Caption(element));
@@ -3533,7 +3670,7 @@ impl<W: LayoutElement> Monitor<W> {
         let accent = ws.options.layout.border.active_color;
         let surface = caption_background(accent, ws.options.layout.background_color, false);
         let color = tint_caption(surface, accent);
-        let Some(bounds) = self.scroll_clip(ws) else {
+        let Some(bounds) = self.cue_bounds(ws) else {
             return;
         };
         let scale = self.scale.fractional_scale();
@@ -3799,6 +3936,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         // Elements pushed first draw in front: the menu covers everything else.
         self.render_layout_menu(ctx.renderer, push);
+        self.render_folded_tabs(ctx.renderer, ctx.target, push);
         self.render_scroll_cues(ctx.renderer, ctx.target, pointer, push);
 
         let insert_hint_render_loc = self
@@ -4571,5 +4709,189 @@ impl<W: LayoutElement> Monitor<W> {
             Point::default(),
             Relocate::Relative,
         ));
+    }
+}
+
+impl<W: LayoutElement> Monitor<W> {
+    /// Tabs for the folded pinned columns of the active workspace, at the middle of their edges.
+    /// Whether `position` is on one of the controls the compositor draws over the windows: the
+    /// window bar, the edge arrows, the tabs of folded columns or the layout menu.
+    fn overlay_contains(&self, position: Point<f64, Logical>) -> bool {
+        if self.overview_progress.is_some() {
+            return false;
+        }
+        if let Some(strip) = self.navigation_strip() {
+            if [strip.tray, strip.floating_tray]
+                .into_iter()
+                .flatten()
+                .any(|rect| rect.contains(position))
+            {
+                return true;
+            }
+        }
+        if self
+            .scroll_cues()
+            .into_iter()
+            .flatten()
+            .any(|cue| cue.opacity > 0.5 && cue.rect.contains(position))
+        {
+            return true;
+        }
+        let hover = self.folded_hover.get();
+        if self
+            .folded_tabs()
+            .iter()
+            .any(|tab| tab.hit_area(hover).contains(position))
+        {
+            return true;
+        }
+        self.layout_menu_under(position).is_some()
+    }
+
+    /// The lines a floating window snaps to on the active workspace, horizontal then vertical,
+    /// in output coordinates: the working area one gap in, its middle, and the edges of the
+    /// other shown floating windows, aligned or one gap apart.
+    pub(super) fn floating_snap_lines(&self, exclude: &W::Id) -> (SnapLines, SnapLines) {
+        let ws = self.active_workspace_ref();
+        let area = ws.floating().working_area();
+        let gaps = ws.options.layout.gaps;
+        let mut xs = SnapLines::default();
+        let mut ys = SnapLines::default();
+        xs.edges
+            .extend([area.loc.x + gaps, area.loc.x + area.size.w - gaps]);
+        ys.edges
+            .extend([area.loc.y + gaps, area.loc.y + area.size.h - gaps]);
+        xs.middles.push(area.loc.x + area.size.w / 2.);
+        ys.middles.push(area.loc.y + area.size.h / 2.);
+        if ws.is_floating_visible() {
+            for (tile, pos) in ws.floating().tiles_with_render_positions() {
+                if tile.is_hidden() || tile.window().id() == exclude {
+                    continue;
+                }
+                let size = tile.tile_size();
+                xs.edges
+                    .extend([pos.x, pos.x + size.w, pos.x - gaps, pos.x + size.w + gaps]);
+                ys.edges
+                    .extend([pos.y, pos.y + size.h, pos.y - gaps, pos.y + size.h + gaps]);
+            }
+        }
+        (xs, ys)
+    }
+
+    /// Whether a shown floating window of `ws` covers part of `rect`.
+    fn covered_by_floating(&self, ws: &Workspace<W>, rect: Rectangle<f64, Logical>) -> bool {
+        ws.is_floating_visible()
+            && ws
+                .floating()
+                .tiles_with_render_positions()
+                .filter(|(tile, _)| !tile.is_hidden())
+                .any(|(tile, pos)| Rectangle::new(pos, tile.tile_size()).overlaps(rect))
+    }
+
+    fn folded_tabs(&self) -> Vec<FoldedTab<'_, W>> {
+        if self.overview_progress.is_some() || self.workspace_switch.is_some() {
+            return Vec::new();
+        }
+        let ws = self.active_workspace_ref();
+        let area = self.working_area;
+        let bounds = self
+            .scroll_clip(ws)
+            .unwrap_or(area.loc.x..area.loc.x + area.size.w);
+        let gap = ws.options.layout.gaps.max(8.);
+        let height = 72.;
+        let y = area.loc.y + (area.size.h - height) / 2.;
+        let name_width = 200.;
+        ws.scrolling()
+            .folded_pinned_columns()
+            .map(|(side, window)| {
+                let (gap_start, name_x) = match side {
+                    PinSide::Left => (bounds.start, bounds.start + gap),
+                    PinSide::Right => (bounds.end - gap, bounds.end - gap - name_width),
+                };
+                FoldedTab {
+                    side,
+                    window,
+                    // The whole gap at the tab's height takes the pointer; the tab is drawn
+                    // in its middle.
+                    tab: Rectangle::new(Point::from((gap_start, y)), Size::from((gap, height))),
+                    name: Rectangle::new(
+                        Point::from((name_x, y + (height - SCROLL_BUTTON_HEIGHT) / 2.)),
+                        Size::from((name_width, SCROLL_BUTTON_HEIGHT)),
+                    ),
+                }
+            })
+            // Shown floating windows cover the tabs, as they cover the tiled windows.
+            .filter(|tab| !self.covered_by_floating(ws, tab.tab))
+            .collect()
+    }
+
+    fn render_folded_tabs<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        target: RenderTarget,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let tabs = self.folded_tabs();
+        if tabs.is_empty() {
+            return;
+        }
+        let ws = self.active_workspace_ref();
+        let accent = ws.options.layout.border.active_color;
+        let titlebar = &ws.options.layout.titlebar;
+        let surface = Color {
+            a: 1.,
+            ..titlebar.background_color(false)
+        };
+        let scale = self.scale.fractional_scale();
+        let hover = self.folded_hover.get();
+        let mut draw = |label| {
+            let elem = MonitorInnerRenderElement::Caption(label);
+            let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+            push(RelocateRenderElement::from_element(
+                elem,
+                Point::default(),
+                Relocate::Relative,
+            ));
+        };
+        for tab in tabs {
+            let index = usize::from(tab.side == PinSide::Right);
+            let hovered = hover == Some(tab.side);
+            if hovered {
+                let title = navigation_title(tab.window, target, "Pinned window");
+                let text = match tab.side {
+                    PinSide::Left => format!("‹  {title}"),
+                    PinSide::Right => format!("{title}  ›"),
+                };
+                if let Some(label) = self.folded_name_labels[index].render(
+                    renderer.as_gles_renderer(),
+                    text,
+                    accent,
+                    LabelKind::Button {
+                        align_right: tab.side == PinSide::Right,
+                    },
+                    tab.name.size.w,
+                    scale,
+                    tab.name.loc,
+                    1.,
+                ) {
+                    draw(label);
+                }
+            }
+            let drawn = tab.drawn_tab();
+            if let Some(label) = self.folded_tab_labels[index].render(
+                renderer.as_gles_renderer(),
+                String::new(),
+                if hovered { accent } else { surface },
+                LabelKind::EdgeHandle {
+                    height: drawn.size.h.round() as u32,
+                },
+                drawn.size.w,
+                scale,
+                drawn.loc,
+                if hovered { 1. } else { 0.9 },
+            ) {
+                draw(label);
+            }
+        }
     }
 }

@@ -42,9 +42,13 @@ pub enum LayoutMenuItem {
     PinRight,
     Floating,
     Tabs,
+    /// Fold the pinned column past its edge, or unfold it.
+    Fold,
+    /// Add the window to the scratchpad, or take it out.
+    Scratchpad,
 }
 
-const ITEMS: [LayoutMenuItem; 8] = [
+const ITEMS: [LayoutMenuItem; 10] = [
     LayoutMenuItem::Width(33),
     LayoutMenuItem::Width(50),
     LayoutMenuItem::Width(67),
@@ -53,7 +57,10 @@ const ITEMS: [LayoutMenuItem; 8] = [
     LayoutMenuItem::PinRight,
     LayoutMenuItem::Floating,
     LayoutMenuItem::Tabs,
+    LayoutMenuItem::Fold,
+    LayoutMenuItem::Scratchpad,
 ];
+const HEADERS: [&str; 3] = ["Width", "Arrange", "Hide"];
 
 /// How the window is arranged now, which the menu marks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -63,12 +70,14 @@ pub struct LayoutMenuState {
     /// The column width, when it is one of the menu's widths.
     pub width: Option<u8>,
     pub tabbed: bool,
+    pub in_scratchpad: bool,
 }
 
 impl LayoutMenuState {
     fn enabled(&self, item: LayoutMenuItem) -> bool {
         match item {
-            LayoutMenuItem::Floating => true,
+            LayoutMenuItem::Floating | LayoutMenuItem::Scratchpad => true,
+            LayoutMenuItem::Fold => !self.floating && self.pinned.is_some(),
             _ => !self.floating,
         }
     }
@@ -80,6 +89,8 @@ impl LayoutMenuState {
             LayoutMenuItem::PinRight => self.pinned == Some(PinSide::Right),
             LayoutMenuItem::Floating => self.floating,
             LayoutMenuItem::Tabs => !self.floating && self.tabbed,
+            LayoutMenuItem::Fold => false,
+            LayoutMenuItem::Scratchpad => self.in_scratchpad,
         }
     }
 }
@@ -95,7 +106,8 @@ pub fn width_choice(proportion: f64) -> Option<u8> {
 /// Size of the menu, without its shadow.
 pub fn size() -> Size<f64, Logical> {
     let width = 2. * PADDING + COLUMNS as f64 * TILE_WIDTH + (COLUMNS - 1) as f64 * TILE_GAP;
-    let height = 2. * PADDING + 2. * (HEADER_HEIGHT + TILE_HEIGHT) + ROW_GAP;
+    let rows = HEADERS.len() as f64;
+    let height = 2. * PADDING + rows * (HEADER_HEIGHT + TILE_HEIGHT) + (rows - 1.) * ROW_GAP;
     Size::from((width, height))
 }
 
@@ -123,9 +135,18 @@ pub fn place(
 fn item_rect(index: usize) -> Rectangle<f64, Logical> {
     let row = index / COLUMNS;
     let column = index % COLUMNS;
-    let x = PADDING + column as f64 * (TILE_WIDTH + TILE_GAP);
     let y = PADDING + HEADER_HEIGHT + row as f64 * (TILE_HEIGHT + ROW_GAP + HEADER_HEIGHT);
-    Rectangle::new(Point::from((x, y)), Size::from((TILE_WIDTH, TILE_HEIGHT)))
+    // The last row has two choices, each as wide as two tiles.
+    let (x, width) = if row == 2 {
+        let width = 2. * TILE_WIDTH + TILE_GAP;
+        (PADDING + column as f64 * (width + TILE_GAP), width)
+    } else {
+        (
+            PADDING + column as f64 * (TILE_WIDTH + TILE_GAP),
+            TILE_WIDTH,
+        )
+    };
+    Rectangle::new(Point::from((x, y)), Size::from((width, TILE_HEIGHT)))
 }
 
 /// The enabled item under `point`, relative to the menu.
@@ -241,7 +262,7 @@ fn rasterize(renderer: &mut GlesRenderer, key: &Key) -> anyhow::Result<TextureBu
     text.set_single_paragraph_mode(true);
     text.set_ellipsize(EllipsizeMode::End);
 
-    for (row, header) in ["Width", "Arrange"].into_iter().enumerate() {
+    for (row, header) in HEADERS.into_iter().enumerate() {
         text.set_font_description(Some(&caption_font("Semibold", 11.)));
         text.set_width((size.w - 2. * PADDING) as i32 * pango::SCALE);
         text.set_text(header);
@@ -319,6 +340,8 @@ fn label(item: LayoutMenuItem, state: &LayoutMenuState) -> &'static str {
         LayoutMenuItem::PinRight => "Pin right",
         LayoutMenuItem::Floating => "Float",
         LayoutMenuItem::Tabs => "Tabs",
+        LayoutMenuItem::Fold => "Fold",
+        LayoutMenuItem::Scratchpad => "Scratchpad",
     }
 }
 
@@ -373,6 +396,43 @@ fn draw_diagram(
             set_source(cr, strong, 0.9 * dim);
             cr.fill()?;
         }
+        LayoutMenuItem::Fold => {
+            // The pinned column slides out past the left edge, leaving its tab.
+            let pinned = iw * 0.3;
+            cr.save()?;
+            rounded_rect(cr, x + 0.5, y + 0.5, w - 1., h - 1., 4.);
+            cr.clip();
+            rounded_rect(cr, ix - pinned * 0.6, iy, pinned, ih, 2.);
+            set_source(cr, ink, 0.22 * dim);
+            cr.fill()?;
+            cr.restore()?;
+            rounded_rect(cr, ix - 1., iy + ih * 0.3, 2.5, ih * 0.4, 1.2);
+            set_source(cr, strong, 0.9 * dim);
+            cr.fill()?;
+            let rest = (iw - 6.) / 2.;
+            pane(cr, ix + 4., rest, strong, 0.9)?;
+            pane(cr, ix + 6. + rest, rest, ink, 0.28)?;
+        }
+        LayoutMenuItem::Scratchpad => {
+            // A window dropping in over the others from the top.
+            let half = (iw - 2.) / 2.;
+            pane(cr, ix, half, ink, 0.24)?;
+            pane(cr, ix + half + 2., half, ink, 0.24)?;
+            let (fw, fh) = (iw * 0.6, ih * 0.55);
+            let (fx, fy) = (ix + (iw - fw) / 2., iy);
+            rounded_rect(cr, fx - 1.5, fy - 1.5, fw + 3., fh + 3., 3.);
+            set_source(cr, background, 1.);
+            cr.fill()?;
+            rounded_rect(cr, fx, fy, fw, fh, 2.);
+            set_source(cr, strong, 0.9 * dim);
+            cr.fill()?;
+            cr.move_to(x + w / 2. - 3., y + h - 6.);
+            cr.line_to(x + w / 2., y + h - 3.5);
+            cr.line_to(x + w / 2. + 3., y + h - 6.);
+            set_source(cr, ink, 0.6 * dim);
+            cr.set_line_width(1.2);
+            cr.stroke()?;
+        }
         LayoutMenuItem::Tabs => {
             let tab_h = 4.;
             let tab_w = (iw - 4.) / 3.;
@@ -401,12 +461,19 @@ mod tests {
             ..Default::default()
         };
         let enabled: Vec<_> = ITEMS.into_iter().filter(|i| state.enabled(*i)).collect();
-        assert_eq!(enabled, [LayoutMenuItem::Floating]);
+        assert_eq!(
+            enabled,
+            [LayoutMenuItem::Floating, LayoutMenuItem::Scratchpad]
+        );
     }
 
     #[test]
     fn items_are_hit_inside_their_tiles_only() {
-        let state = LayoutMenuState::default();
+        // Pinned, so that every item is enabled.
+        let state = LayoutMenuState {
+            pinned: Some(PinSide::Left),
+            ..Default::default()
+        };
         for (index, item) in ITEMS.into_iter().enumerate() {
             let rect = item_rect(index);
             let center = rect.loc + rect.size.downscale(2.).to_point();

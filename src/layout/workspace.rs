@@ -700,7 +700,8 @@ impl<W: LayoutElement> Workspace<W> {
                 }
             }
             WorkspaceAddWindowTarget::NextTo(next_to) => {
-                let activate = activate.map_smart(|| self.active_window().unwrap().id() == next_to);
+                let activate = activate
+                    .map_smart(|| self.active_window().is_some_and(|win| win.id() == next_to));
 
                 let floating_has_window = self.floating.has_window(next_to);
 
@@ -795,8 +796,9 @@ impl<W: LayoutElement> Workspace<W> {
                 self.floating_is_active = FloatingActive::No;
             }
         } else {
-            // Scrolling should remain focused if both are empty.
-            if self.scrolling.is_empty() && !self.floating.is_empty() {
+            // Scrolling should remain focused if both are empty, or if the floating windows are
+            // all hidden in the scratchpad.
+            if self.scrolling.is_empty() && self.floating.has_shown_window() {
                 self.floating_is_active = FloatingActive::Yes;
             }
         }
@@ -1286,6 +1288,13 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    pub fn toggle_pinned_column_folded(&mut self, id: Option<&W::Id>) -> bool {
+        if id.is_some_and(|id| !self.scrolling.has_window(id)) {
+            return false;
+        }
+        self.scrolling.toggle_pinned_column_folded(id)
+    }
+
     /// Applies the open-pinned window rule to a newly added window.
     ///
     /// Floating windows are not pinned: only scrolling-layout columns can be.
@@ -1519,7 +1528,9 @@ impl<W: LayoutElement> Workspace<W> {
             .unwrap();
 
         if self.floating.has_window(&id) {
-            let removed = self.floating.remove_tile(&id);
+            let mut removed = self.floating.remove_tile(&id);
+            // Only floating windows belong to the scratchpad.
+            removed.tile.set_scratchpad(false);
             // FIXME: compute closest pos?
             self.scrolling.add_tile(
                 None,
@@ -1529,7 +1540,7 @@ impl<W: LayoutElement> Workspace<W> {
                 removed.is_full_width,
                 None,
             );
-            if target_is_active {
+            if target_is_active || self.floating.is_empty() {
                 self.floating_is_active = FloatingActive::No;
             }
         } else {
@@ -1575,6 +1586,65 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.toggle_window_floating(id);
+    }
+
+    /// The floating windows of the scratchpad, with whether each is hidden.
+    pub fn scratchpad_windows(&self) -> impl Iterator<Item = (&W, bool)> + '_ {
+        self.floating
+            .tiles()
+            .filter(|tile| tile.is_scratchpad())
+            .map(|tile| (tile.window(), tile.is_hidden()))
+    }
+
+    /// Adds a floating window to the scratchpad, or takes it out.
+    pub fn set_scratchpad(&mut self, id: &W::Id, scratchpad: bool) -> bool {
+        let Some(tile) = self
+            .floating
+            .tiles_mut()
+            .find(|tile| tile.window().id() == id)
+        else {
+            return false;
+        };
+        tile.set_scratchpad(scratchpad);
+        true
+    }
+
+    /// Adds a window to the scratchpad and hides it. A tiled window floats first, at a
+    /// comfortable size rather than as tall as its column, centered in the working area.
+    pub fn add_to_scratchpad(&mut self, id: &W::Id) {
+        if !self.floating.has_window(id) {
+            self.toggle_window_floating(Some(id));
+            self.set_window_width(Some(id), SizeChange::SetProportion(60.));
+            self.set_window_height(Some(id), SizeChange::SetProportion(70.));
+            self.center_window(Some(id));
+        }
+        self.set_scratchpad(id, true);
+        self.hide_scratchpad_window(id);
+    }
+
+    /// Shows a window hidden in the scratchpad where it is, without focusing it.
+    pub fn show_scratchpad_window(&mut self, id: &W::Id) -> bool {
+        let Some(tile) = self
+            .floating
+            .tiles_mut()
+            .find(|tile| tile.window().id() == id)
+        else {
+            return false;
+        };
+        tile.set_hidden(false);
+        true
+    }
+
+    /// Hides a floating window of the scratchpad. Focus moves to another shown floating window,
+    /// or to the tiled windows.
+    pub fn hide_scratchpad_window(&mut self, id: &W::Id) -> bool {
+        if !self.floating.hide_window(id) {
+            return false;
+        }
+        if self.floating_is_active.get() && !self.floating.active_window_is_shown() {
+            self.floating_is_active = FloatingActive::No;
+        }
+        true
     }
 
     pub fn focus_floating(&mut self) {
@@ -1710,7 +1780,8 @@ impl<W: LayoutElement> Workspace<W> {
 
         let floating = self.floating.tiles_with_render_positions();
         let visible = self.is_floating_visible();
-        let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
+        // Windows hidden in the scratchpad keep their place but are not visible.
+        let floating = floating.map(move |(tile, pos)| (tile, pos, visible && !tile.is_hidden()));
 
         floating.chain(scrolling)
     }
@@ -1817,9 +1888,14 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// How `window` is arranged, for the layout menu.
     pub fn layout_menu_state(&self, window: &W::Id) -> Option<super::layout_menu::LayoutMenuState> {
-        if self.floating.has_window(window) {
+        if let Some(tile) = self
+            .floating
+            .tiles()
+            .find(|tile| tile.window().id() == window)
+        {
             return Some(super::layout_menu::LayoutMenuState {
                 floating: true,
+                in_scratchpad: tile.is_scratchpad(),
                 ..Default::default()
             });
         }
@@ -1917,6 +1993,7 @@ impl<W: LayoutElement> Workspace<W> {
             if let Some(rv) = self
                 .floating
                 .tiles_with_render_positions()
+                .filter(|(tile, _)| !tile.is_hidden())
                 .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
             {
                 return Some(rv);
@@ -2192,7 +2269,7 @@ impl<W: LayoutElement> Workspace<W> {
                 !self.floating_is_active.get(),
                 "when floating is empty it must never be active"
             );
-        } else if self.scrolling.is_empty() {
+        } else if self.scrolling.is_empty() && self.floating.has_shown_window() {
             assert!(
                 self.floating_is_active.get(),
                 "when scrolling is empty but floating isn't, floating should be active"

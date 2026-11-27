@@ -2042,6 +2042,32 @@ impl State {
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
+            Action::ToggleScratchpad => {
+                if self.niri.layout.toggle_scratchpad() {
+                    self.maybe_warp_cursor_to_focus();
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Action::ToggleWindowInScratchpad => {
+                if self.niri.layout.toggle_window_in_scratchpad(None) {
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Action::ToggleWindowInScratchpadById(id) => {
+                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    if self.niri.layout.toggle_window_in_scratchpad(Some(&window)) {
+                        self.niri.queue_redraw_all();
+                    }
+                }
+            }
+            Action::TogglePinnedColumnFolded => {
+                if self.niri.layout.toggle_pinned_column_folded(None) {
+                    self.maybe_warp_cursor_to_focus();
+                    self.niri.queue_redraw_all();
+                }
+            }
             Action::ToggleWindowBar => {
                 if self.niri.layout.toggle_window_bar() {
                     self.niri.queue_redraw_all();
@@ -3335,6 +3361,26 @@ impl State {
         false
     }
 
+    /// Shows or hides the scratchpad from the window bar's button.
+    fn scratchpad_button_press(&mut self, location: Point<f64, Logical>) -> bool {
+        let on_button = self
+            .niri
+            .output_under(location)
+            .is_some_and(|(output, point)| {
+                self.niri
+                    .layout
+                    .monitor_for_output(output)
+                    .is_some_and(|monitor| monitor.scratchpad_button_under(point))
+            });
+        if !on_button {
+            return false;
+        }
+        if self.niri.layout.toggle_scratchpad() {
+            self.niri.queue_redraw_all();
+        }
+        true
+    }
+
     fn apply_layout_menu_item(&mut self, window: &smithay::desktop::Window, item: LayoutMenuItem) {
         self.focus_window(window);
         let layout = &mut self.niri.layout;
@@ -3346,6 +3392,12 @@ impl State {
             LayoutMenuItem::PinRight => layout.toggle_pinned_column(Some(window), PinSide::Right),
             LayoutMenuItem::Floating => layout.toggle_window_floating(Some(window)),
             LayoutMenuItem::Tabs => layout.toggle_column_tabbed_display(),
+            LayoutMenuItem::Fold => {
+                layout.toggle_pinned_column_folded(Some(window));
+            }
+            LayoutMenuItem::Scratchpad => {
+                layout.toggle_window_in_scratchpad(Some(window));
+            }
         }
     }
 
@@ -3628,6 +3680,15 @@ impl State {
             let is_overview_open = self.niri.layout.is_overview_open();
 
             if !pointer.is_grabbed() && self.layout_menu_press(pointer.current_location()) {
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
+
+            if button == Some(MouseButton::Left)
+                && !mod_down
+                && !pointer.is_grabbed()
+                && self.scratchpad_button_press(pointer.current_location())
+            {
                 self.niri.suppressed_buttons.insert(button_code);
                 return;
             }

@@ -93,6 +93,10 @@ pub(super) enum BarIcon {
     Right,
     ShowFloating,
     HideFloating,
+    /// The scratchpad, and whether one of its windows is shown on this workspace.
+    Scratchpad {
+        shown: bool,
+    },
 }
 
 /// Height of a window in the window bar.
@@ -612,7 +616,7 @@ fn rasterize_bar(
             (inner_width + 2. * margin, f64::from(height) + 2. * margin)
         }
         LabelKind::BarButton {
-            icon: BarIcon::ShowFloating | BarIcon::HideFloating,
+            icon: BarIcon::ShowFloating | BarIcon::HideFloating | BarIcon::Scratchpad { .. },
             ..
         } => (inner_width, BAR_PILL_HEIGHT),
         LabelKind::BarButton {
@@ -835,9 +839,10 @@ fn rasterize_bar(
             hovered,
         } => {
             let c = height / 2.;
-            if enabled && hovered {
+            let shown = matches!(icon, BarIcon::Scratchpad { shown: true });
+            if (enabled && hovered) || shown {
                 rounded_rect(&cr, 0., 0., width, height, height / 2.);
-                set_source(&cr, ink, 0.12);
+                set_source(&cr, ink, if shown && hovered { 0.22 } else { 0.12 });
                 cr.fill()?;
             }
             set_source(&cr, ink, if enabled { 0.92 } else { 0.32 });
@@ -872,6 +877,48 @@ fn rasterize_bar(
                         cr.move_to(
                             bx + (bw - f64::from(cw)) / 2.,
                             (height - f64::from(ch)) / 2.,
+                        );
+                        pangocairo::functions::show_layout(&cr, &count);
+                    }
+                }
+                BarIcon::Scratchpad { shown } => {
+                    // A window dropping down from the top edge.
+                    let cx = width / 2.;
+                    cr.set_line_width(1.25);
+                    cr.move_to(cx - 7., c - 6.5);
+                    cr.line_to(cx + 7., c - 6.5);
+                    cr.stroke()?;
+                    rounded_rect(&cr, cx - 5.5, c - 3.5, 11., 9., 2.);
+                    if shown {
+                        cr.fill()?;
+                    } else {
+                        cr.stroke()?;
+                    }
+                    // How many windows the scratchpad holds, when more than one.
+                    if !key.text.is_empty() {
+                        let count = pangocairo::functions::create_layout(&cr);
+                        count.set_font_description(Some(&caption_font("Bold", 9.)));
+                        count.set_text(&key.text);
+                        let (cw, ch) = count.pixel_size();
+                        let bw = f64::from(cw).max(6.) + 6.;
+                        let bh = 12.;
+                        let (bx, by) = (cx + 3., c - 1.);
+                        rounded_rect(&cr, bx, by, bw, bh, bh / 2.);
+                        set_source(
+                            &cr,
+                            Color {
+                                a: 1.,
+                                ..key.background
+                            },
+                            1.,
+                        );
+                        cr.fill_preserve()?;
+                        set_source(&cr, ink, 0.92);
+                        cr.set_line_width(1.);
+                        cr.stroke()?;
+                        cr.move_to(
+                            bx + (bw - f64::from(cw)) / 2.,
+                            by + (bh - f64::from(ch)) / 2.,
                         );
                         pangocairo::functions::show_layout(&cr, &count);
                     }

@@ -137,6 +137,8 @@ struct ColumnData {
     ///
     /// Such columns are left out of the scrolling strip.
     pinned: Option<PinSide>,
+    /// Folded past its edge: it takes no space and is out of view.
+    folded: bool,
 }
 
 #[derive(Debug)]
@@ -274,6 +276,9 @@ pub struct Column<W: LayoutElement> {
     ///
     /// Managed by the [`ScrollingSpace`]; cleared when the column leaves its workspace.
     pinned: Option<PinSide>,
+
+    /// A pinned column folded away past its edge, giving its space to the other columns.
+    folded: bool,
 }
 
 /// Extra per-tile data.
@@ -604,10 +609,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // their own frame and title where they are.
             let card: Option<(f64, f64)> = None;
             let _ = gaps;
+            let badge = if col.pinned.is_some() {
+                super::titlebar::TitlebarBadge::Pinned
+            } else {
+                super::titlebar::TitlebarBadge::None
+            };
             for tile in &mut col.tiles {
                 tile.set_peek(peek);
                 tile.set_hidden_start(0.);
                 tile.set_card(card);
+                tile.set_badge(badge);
             }
             col.update_render_elements(is_active, view_rect);
         }
@@ -674,7 +685,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         let mut left = 0.;
         let mut right = 0.;
-        for data in &self.data {
+        for data in self.data.iter().filter(|data| !data.folded) {
             match data.pinned {
                 Some(PinSide::Left) => left = data.width + gaps,
                 Some(PinSide::Right) => right = data.width + gaps,
@@ -774,6 +785,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let gaps = self.options.layout.gaps;
         zip(self.column_xs(self.data.iter().copied()), &self.data)
             .map(|(x, data)| match data.pinned {
+                Some(side) if data.folded => {
+                    view_pos + folded_view_x(self.view_size, gaps, side, data.width)
+                }
                 Some(side) => view_pos + pinned_view_x(area, gaps, side, data.width),
                 None => x,
             })
@@ -831,6 +845,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             pinned: column.pinned,
             width,
             tabbed: column.display_mode == ColumnDisplay::Tabbed,
+            in_scratchpad: false,
         })
     }
 
@@ -860,6 +875,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         if let Some(other) = self.columns.iter().position(|c| c.pinned == Some(side)) {
             self.columns[other].pinned = None;
+            self.columns[other].folded = false;
             let col = &self.columns[other];
             self.data[other].update(col);
         }
@@ -918,6 +934,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let col = &mut self.columns[col_idx];
         cancel_resize_for_column(&mut self.interactive_resize, col);
         col.pinned = None;
+        col.folded = false;
         self.data[col_idx].update(col);
 
         self.update_scrolling_area(StripShift::None);
@@ -944,6 +961,78 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.unpin_column(window);
         } else {
             self.pin_column(window, side);
+        }
+    }
+
+    /// The folded pinned columns, by edge, with the window each shows.
+    pub fn folded_pinned_columns(&self) -> impl Iterator<Item = (PinSide, &W)> + '_ {
+        zip(&self.columns, &self.data).filter_map(|(col, data)| {
+            data.folded
+                .then_some(data.pinned)
+                .flatten()
+                .map(|side| (side, col.active_window()))
+        })
+    }
+
+    /// Folds the pinned column of `window` past its edge, or unfolds it. Without a window,
+    /// folds every pinned column when any of them is in view, and unfolds them all otherwise.
+    ///
+    /// A folded column gives its space to the scrolling columns and comes back when it is
+    /// focused.
+    pub fn toggle_pinned_column_folded(&mut self, window: Option<&W::Id>) -> bool {
+        let targets: Vec<usize> = match window {
+            Some(window) => self
+                .columns
+                .iter()
+                .position(|col| col.contains(window) && col.pinned.is_some())
+                .into_iter()
+                .collect(),
+            None => (0..self.columns.len())
+                .filter(|&idx| self.columns[idx].pinned.is_some())
+                .collect(),
+        };
+        if targets.is_empty() {
+            return false;
+        }
+        let fold = targets.iter().any(|&idx| !self.columns[idx].folded);
+        self.set_pinned_columns_folded(&targets, fold);
+        true
+    }
+
+    fn set_pinned_columns_folded(&mut self, targets: &[usize], fold: bool) {
+        let old_xs = self.column_view_xs();
+        for &idx in targets {
+            let col = &mut self.columns[idx];
+            cancel_resize_for_column(&mut self.interactive_resize, col);
+            col.folded = fold;
+            self.data[idx].update(col);
+        }
+
+        // Focus leaves a column that folds away, for the nearest scrolling column. Without one,
+        // the focused column stays in view.
+        let active = self.active_column_idx;
+        if fold && targets.contains(&active) {
+            let (start, end) = self.scrolling_range();
+            if start < end {
+                self.active_column_idx = active.clamp(start, end - 1);
+                self.activate_prev_column_on_removal = None;
+                self.view_offset_to_restore = None;
+            } else {
+                self.columns[active].folded = false;
+                self.data[active].update(&self.columns[active]);
+            }
+        }
+
+        self.update_scrolling_area(StripShift::None);
+        let active = self.active_column_idx;
+        let anchor = (self.data[active].pinned.is_none()).then(|| self.columns[active].id());
+        self.reposition_after_pinning(&old_xs, anchor);
+    }
+
+    /// Unfolds a folded pinned column about to take focus.
+    fn unfold_for_focus(&mut self, idx: usize) {
+        if self.columns.get(idx).is_some_and(|col| col.folded) {
+            self.set_pinned_columns_folded(&[idx], false);
         }
     }
 
@@ -1406,6 +1495,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     fn activate_column_with_anim_config(&mut self, idx: usize, config: niri_config::Animation) {
+        if self.active_column_idx == idx && self.columns.get(idx).is_some_and(|col| col.folded) {
+            self.unfold_for_focus(idx);
+            return;
+        }
         if self.active_column_idx == idx
             // During a DnD scroll, animate even when activating the same window, for DnD hold.
             && (self.columns.is_empty() || !self.view_offset.is_dnd_scroll())
@@ -1428,6 +1521,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.view_offset_to_restore = None;
             self.interactive_resize = None;
         }
+
+        // A folded pinned column comes back as it takes focus.
+        self.unfold_for_focus(idx);
     }
 
     pub(super) fn insert_position(&self, pos: Point<f64, Logical>) -> InsertPosition {
@@ -1446,6 +1542,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 continue;
             };
 
+            if data.folded {
+                continue;
+            }
             let col_x = self.pinned_view_x(side, data.width);
             if col_x - gaps / 2. <= pos.x && pos.x < col_x + data.width + gaps / 2. {
                 let (tile_idx, _) = self.columns[col_idx].closest_tile_gap(y);
@@ -1624,6 +1723,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // A column coming from elsewhere does not bring its pin along.
         column.pinned = None;
+        column.folded = false;
         column.update_config(
             self.view_size,
             self.working_area,
@@ -1833,6 +1933,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // A column leaving the workspace (or merging into another column) is no longer pinned.
         column.pinned = None;
+        column.folded = false;
 
         // While a pinned column was focused, the view was relative to the start of the strip (see
         // view_anchor_x()). The code below treats the view as relative to the removed column's X
@@ -1912,6 +2013,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             StripShift::None
         };
         self.sync_scrolling_area(shift);
+
+        // Focus may have fallen to a folded pinned column; it comes back.
+        self.unfold_for_focus(self.active_column_idx);
 
         column
     }
@@ -3110,6 +3214,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let dummy = ColumnData {
             width: 0.,
             pinned: None,
+            folded: false,
         };
         let data = data.chain(iter::once(dummy));
 
@@ -4623,7 +4728,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.parent_area
     }
 
-    #[cfg(test)]
+    /// The working area of the scrolling columns, which leaves out pinned columns in view.
     pub fn working_area(&self) -> Rectangle<f64, Logical> {
         self.working_area
     }
@@ -4819,6 +4924,7 @@ impl ColumnData {
         let mut rv = Self {
             width: 0.,
             pinned: None,
+            folded: false,
         };
         rv.update(column);
         rv
@@ -4827,6 +4933,7 @@ impl ColumnData {
     pub fn update<W: LayoutElement>(&mut self, column: &Column<W>) {
         self.width = column.width();
         self.pinned = column.pinned_in_place();
+        self.folded = self.pinned.is_some() && column.folded;
     }
 }
 
@@ -4921,6 +5028,7 @@ impl<W: LayoutElement> Column<W> {
             options,
             id: ColumnId::next(),
             pinned: None,
+            folded: false,
         };
 
         let pending_sizing_mode = tile.window().pending_sizing_mode();
@@ -4959,6 +5067,11 @@ impl<W: LayoutElement> Column<W> {
     /// Returns the edge this column is drawn at: its pin, while it is in the normal sizing mode.
     ///
     /// Fullscreen and maximized pinned columns scroll at their end of the strip instead.
+    /// Whether the column is pinned to an edge and stays there, out of the scrolling strip.
+    pub fn is_pinned_in_place(&self) -> bool {
+        self.pinned_in_place().is_some()
+    }
+
     fn pinned_in_place(&self) -> Option<PinSide> {
         self.pinned.filter(|_| self.sizing_mode().is_normal())
     }
@@ -6621,6 +6734,14 @@ fn compute_new_view_offset(
 }
 
 /// Returns the X of a column pinned in place, in view coordinates.
+/// Returns the X of a folded pinned column, just past its edge of the view, in view coordinates.
+fn folded_view_x(view: Size<f64, Logical>, gaps: f64, side: PinSide, width: f64) -> f64 {
+    match side {
+        PinSide::Left => -width - gaps,
+        PinSide::Right => view.w + gaps,
+    }
+}
+
 fn pinned_view_x(area: Rectangle<f64, Logical>, gaps: f64, side: PinSide, width: f64) -> f64 {
     match side {
         PinSide::Left => area.loc.x + gaps,

@@ -38,6 +38,8 @@ pub struct WindowRule {
     #[knuffel(child, unwrap(argument, str))]
     pub open_pinned: Option<PinSide>,
     #[knuffel(child, unwrap(argument))]
+    pub open_in_scratchpad: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
     pub on_xdg_activate: Option<OnXdgActivate>,
 
     // Rules applied dynamically.

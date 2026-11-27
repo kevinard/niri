@@ -12,6 +12,7 @@ use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
 use super::scrolling::ColumnWidth;
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
 use super::workspace::{InteractiveResize, ResolvedSize};
+use super::{snap_edge, SnapLines};
 use super::{
     ConfigureIntent, InteractiveResizeData, LayoutElement, Options, RemovedTile, SizeFrac,
 };
@@ -19,6 +20,7 @@ use crate::animation::{Animation, Clock};
 use crate::layout::RenderLayer;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::RenderCtx;
 use crate::utils::transaction::TransactionBlocker;
@@ -68,12 +70,22 @@ pub struct FloatingSpace<W: LayoutElement> {
 
     /// Configurable properties of the layout.
     options: Rc<Options>,
+
+    /// Whether a scratchpad window has focus, which dims everything behind the scratchpad.
+    dim_target: bool,
+    /// The fade of that dimming.
+    dim_anim: Option<Animation>,
+    dim_buffer: SolidColorBuffer,
 }
+
+/// How dark the dimming behind a focused scratchpad gets.
+const SCRATCHPAD_DIM: f32 = 0.28;
 
 niri_render_elements! {
     FloatingSpaceRenderElement<R> => {
         Tile = TileRenderElement<R>,
         ClosingWindow = ClosingWindowRenderElement,
+        Dim = SolidColorRenderElement,
     }
 }
 
@@ -219,7 +231,40 @@ impl<W: LayoutElement> FloatingSpace<W> {
             scale,
             clock,
             options,
+            dim_target: false,
+            dim_anim: None,
+            dim_buffer: SolidColorBuffer::new(view_size, [0., 0., 0., 1.]),
         }
+    }
+
+    /// How far the dimming behind a focused scratchpad has faded in.
+    fn dim_value(&self) -> f64 {
+        match &self.dim_anim {
+            Some(anim) => anim.clamped_value().clamp(0., 1.),
+            None if self.dim_target => 1.,
+            None => 0.,
+        }
+    }
+
+    fn update_dim(&mut self, is_active: bool) {
+        let target = is_active
+            && self.active_window_id.as_ref().is_some_and(|id| {
+                self.tiles.iter().any(|tile| {
+                    tile.window().id() == id && tile.is_scratchpad() && !tile.is_hidden()
+                })
+            });
+        if target == self.dim_target {
+            return;
+        }
+        let from = self.dim_value();
+        self.dim_target = target;
+        self.dim_anim = Some(Animation::new(
+            self.clock.clone(),
+            from,
+            if target { 1. } else { 0. },
+            0.,
+            self.options.animations.window_movement.0,
+        ));
     }
 
     pub fn update_config(
@@ -256,10 +301,16 @@ impl<W: LayoutElement> FloatingSpace<W> {
             closing.advance_animations();
             closing.are_animations_ongoing()
         });
+
+        if self.dim_anim.as_ref().is_some_and(|anim| anim.is_done()) {
+            self.dim_anim = None;
+        }
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.tiles.iter().any(Tile::are_animations_ongoing) || !self.closing_windows.is_empty()
+        self.tiles.iter().any(Tile::are_animations_ongoing)
+            || !self.closing_windows.is_empty()
+            || self.dim_anim.is_some()
     }
 
     pub fn are_transitions_ongoing(&self) -> bool {
@@ -272,6 +323,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
         view_rect: Rectangle<f64, Logical>,
         layer: RenderLayer,
     ) {
+        if layer.is_normal() {
+            self.update_dim(is_active);
+            self.dim_buffer.resize(self.view_size);
+        }
+
         let active = self.active_window_id.clone();
         for (tile, offset) in self.tiles_with_offsets_mut() {
             // Skip tiles belonging to a different render layer.
@@ -284,6 +340,11 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
             let mut tile_view_rect = view_rect;
             tile_view_rect.loc -= offset + tile.render_offset();
+            tile.set_badge(if tile.is_scratchpad() {
+                super::titlebar::TitlebarBadge::Scratchpad
+            } else {
+                super::titlebar::TitlebarBadge::Floating
+            });
             tile.update_render_elements(is_active, tile_view_rect);
         }
     }
@@ -400,9 +461,10 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
     pub fn active_window(&self) -> Option<&W> {
         let id = self.active_window_id.as_ref()?;
+        // A window hidden in the scratchpad never has focus.
         self.tiles
             .iter()
-            .find(|tile| tile.window().id() == id)
+            .find(|tile| tile.window().id() == id && !tile.is_hidden())
             .map(Tile::window)
     }
 
@@ -410,8 +472,13 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let id = self.active_window_id.as_ref()?;
         self.tiles
             .iter_mut()
-            .find(|tile| tile.window().id() == id)
+            .find(|tile| tile.window().id() == id && !tile.is_hidden())
             .map(Tile::window_mut)
+    }
+
+    /// Whether any window is shown, rather than hidden in the scratchpad.
+    pub fn has_shown_window(&self) -> bool {
+        self.tiles.iter().any(|tile| !tile.is_hidden())
     }
 
     pub fn has_window(&self, id: &W::Id) -> bool {
@@ -524,6 +591,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
     fn remove_tile_by_idx(&mut self, idx: usize) -> RemovedTile<W> {
         let mut tile = self.tiles.remove(idx);
         let data = self.data.remove(idx);
+        // Hiding belongs to this space; wherever the window goes, it is shown.
+        tile.set_hidden(false);
 
         if self.tiles.is_empty() {
             self.active_window_id = None;
@@ -589,11 +658,36 @@ impl<W: LayoutElement> FloatingSpace<W> {
             return false;
         };
 
+        // Focusing a window hidden in the scratchpad shows it where it was.
+        self.tiles[idx].set_hidden(false);
+
         self.raise_window(idx, 0);
         self.active_window_id = Some(id.clone());
         self.bring_up_descendants_of(0);
 
         true
+    }
+
+    /// Hides a window of the scratchpad. Another shown window becomes active, if there is one.
+    pub fn hide_window(&mut self, id: &W::Id) -> bool {
+        let Some(idx) = self.idx_of(id) else {
+            return false;
+        };
+        self.tiles[idx].set_hidden(true);
+        if self.active_window_id.as_ref() == Some(id) {
+            if let Some(tile) = self.tiles.iter().find(|tile| !tile.is_hidden()) {
+                self.active_window_id = Some(tile.window().id().clone());
+            }
+        }
+        true
+    }
+
+    /// Whether the active window is shown, rather than hidden in the scratchpad.
+    pub fn active_window_is_shown(&self) -> bool {
+        self.active_window_id
+            .as_ref()
+            .and_then(|id| self.idx_of(id))
+            .is_some_and(|idx| !self.tiles[idx].is_hidden())
     }
 
     fn raise_window(&mut self, from_idx: usize, to_idx: usize) {
@@ -860,7 +954,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let center = self.data[active_idx].center();
 
         let result = zip(&self.tiles, &self.data)
-            .filter(|(tile, _)| tile.window().id() != active_id)
+            .filter(|(tile, _)| tile.window().id() != active_id && !tile.is_hidden())
             .map(|(tile, data)| (tile, distance(center, data.center())))
             .filter(|(_, dist)| *dist > 0.)
             .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b));
@@ -892,6 +986,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_leftmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.is_hidden())
             .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -902,6 +997,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_rightmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.is_hidden())
             .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -912,6 +1008,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_topmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.is_hidden())
             .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -922,6 +1019,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_bottommost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.is_hidden())
             .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -1097,6 +1195,15 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn dim_element(&self, view_rect: Rectangle<f64, Logical>, dim: f64) -> SolidColorRenderElement {
+        SolidColorRenderElement::from_buffer(
+            &self.dim_buffer,
+            view_rect.loc,
+            SCRATCHPAD_DIM * dim as f32,
+            smithay::backend::renderer::element::Kind::Unspecified,
+        )
+    }
+
     pub fn render<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
@@ -1119,7 +1226,27 @@ impl<W: LayoutElement> FloatingSpace<W> {
         }
 
         let active = self.active_window_id.clone();
-        for (tile, tile_pos) in self.tiles_with_render_positions() {
+        // While a scratchpad window has focus, the scratchpad stands out over everything
+        // behind it, which dims: its windows draw first, then the dimming, then the rest.
+        let dim = if layer.is_normal() {
+            self.dim_value()
+        } else {
+            0.
+        };
+        let mut tiles: Vec<_> = self
+            .tiles_with_render_positions()
+            .filter(|(tile, _)| !tile.is_hidden())
+            .collect();
+        if dim > 0. {
+            tiles.sort_by_key(|(tile, _)| !tile.is_scratchpad());
+        }
+        let mut dimmed = dim <= 0.;
+        // Windows hidden in the scratchpad are not drawn.
+        for (tile, tile_pos) in tiles {
+            if !dimmed && !tile.is_scratchpad() {
+                dimmed = true;
+                push(self.dim_element(view_rect, dim).into());
+            }
             // Skip tiles belonging to a different render layer.
             if layer.is_normal() == tile.is_moving_between_workspaces() {
                 continue;
@@ -1132,6 +1259,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
             tile.render(ctx.r(), tile_pos, xray_pos, focus_ring, &mut |elem| {
                 push(elem.into())
             });
+        }
+        if !dimmed {
+            push(self.dim_element(view_rect, dim).into());
         }
     }
 
@@ -1158,6 +1288,60 @@ impl<W: LayoutElement> FloatingSpace<W> {
         true
     }
 
+    /// Adjusts a resize so that the dragged edges snap to the edges of the working area and of
+    /// the other shown floating windows.
+    fn snap_resize(
+        &self,
+        window: &W::Id,
+        edges: ResizeEdge,
+        original_window_size: Size<f64, Logical>,
+        mut delta: Point<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        let Some(idx) = self.idx_of(window) else {
+            return delta;
+        };
+        let gaps = self.options.layout.gaps;
+        let area = self.working_area;
+        let mut xs = SnapLines::default();
+        let mut ys = SnapLines::default();
+        xs.edges
+            .extend([area.loc.x + gaps, area.loc.x + area.size.w - gaps]);
+        ys.edges
+            .extend([area.loc.y + gaps, area.loc.y + area.size.h - gaps]);
+        for (other, data) in zip(&self.tiles, &self.data) {
+            if other.window().id() == window || other.is_hidden() {
+                continue;
+            }
+            let (pos, size) = (data.logical_pos, data.size);
+            xs.edges
+                .extend([pos.x, pos.x + size.w, pos.x - gaps, pos.x + size.w + gaps]);
+            ys.edges
+                .extend([pos.y, pos.y + size.h, pos.y - gaps, pos.y + size.h + gaps]);
+        }
+
+        // The tile around the window takes its decorations along.
+        let data = &self.data[idx];
+        let extra = data.size - self.tiles[idx].window_size();
+        if edges.contains(ResizeEdge::RIGHT) {
+            let right = data.logical_pos.x + original_window_size.w + delta.x + extra.w;
+            delta.x += snap_edge(right, &xs);
+        } else if edges.contains(ResizeEdge::LEFT) {
+            // The right edge stays put while the left one moves.
+            let right = data.logical_pos.x + data.size.w;
+            let left = right - (original_window_size.w - delta.x + extra.w);
+            delta.x += snap_edge(left, &xs);
+        }
+        if edges.contains(ResizeEdge::BOTTOM) {
+            let bottom = data.logical_pos.y + original_window_size.h + delta.y + extra.h;
+            delta.y += snap_edge(bottom, &ys);
+        } else if edges.contains(ResizeEdge::TOP) {
+            let bottom = data.logical_pos.y + data.size.h;
+            let top = bottom - (original_window_size.h - delta.y + extra.h);
+            delta.y += snap_edge(top, &ys);
+        }
+        delta
+    }
+
     pub fn interactive_resize_update(
         &mut self,
         window: &W::Id,
@@ -1173,6 +1357,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
         let original_window_size = resize.original_window_size;
         let edges = resize.data.edges;
+        let delta = self.snap_resize(window, edges, original_window_size, delta);
 
         if edges.intersects(ResizeEdge::LEFT_RIGHT) {
             let mut dx = delta.x;

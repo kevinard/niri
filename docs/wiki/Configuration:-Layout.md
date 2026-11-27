@@ -38,11 +38,15 @@ the configuration.
   `"maximize"` and `"close"`. Repeated names are ignored, and `buttons` without
   arguments hides them all. `buttons-side` puts them on the `"right"` (default)
   or `"left"` edge.
-- The `"layout"` button opens a menu under it, also after the pointer rests on
-  it for a moment. Its tiles set the column to a third, half, two thirds or the
-  full width, pin the column to the left or right edge (or unpin it), make the
-  window floating or tiled, and show the column as tabs. A floating window offers
-  only tiling. Click outside the menu or press Escape to close it.
+- The `"layout"` button shows how the window is arranged: a pin for a pinned
+  column, two windows for a floating one, and a window dropping from the top
+  edge for a scratchpad window. It opens a menu under it, also after the pointer
+  rests on it for a moment. Its tiles set the column to a third, half, two
+  thirds or the full width, pin the column to the left or right edge (or unpin
+  it), make the window floating or tiled, show the column as tabs, fold a pinned
+  column past its edge, and add the window to the scratchpad or take it out. A
+  floating window offers only tiling and the scratchpad. Click outside the menu
+  or press Escape to close it.
 - `double-click` is `"maximize"` (default) or `"none"`.
 - `text-color` colors the title and button icons; `inactive-text-color` replaces
   it for unfocused windows. `button-hover-color` is the circle behind a hovered
@@ -671,14 +675,16 @@ When the window strip of `clip-scroll-to-work-area` shows:
 - `"always"` (default) keeps it in a row reserved above the columns.
 - `"on-demand"` reserves no row. The strip slides down over the windows when the
   pointer touches the top edge of the work area, and slides away once the
-  pointer moves below it or a window is chosen from it. Moving between windows
-  with the keyboard shows it until a moment after the last move. The
-  `toggle-window-bar` action shows or hides it from the keyboard; shown that way,
-  it stays until toggled again or a window is chosen. While it is hidden, a
-  slim handle appears in the gap at the left or right edge as the pointer nears
-  it, when windows lie beyond that edge. Moving the pointer into the gap opens
-  the handle into an arrow naming the next window, which reaches the edge; click
-  it anywhere, up to the edge, to bring that window into view. Until then the handle stays clear of the windows and never takes
-  their clicks.
+  pointer moves below it or a window is chosen from it. It shows over floating
+  windows too. Moving between windows with the keyboard shows it until a moment
+  after the last move. The `toggle-window-bar` action shows or hides it from the
+  keyboard; shown that way, it stays until toggled again or a window is chosen.
+  While it is hidden, a slim handle appears in the gap at the left or right edge
+  as the pointer nears it, when windows lie beyond that edge; beside a pinned
+  column, that edge is the pinned column's inner side, since columns scroll
+  under it. Moving the pointer into the gap opens the handle into an arrow
+  naming the next window, which reaches the edge; click it anywhere, up to the
+  edge, to bring that window into view. Until then the handle stays clear of the
+  windows and never takes their clicks.
 - `"off"` never shows it. Columns cut by a panel then show a card that brings
   them into view.

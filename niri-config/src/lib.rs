@@ -2336,6 +2336,7 @@ mod tests {
                         true,
                     ),
                     open_pinned: None,
+                    open_in_scratchpad: None,
                     on_xdg_activate: Some(
                         Ignore,
                     ),

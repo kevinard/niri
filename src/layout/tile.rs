@@ -49,6 +49,12 @@ pub struct Tile<W: LayoutElement> {
     titlebar_tabs: Option<TitlebarTabs>,
     /// Whether the tile is mostly scrolled out of the visible area.
     peek: bool,
+    /// The window belongs to the scratchpad: floating, shown and hidden on demand.
+    scratchpad: bool,
+    /// The arrangement the titlebar's layout button shows.
+    badge: super::titlebar::TitlebarBadge,
+    /// Hidden away in the scratchpad: not drawn, not under the pointer, not focusable.
+    hidden: bool,
     /// Width of the tile's start that is scrolled out of the visible area.
     hidden_start: f64,
     /// The horizontal range of the tile, in tile coordinates, that remains in view when it is
@@ -216,6 +222,9 @@ impl<W: LayoutElement> Tile<W> {
             titlebar: Titlebar::default(),
             titlebar_tabs: None,
             peek: false,
+            scratchpad: false,
+            badge: Default::default(),
+            hidden: false,
             hidden_start: 0.,
             card: None,
             last_titlebar_height: 0.,
@@ -526,6 +535,7 @@ impl<W: LayoutElement> Tile<W> {
             ),
             active: is_active,
             maximized: self.sizing_mode.is_maximized(),
+            badge: self.badge,
             interaction: self.window.titlebar_interaction(),
             tabs: self.titlebar_tabs.clone(),
             app_id: self.window.with_app_id(str::to_owned),
@@ -983,6 +993,7 @@ impl<W: LayoutElement> Tile<W> {
             tile_pos_in_workspace_view: None,
             window_offset_in_tile: self.window_loc().into(),
             pinned: None,
+            in_scratchpad: self.scratchpad,
         }
     }
 
@@ -1194,6 +1205,26 @@ impl<W: LayoutElement> Tile<W> {
     }
 
     /// Marks a tile that is mostly scrolled out of view.
+    pub fn set_badge(&mut self, badge: super::titlebar::TitlebarBadge) {
+        self.badge = badge;
+    }
+
+    pub fn is_scratchpad(&self) -> bool {
+        self.scratchpad
+    }
+
+    pub fn set_scratchpad(&mut self, scratchpad: bool) {
+        self.scratchpad = scratchpad;
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+    }
+
     pub fn set_peek(&mut self, peek: bool) {
         self.peek = peek;
     }
