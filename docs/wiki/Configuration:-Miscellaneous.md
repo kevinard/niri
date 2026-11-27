@@ -280,7 +280,7 @@ overview {
 Present each zoomed-out workspace as a card.
 
 Layer surfaces placed [within the backdrop](./Configuration:-Layer-Rules.md#place-within-backdrop), such as a wallpaper, are drawn inside every workspace as well as in the backdrop while the overview is open, so each workspace shows the wallpaper behind its windows, like it does on the desktop.
-The backdrop around the workspaces dims towards the `backdrop-color`, and a label above each workspace names it: its configured name, or "Workspace" and its number; the empty workspace at the end reads "New workspace".
+The workspaces shrink towards the middle of the working area, so they stay centred beside a side panel, the backdrop around them dims towards the `backdrop-color`, and a label above each workspace names it: its configured name, or "Workspace" and its number, with "Empty" for the empty workspace at the end.
 
 Outside the overview, nothing changes: the wallpaper stays still in the backdrop during workspace switches.
 
