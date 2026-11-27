@@ -2231,6 +2231,7 @@ mod tests {
                     },
                 },
                 emit_typed_text: false,
+                workspace_cards: false,
             },
             environment: Environment(
                 [

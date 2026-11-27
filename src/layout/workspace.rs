@@ -94,6 +94,9 @@ pub struct Workspace<W: LayoutElement> {
     /// This workspace's shadow in the overview.
     shadow: Shadow,
 
+    /// Corner radius of the workspace as an overview card, before the overview zoom.
+    card_radius: f64,
+
     /// This workspace's background.
     background_buffer: SolidColorBuffer,
 
@@ -283,6 +286,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
+            card_radius: 0.,
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             output: Some(output),
             clock,
@@ -346,6 +350,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_size,
             working_area,
             shadow: Shadow::new(shadow_config),
+            card_radius: 0.,
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             clock,
             base_options,
@@ -393,6 +398,11 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.are_transitions_ongoing() || self.floating.are_transitions_ongoing()
     }
 
+    /// Rounds the workspace's shadow to match its overview card.
+    pub(super) fn set_card_radius(&mut self, radius: f64) {
+        self.card_radius = radius;
+    }
+
     pub fn update_render_elements(&mut self, is_active: bool, layer: RenderLayer) {
         self.scrolling
             .update_render_elements(is_active && !self.floating_is_active.get(), layer);
@@ -408,7 +418,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.shadow.update_render_elements(
                 self.view_size,
                 true,
-                CornerRadius::default(),
+                CornerRadius::from(self.card_radius as f32),
                 self.scale.fractional_scale(),
                 1.,
             );

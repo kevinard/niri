@@ -18,9 +18,10 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::layout_menu::{self, LayoutMenuItem, LayoutMenuState, LayoutMenuTexture};
 use super::overview_caption::{
-    caption_background, caption_ink, measure_bar_label, set_caption_font, tint_caption, BarIcon,
-    BarPillState, LabelKind, PreviewLabel, BAR_CARD_PADDING, BAR_CARD_TITLE_HEIGHT,
-    BAR_PILL_HEIGHT, BAR_SHADOW_MARGIN, BAR_TRAY_HEIGHT, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
+    caption_background, caption_ink, is_light, measure_bar_label, set_caption_font, tint_caption,
+    BarIcon, BarPillState, LabelKind, PreviewLabel, BAR_CARD_PADDING, BAR_CARD_TITLE_HEIGHT,
+    BAR_PILL_HEIGHT, BAR_SHADOW_MARGIN, BAR_TRAY_HEIGHT, HEIGHT as WORKSPACE_LABEL_HEIGHT,
+    PADDING as WORKSPACE_LABEL_INSET, SCROLL_BUTTON_HEIGHT, SCROLL_CARD_HEIGHT,
 };
 use super::scrolling::{navigation_strip_fits, Column, ColumnWidth, NAVIGATION_STRIP_HEIGHT};
 use super::tile::Tile;
@@ -54,6 +55,9 @@ use crate::utils::{
 const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
 
 const MAX_NAVIGATION_TITLES: usize = 8;
+
+/// Corner radius of a workspace card in the overview, on screen.
+const WORKSPACE_CARD_RADIUS: f64 = 16.;
 /// How long a window bar shown on demand stays after the last keyboard move between windows.
 const NAVIGATION_BAR_LINGER: Duration = Duration::from_millis(1200);
 /// How close to the edge of the scrolling area the pointer brings out a scroll arrow, which
@@ -145,6 +149,8 @@ pub struct Monitor<W: LayoutElement> {
     layout_menu_texture: LayoutMenuTexture,
     layer_action_label: PreviewLabel,
     scratchpad_label: PreviewLabel,
+    /// Names above the zoomed-out workspaces with `overview { workspace-cards; }`.
+    workspace_labels: RefCell<Vec<PreviewLabel>>,
     /// How many windows the scratchpad holds, on every output.
     scratchpad_count: Cell<usize>,
     scroll_cue_labels: [PreviewLabel; 2],
@@ -640,6 +646,7 @@ impl<W: LayoutElement> Monitor<W> {
             layout_menu_texture: LayoutMenuTexture::default(),
             layer_action_label: PreviewLabel::default(),
             scratchpad_label: PreviewLabel::default(),
+            workspace_labels: RefCell::new(Vec::new()),
             scratchpad_count: Cell::new(0),
             scroll_cue_labels: Default::default(),
             folded_tab_labels: Default::default(),
@@ -1428,7 +1435,9 @@ impl<W: LayoutElement> Monitor<W> {
             ws.update_render_elements(is_active, RenderLayer::MovingBetweenWorkspaces);
         }
 
+        let card_radius = self.workspace_card_radius();
         for (ws, geo) in self.workspaces_with_render_geo_mut(true) {
+            ws.set_card_radius(card_radius);
             ws.update_render_elements(is_active, RenderLayer::Normal);
 
             if Some(ws.id()) == insert_hint_ws_id {
@@ -4139,6 +4148,101 @@ impl<W: LayoutElement> Monitor<W> {
                 );
                 push(elem);
             });
+        }
+    }
+
+    /// How far the overview presents workspaces as cards, from 0 (closed) to 1 (open).
+    ///
+    /// `None` outside the overview, or when `overview { workspace-cards; }` is off.
+    pub fn workspace_cards_progress(&self) -> Option<f64> {
+        if !self.options.overview.workspace_cards {
+            return None;
+        }
+        self.overview_progress
+            .as_ref()
+            .map(|p| p.clamped_value().clamp(0., 1.))
+    }
+
+    /// Corner radius of the workspace cards, in workspace coordinates (before the overview
+    /// zoom). It grows with the overview, so the desktop opens and closes square.
+    pub fn workspace_card_radius(&self) -> f64 {
+        self.workspace_cards_progress()
+            .map_or(0., |p| WORKSPACE_CARD_RADIUS * p / self.overview_zoom())
+    }
+
+    /// Labels above the zoomed-out workspaces: a workspace's name, or "Workspace" and its
+    /// number, and "New workspace" for the empty one at the end.
+    pub fn render_workspace_labels<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let Some(progress) = self.workspace_cards_progress() else {
+            return;
+        };
+        // Labels appear once the workspaces have shrunk enough to leave room above them.
+        let alpha = ((progress - 0.4) / 0.6).clamp(0., 1.) as f32;
+        if alpha <= 0. {
+            return;
+        }
+
+        let _span = tracy_client::span!("Monitor::render_workspace_labels");
+
+        let scale = self.scale.fractional_scale();
+        let backdrop = self.options.overview.backdrop_color;
+        let ink = if is_light(backdrop) {
+            Color::new_unpremul(0.06, 0.13, 0.11, 1.)
+        } else {
+            Color::new_unpremul(0.95, 0.98, 0.96, 1.)
+        };
+        let gap = self.workspace_gap(self.overview_zoom());
+        // Too little room between workspaces for a line of text.
+        if gap < WORKSPACE_LABEL_HEIGHT + 4. {
+            return;
+        }
+
+        let last = self.workspaces.len().saturating_sub(1);
+        let mut labels = self.workspace_labels.borrow_mut();
+        labels.resize_with(self.workspaces.len(), PreviewLabel::default);
+        for ((idx, ws), geo) in self.workspaces_with_render_geo_idx() {
+            let text = match ws.name() {
+                Some(name) => name.clone(),
+                None if idx == last && !ws.has_windows() => "New workspace".to_owned(),
+                None => format!("Workspace {}", idx + 1),
+            };
+            let emphasis = if idx == self.active_workspace_idx {
+                1.
+            } else {
+                0.68
+            };
+            // The caption pads its text; align the text, not the texture, with the card.
+            let loc = Point::from((
+                geo.loc.x - WORKSPACE_LABEL_INSET,
+                geo.loc.y - WORKSPACE_LABEL_HEIGHT - (gap - WORKSPACE_LABEL_HEIGHT).min(12.) / 2.,
+            ));
+            let width = geo.size.w.min(420.) + WORKSPACE_LABEL_INSET;
+            if let Some(label) = labels[idx].render_with_ink(
+                renderer.as_gles_renderer(),
+                text,
+                String::new(),
+                backdrop,
+                ink,
+                LabelKind::GroupTitle,
+                width,
+                scale,
+                loc,
+                alpha * emphasis,
+            ) {
+                push(RelocateRenderElement::from_element(
+                    RescaleRenderElement::from_element(
+                        MonitorInnerRenderElement::Caption(label),
+                        Point::default(),
+                        1.,
+                    ),
+                    Point::default(),
+                    Relocate::Relative,
+                ));
+            }
         }
     }
 
