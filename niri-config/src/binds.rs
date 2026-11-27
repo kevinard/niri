@@ -336,6 +336,12 @@ pub enum Action {
     PinColumn(#[knuffel(argument, str)] PinSide),
     UnpinColumn,
     TogglePinnedColumn(#[knuffel(argument, str)] PinSide),
+    ToggleWindowBar,
+    TogglePinnedColumnFolded,
+    ToggleScratchpad,
+    ToggleWindowInScratchpad,
+    #[knuffel(skip)]
+    ToggleWindowInScratchpadById(u64),
     CenterColumn,
     CenterWindow,
     #[knuffel(skip)]
@@ -638,6 +644,15 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::PinColumn { side } => Self::PinColumn(side),
             niri_ipc::Action::UnpinColumn {} => Self::UnpinColumn,
             niri_ipc::Action::TogglePinnedColumn { side } => Self::TogglePinnedColumn(side),
+            niri_ipc::Action::ToggleWindowBar {} => Self::ToggleWindowBar,
+            niri_ipc::Action::TogglePinnedColumnFolded {} => Self::TogglePinnedColumnFolded,
+            niri_ipc::Action::ToggleScratchpad {} => Self::ToggleScratchpad,
+            niri_ipc::Action::ToggleWindowInScratchpad { id: None } => {
+                Self::ToggleWindowInScratchpad
+            }
+            niri_ipc::Action::ToggleWindowInScratchpad { id: Some(id) } => {
+                Self::ToggleWindowInScratchpadById(id)
+            }
             niri_ipc::Action::CenterColumn {} => Self::CenterColumn,
             niri_ipc::Action::CenterWindow { id: None } => Self::CenterWindow,
             niri_ipc::Action::CenterWindow { id: Some(id) } => Self::CenterWindowById(id),

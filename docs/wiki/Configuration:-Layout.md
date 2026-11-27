@@ -34,9 +34,19 @@ the configuration.
   description.
 - `title-align` is `"left"` or `"center"`. A centered title moves aside rather
   than overlap the buttons.
-- `buttons` lists the buttons in their visual order: `"maximize"`, `"close"`, or
-  both. Repeated names are ignored, and `buttons` without arguments hides both.
-  `buttons-side` puts them on the `"right"` (default) or `"left"` edge.
+- `buttons` lists the buttons in their visual order, from `"layout"`,
+  `"maximize"` and `"close"`. Repeated names are ignored, and `buttons` without
+  arguments hides them all. `buttons-side` puts them on the `"right"` (default)
+  or `"left"` edge.
+- The `"layout"` button shows how the window is arranged: a pin for a pinned
+  column, two windows for a floating one, and a window dropping from the top
+  edge for a scratchpad window. It opens a menu under it, also after the pointer
+  rests on it for a moment. Its tiles set the column to a third, half, two
+  thirds or the full width, pin the column to the left or right edge (or unpin
+  it), make the window floating or tiled, show the column as tabs, fold a pinned
+  column past its edge, and add the window to the scratchpad or take it out. A
+  floating window offers only tiling and the scratchpad. Click outside the menu
+  or press Escape to close it.
 - `double-click` is `"maximize"` (default) or `"none"`.
 - `text-color` colors the title and button icons; `inactive-text-color` replaces
   it for unfocused windows. `button-hover-color` is the circle behind a hovered
@@ -635,3 +645,46 @@ layout {
     fullscreen-backdrop-color "transparent"
 }
 ```
+
+
+### `clip-scroll-to-work-area`
+
+```kdl
+layout { clip-scroll-to-work-area; }
+```
+
+Keep scrolling tiles and their controls within the work area reserved by panels.
+When the work area has room for a window strip, it lists the surrounding columns
+in layout order and marks the tiles currently in view. Hover over an offscreen
+window to preview which columns will come into view. Click a window to bring it
+into view and focus it. With both tiled and floating windows, the strip also
+offers a control to hide or show the floating layer when there is room.
+Floating, maximized and fullscreen windows retain their usual bounds.
+
+### `window-bar`
+
+```kdl
+layout {
+    clip-scroll-to-work-area
+    window-bar "on-demand"
+}
+```
+
+When the window strip of `clip-scroll-to-work-area` shows:
+
+- `"always"` (default) keeps it in a row reserved above the columns.
+- `"on-demand"` reserves no row. The strip slides down over the windows when the
+  pointer touches the top edge of the work area, and slides away once the
+  pointer moves below it or a window is chosen from it. It shows over floating
+  windows too. Moving between windows with the keyboard shows it until a moment
+  after the last move. The `toggle-window-bar` action shows or hides it from the
+  keyboard; shown that way, it stays until toggled again or a window is chosen.
+  While it is hidden, a slim handle appears in the gap at the left or right edge
+  as the pointer nears it, when windows lie beyond that edge; beside a pinned
+  column, that edge is the pinned column's inner side, since columns scroll
+  under it. Moving the pointer into the gap opens the handle into an arrow
+  naming the next window, which reaches the edge; click it anywhere, up to the
+  edge, to bring that window into view. Until then the handle stays clear of the
+  windows and never takes their clicks.
+- `"off"` never shows it. Columns cut by a panel then show a card that brings
+  them into view.

@@ -11,7 +11,9 @@ use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
 use super::opening_window::{OpenAnimation, OpeningWindowRenderElement};
 use super::shadow::Shadow;
-use super::titlebar::{FrameParams, Titlebar, TitlebarLayout, TitlebarPart, TitlebarRenderElement};
+use super::titlebar::{
+    FrameParams, Titlebar, TitlebarLayout, TitlebarPart, TitlebarRenderElement, TitlebarTabs,
+};
 use super::{
     HitType, LayoutElement, LayoutElementRenderElement, LayoutElementRenderSnapshot, Options,
     SizeFrac, RESIZE_ANIMATION_THRESHOLD,
@@ -43,6 +45,21 @@ pub struct Tile<W: LayoutElement> {
     window: W,
 
     titlebar: Titlebar,
+    /// Tabs shown in the titlebar while this tile is in a tabbed column.
+    titlebar_tabs: Option<TitlebarTabs>,
+    /// Whether the tile is mostly scrolled out of the visible area.
+    peek: bool,
+    /// The window belongs to the scratchpad: floating, shown and hidden on demand.
+    scratchpad: bool,
+    /// The arrangement the titlebar's layout button shows.
+    badge: super::titlebar::TitlebarBadge,
+    /// Hidden away in the scratchpad: not drawn, not under the pointer, not focusable.
+    hidden: bool,
+    /// Width of the tile's start that is scrolled out of the visible area.
+    hidden_start: f64,
+    /// The horizontal range of the tile, in tile coordinates, that remains in view when it is
+    /// partly scrolled away. The tile then draws as a complete card over that range.
+    card: Option<(f64, f64)>,
     /// Height from the previous commit, needed when a decoration mode changes during a resize.
     last_titlebar_height: f64,
 
@@ -203,6 +220,13 @@ impl<W: LayoutElement> Tile<W> {
         let mut tile = Self {
             window,
             titlebar: Titlebar::default(),
+            titlebar_tabs: None,
+            peek: false,
+            scratchpad: false,
+            badge: Default::default(),
+            hidden: false,
+            hidden_start: 0.,
+            card: None,
             last_titlebar_height: 0.,
             border: FocusRing::new(border_config.into()),
             focus_ring: FocusRing::new(focus_ring_config),
@@ -504,13 +528,18 @@ impl<W: LayoutElement> Tile<W> {
         let titlebar = (frame.size.h > 0.).then(|| FrameParams {
             layout: self.titlebar_layout(frame.size),
             scale: self.scale,
-            radius: self
-                .window
-                .geometry_corner_radius()
-                .scaled_by(1. - expanded_progress as f32),
+            radius: self.card_radius(
+                self.window
+                    .geometry_corner_radius()
+                    .scaled_by(1. - expanded_progress as f32),
+            ),
             active: is_active,
             maximized: self.sizing_mode.is_maximized(),
+            badge: self.badge,
             interaction: self.window.titlebar_interaction(),
+            tabs: self.titlebar_tabs.clone(),
+            app_id: self.window.with_app_id(str::to_owned),
+            accent: self.options.layout.border.active_color,
         });
         self.titlebar
             .update(&self.options.layout.titlebar, titlebar);
@@ -523,7 +552,11 @@ impl<W: LayoutElement> Tile<W> {
         // Do the inverse of tile_size() in order to handle the unfullscreen animation for windows
         // that were smaller than the fullscreen size, and therefore their animated_window_size() is
         // currently much smaller than the tile size.
-        let mut border_window_size = animated_tile_size;
+        let card = self.card_range();
+        let decorated_size = card.map_or(animated_tile_size, |(start, end)| {
+            Size::from((end - start, animated_tile_size.h))
+        });
+        let mut border_window_size = decorated_size;
         border_window_size.w -= border_width * 2.;
         border_window_size.h -= border_width * 2.;
 
@@ -539,11 +572,12 @@ impl<W: LayoutElement> Tile<W> {
         //
         // Later, when windows get the surface shape protocol with radii, this issue will happen
         // when that changes between animated commits.
-        let radius = self
-            .window
-            .geometry_corner_radius()
-            .expanded_by(border_width as f32)
-            .scaled_by(1. - expanded_progress as f32);
+        let radius = self.card_radius(
+            self.window
+                .geometry_corner_radius()
+                .expanded_by(border_width as f32)
+                .scaled_by(1. - expanded_progress as f32),
+        );
         self.border.update_render_elements(
             border_window_size,
             is_active,
@@ -561,12 +595,14 @@ impl<W: LayoutElement> Tile<W> {
         let radius = if self.visual_border_width().is_some() {
             radius
         } else {
-            self.window
-                .geometry_corner_radius()
-                .scaled_by(1. - expanded_progress as f32)
+            self.card_radius(
+                self.window
+                    .geometry_corner_radius()
+                    .scaled_by(1. - expanded_progress as f32),
+            )
         };
         self.shadow.update_render_elements(
-            animated_tile_size,
+            decorated_size,
             is_active,
             radius,
             self.scale,
@@ -580,7 +616,7 @@ impl<W: LayoutElement> Tile<W> {
         };
         let radius = radius.expanded_by(self.focus_ring.width() as f32);
         self.focus_ring.update_render_elements(
-            animated_tile_size,
+            decorated_size,
             is_active,
             !draw_focus_ring_with_background,
             self.window.is_urgent(),
@@ -957,6 +993,7 @@ impl<W: LayoutElement> Tile<W> {
             tile_pos_in_workspace_view: None,
             window_offset_in_tile: self.window_loc().into(),
             pinned: None,
+            in_scratchpad: self.scratchpad,
         }
     }
 
@@ -1145,11 +1182,124 @@ impl<W: LayoutElement> Tile<W> {
     }
 
     fn titlebar_layout(&self, size: Size<f64, Logical>) -> TitlebarLayout {
-        TitlebarLayout::new(
+        let mut layout = TitlebarLayout::new(
             &self.options.layout.titlebar,
             size,
             !self.window.is_fixed_size(),
-        )
+        );
+        // A window that mostly lies beyond the edge of the screen shows no detached buttons.
+        if self.peek {
+            layout.buttons.clear();
+        }
+        let icon_size = (16. * self.scale).round() as i32;
+        let has_icon = self.titlebar_tabs.is_none()
+            && self
+                .window
+                .with_app_id(|app_id| crate::app_icons::icon(app_id, icon_size).is_some());
+        if has_icon {
+            layout = layout.with_icon();
+        }
+        // Keep the title in view while the start of the window is scrolled away.
+        layout.keep_text_after(self.hidden_start);
+        layout
+    }
+
+    /// Marks a tile that is mostly scrolled out of view.
+    pub fn set_badge(&mut self, badge: super::titlebar::TitlebarBadge) {
+        self.badge = badge;
+    }
+
+    pub fn is_scratchpad(&self) -> bool {
+        self.scratchpad
+    }
+
+    pub fn set_scratchpad(&mut self, scratchpad: bool) {
+        self.scratchpad = scratchpad;
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+    }
+
+    pub fn set_peek(&mut self, peek: bool) {
+        self.peek = peek;
+    }
+
+    /// Sets the part of the tile that remains in view, or `None` when it is all in view.
+    pub fn set_card(&mut self, card: Option<(f64, f64)>) {
+        self.card = card;
+    }
+
+    /// The part of the tile drawn as a card, if it is partly out of view.
+    fn card_range(&self) -> Option<(f64, f64)> {
+        if !self.sizing_mode.is_normal() {
+            return None;
+        }
+        let (start, end) = self.card?;
+        let width = self.animated_tile_size().w;
+        let start = start.clamp(0., width);
+        let end = end.clamp(start, width);
+        (end - start >= 1. && (start > 0.5 || end < width - 0.5)).then_some((start, end))
+    }
+
+    /// `radius` with square corners on the sides where the card is clipped.
+    fn card_radius(&self, mut radius: CornerRadius) -> CornerRadius {
+        if let Some((start, end)) = self.card_range() {
+            if start > 0.5 {
+                radius.top_left = 0.;
+                radius.bottom_left = 0.;
+            }
+            if end < self.animated_tile_size().w - 0.5 {
+                radius.top_right = 0.;
+                radius.bottom_right = 0.;
+            }
+        }
+        radius
+    }
+
+    /// Records how much of the tile's start is scrolled out of view.
+    pub fn set_hidden_start(&mut self, hidden: f64) {
+        self.hidden_start = hidden.max(0.);
+    }
+
+    /// Shows the windows of a tabbed column as tabs in this tile's titlebar.
+    pub fn set_titlebar_tabs(&mut self, tabs: Option<TitlebarTabs>) {
+        self.titlebar_tabs = tabs;
+    }
+
+    /// Whether this tile shows its column's tabs in its titlebar.
+    pub fn has_titlebar_tabs(&self) -> bool {
+        self.titlebar_tabs.is_some() && self.titlebar_height() > 0.
+    }
+
+    /// The titlebar tab under `point`, relative to the tile.
+    pub fn titlebar_tab_hit(&self, point: Point<f64, Logical>) -> Option<usize> {
+        let tabs = self.titlebar_tabs.as_ref()?;
+        let point = point - self.bob_offset();
+        let frame = self.titlebar_geometry();
+        if frame.size.h <= 0. {
+            return None;
+        }
+        let point = point - frame.loc;
+        self.titlebar_layout(frame.size)
+            .tab_rects(&tabs.natural_widths(&self.options.layout.titlebar.font))
+            .iter()
+            .position(|rect| rect.contains(point))
+    }
+
+    /// The titlebar button `part`, relative to the tile, if the titlebar shows it.
+    pub fn titlebar_button_rect(&self, part: TitlebarPart) -> Option<Rectangle<f64, Logical>> {
+        let frame = self.titlebar_geometry();
+        if frame.size.h <= 0. {
+            return None;
+        }
+        let layout = self.titlebar_layout(frame.size);
+        let (_, rect) = layout.buttons.iter().find(|(p, _)| *p == part)?;
+        Some(Rectangle::new(frame.loc + rect.loc, rect.size))
     }
 
     fn titlebar_hit(&self, point: Point<f64, Logical>) -> Option<TitlebarPart> {
@@ -1175,10 +1325,18 @@ impl<W: LayoutElement> Tile<W> {
 
     fn titlebar_geometry(&self) -> Rectangle<f64, Logical> {
         let height = self.visual_titlebar_height();
-        Rectangle::new(
+        let mut frame = Rectangle::new(
             self.window_loc() - Point::from((0., height)),
             Size::from((self.animated_window_size().w, height)),
-        )
+        );
+        if let Some((start, end)) = self.card_range() {
+            let border = self.visual_border_width().unwrap_or(0.);
+            let left = frame.loc.x.max(start + border);
+            let right = (frame.loc.x + frame.size.w).min(end - border);
+            frame.loc.x = left;
+            frame.size.w = (right - left).max(0.);
+        }
+        frame
     }
 
     fn content_corner_radius(&self) -> CornerRadius {
@@ -1355,9 +1513,21 @@ impl<W: LayoutElement> Tile<W> {
 
         // If we're not resizing, render the window itself.
         let has_border_shader = BorderRenderElement::has_shader(ctx.renderer);
+        let card = self.card_range();
+        let card_offset = Point::from((card.map_or(0., |(start, _)| start), 0.));
         if !pushed_resize {
-            let geo = Rectangle::new(window_render_loc, window_size);
-            let radius = radius.fit_to(window_size.w as f32, window_size.h as f32);
+            let mut geo = Rectangle::new(window_render_loc, window_size);
+            if let Some((start, end)) = card {
+                let border = self.visual_border_width().unwrap_or(0.);
+                let left = geo.loc.x.max(location.x + start + border);
+                let right = (geo.loc.x + geo.size.w).min(location.x + end - border);
+                geo.loc.x = left;
+                geo.size.w = (right - left).max(0.);
+            }
+            let clip_to_geometry = clip_to_geometry || card.is_some();
+            let radius = self
+                .card_radius(radius)
+                .fit_to(geo.size.w as f32, geo.size.h as f32);
 
             let clip_shader = ClippedSurfaceRenderElement::shader(ctx.renderer).cloned();
             let clip = |elem| match elem {
@@ -1472,7 +1642,7 @@ impl<W: LayoutElement> Tile<W> {
         if let Some(width) = self.visual_border_width() {
             self.border.render(
                 ctx.renderer,
-                location + Point::from((width, width)),
+                location + card_offset + Point::from((width, width)),
                 &mut |elem| push(elem.into()),
             );
         }
@@ -1483,12 +1653,16 @@ impl<W: LayoutElement> Tile<W> {
         // a bit weird).
         if focus_ring && expanded_progress < 1. {
             self.focus_ring
-                .render(ctx.renderer, location, &mut |elem| push(elem.into()));
+                .render(ctx.renderer, location + card_offset, &mut |elem| {
+                    push(elem.into())
+                });
         }
 
         if expanded_progress < 1. {
             self.shadow
-                .render(ctx.renderer, location, &mut |elem| push(elem.into()));
+                .render(ctx.renderer, location + card_offset, &mut |elem| {
+                    push(elem.into())
+                });
         }
 
         let surface_anim_scale = animated_window_size / window_size;
@@ -1516,10 +1690,10 @@ impl<W: LayoutElement> Tile<W> {
 
         let scale = Scale::from(self.scale);
 
-        let tile_alpha = self
+        let tile_alpha = (self
             .alpha_animation
             .as_ref()
-            .map_or(1., |alpha| alpha.anim.clamped_value()) as f32;
+            .map_or(1., |alpha| alpha.anim.clamped_value())) as f32;
 
         let mut pushed = false;
         self.window().set_offscreen_data(None);
@@ -1552,6 +1726,7 @@ impl<W: LayoutElement> Tile<W> {
                 }
             }
         } else if let Some(alpha) = &self.alpha_animation {
+            let offscreen = &alpha.offscreen;
             let mut ctx = ctx.as_gles();
             let mut elements = Vec::new();
             self.render_inner(
@@ -1561,7 +1736,7 @@ impl<W: LayoutElement> Tile<W> {
                 focus_ring,
                 &mut |elem| elements.push(elem),
             );
-            match alpha.offscreen.render(ctx.renderer, scale, &elements) {
+            match offscreen.render(ctx.renderer, scale, &elements) {
                 Ok((elem, _sync, data)) => {
                     let offset = elem.offset();
                     let elem = elem.with_alpha(tile_alpha).with_offset(location + offset);

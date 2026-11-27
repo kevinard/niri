@@ -79,6 +79,9 @@ pub struct ResolvedWindowRules {
     /// Edge of the workspace view to pin the window's column to when it opens.
     pub open_pinned: Option<PinSide>,
 
+    /// Whether the window should open in the scratchpad, floating and hidden.
+    pub open_in_scratchpad: Option<bool>,
+
     /// What to do on xdg-activation requests.
     pub on_xdg_activate: Option<OnXdgActivate>,
 
@@ -276,6 +279,10 @@ impl ResolvedWindowRules {
 
                 if let Some(x) = rule.open_pinned {
                     resolved.open_pinned = Some(x);
+                }
+
+                if let Some(x) = rule.open_in_scratchpad {
+                    resolved.open_in_scratchpad = Some(x);
                 }
 
                 if let Some(x) = rule.on_xdg_activate {

@@ -286,8 +286,10 @@ fn view_width_accounting() {
     assert_eq!(area.loc.x, full.loc.x + w1 + gaps);
     assert_eq!(area.size.w, full.size.w - w1 - gaps);
 
-    // Proportional widths are relative to the area left for scrolling.
-    assert_eq!(tile_width(&layout, 2), (area.size.w - gaps) * 0.5 - gaps);
+    // Proportional widths stay relative to the whole working area, so pinning a column does
+    // not narrow the others; they only narrow to fit the area left for scrolling.
+    let half = ((full.size.w - gaps) * 0.5 - gaps).min(area.size.w - 2. * gaps);
+    assert_eq!(tile_width(&layout, 2), half);
 
     // The new column opens right of the pinned one, at the start of the scrolling area.
     assert_eq!(column_of(&layout, 2), 2);
@@ -310,7 +312,8 @@ fn view_width_accounting() {
     assert_eq!(area.loc.x, full.loc.x + w1 + gaps);
     assert_eq!(area.size.w, full.size.w - w1 - w3 - gaps * 2.);
     assert_eq!(tile_x(&layout, 3), full.loc.x + full.size.w - gaps - w3);
-    assert_eq!(tile_width(&layout, 2), (area.size.w - gaps) * 0.5 - gaps);
+    let half = ((full.size.w - gaps) * 0.5 - gaps).min(area.size.w - 2. * gaps);
+    assert_eq!(tile_width(&layout, 2), half);
 
     // Unpinning gives the space back.
     let mut ops = vec![
@@ -658,4 +661,82 @@ fn closing_focused_right_pinned_column_keeps_view() {
     assert_eq!(focused(&layout), 3);
     let after: Vec<f64> = (1..=3).map(|id| tile_x(&layout, id)).collect();
     assert_eq!(after, xs);
+}
+
+#[test]
+fn pinning_keeps_proportional_widths_of_scrolling_columns() {
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=3 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+        ops.push(Op::SetColumnWidth(SizeChange::SetProportion(50.)));
+    }
+    ops.extend(settle());
+    let mut layout = check_ops(ops);
+    let half = tile_width(&layout, 2);
+
+    check_ops_on_layout(&mut layout, [Op::FocusColumnFirst]);
+    check_ops_on_layout(
+        &mut layout,
+        [Op::PinColumn {
+            id: None,
+            side: PinSide::Left,
+        }],
+    );
+    check_ops_on_layout(&mut layout, settle());
+
+    // Half-width columns stay half the working area wide beside the pinned column.
+    assert_eq!(tile_width(&layout, 2), half);
+    assert_eq!(tile_width(&layout, 3), half);
+
+    // A full-width column still fits in the space the pinned column leaves.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::FocusColumnRight,
+            Op::SetColumnWidth(SizeChange::SetProportion(100.)),
+        ],
+    );
+    check_ops_on_layout(&mut layout, settle());
+    let area = scrolling(&layout).working_area();
+    let gaps = layout.options.layout.gaps;
+    assert!(tile_width(&layout, 2) <= area.size.w - 2. * gaps);
+}
+
+#[test]
+fn folding_a_pinned_column_gives_its_space_back_until_it_is_focused() {
+    let mut layout = four_columns_first_pinned_left();
+    let full = scrolling(&layout).full_working_area();
+    check_ops_on_layout(&mut layout, [Op::FocusColumnRight]);
+    check_ops_on_layout(&mut layout, settle());
+    let pinned_area = scrolling(&layout).working_area();
+    assert!(pinned_area.size.w < full.size.w);
+
+    // Folded, the pinned column leaves the view and the scrolling columns get its space.
+    check_ops_on_layout(&mut layout, [Op::TogglePinnedColumnFolded { id: None }]);
+    check_ops_on_layout(&mut layout, settle());
+    assert_eq!(scrolling(&layout).working_area(), full);
+    assert!(tile_x(&layout, 1) + tile_width(&layout, 1) <= 0.);
+    assert_eq!(focused(&layout), 2);
+    // It keeps its pin.
+    assert_eq!(ipc_layout(&layout, 1).pinned, Some(PinSide::Left));
+
+    // Focusing it brings it back.
+    check_ops_on_layout(&mut layout, [Op::FocusColumnFirst]);
+    check_ops_on_layout(&mut layout, settle());
+    assert_eq!(focused(&layout), 1);
+    assert_eq!(scrolling(&layout).working_area(), pinned_area);
+    assert_eq!(tile_x(&layout, 1), pinned_left_x(&layout));
+
+    // Folding the focused column moves focus to the scrolling columns.
+    check_ops_on_layout(&mut layout, [Op::TogglePinnedColumnFolded { id: Some(1) }]);
+    check_ops_on_layout(&mut layout, settle());
+    assert_ne!(focused(&layout), 1);
+
+    // Unpinning a folded column brings it back into the strip.
+    check_ops_on_layout(&mut layout, [Op::UnpinColumn { id: Some(1) }]);
+    check_ops_on_layout(&mut layout, settle());
+    assert_eq!(ipc_layout(&layout, 1).pinned, None);
+    assert_eq!(scrolling(&layout).working_area(), full);
 }

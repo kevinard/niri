@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 use std::iter::{self, zip};
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -11,9 +12,11 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
+use super::layout_menu::{width_choice, LayoutMenuState};
 use super::monitor::InsertPosition;
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
+use super::titlebar::TitlebarTabs;
 use super::workspace::{InteractiveResize, ResolvedSize};
 use super::{ConfigureIntent, HitType, InteractiveResizeData, LayoutElement, Options, RemovedTile};
 use crate::animation::{Animation, Clock};
@@ -134,6 +137,8 @@ struct ColumnData {
     ///
     /// Such columns are left out of the scrolling strip.
     pinned: Option<PinSide>,
+    /// Folded past its edge: it takes no space and is out of view.
+    folded: bool,
 }
 
 #[derive(Debug)]
@@ -271,6 +276,9 @@ pub struct Column<W: LayoutElement> {
     ///
     /// Managed by the [`ScrollingSpace`]; cleared when the column leaves its workspace.
     pinned: Option<PinSide>,
+
+    /// A pinned column folded away past its edge, giving its space to the other columns.
+    folded: bool,
 }
 
 /// Extra per-tile data.
@@ -362,7 +370,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         clock: Clock,
         options: Rc<Options>,
     ) -> Self {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let working_area = compute_scrolling_area(parent_area, scale, &options);
 
         Self {
             columns: Vec::new(),
@@ -390,7 +398,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         scale: f64,
         options: Rc<Options>,
     ) {
-        let full_working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let full_working_area = compute_scrolling_area(parent_area, scale, &options);
+        let old_area = self.working_area;
+        // The leftmost column that starts in view, and where, to keep it in place.
+        let anchor = self
+            .column_view_xs()
+            .into_iter()
+            .zip(&self.columns)
+            .filter(|(_, col)| col.pinned.is_none())
+            .map(|((id, x), _)| (id, x))
+            .find(|(_, x)| *x >= old_area.loc.x - 1.)
+            .map(|(id, x)| (id, x - old_area.loc.x));
+        let before = self.column_view_xs();
 
         // Pinned columns size themselves within the whole working area.
         for (column, data) in zip(&mut self.columns, &mut self.data) {
@@ -423,8 +442,66 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             }
         }
 
-        // Apply always-center and such right away.
-        if !self.columns.is_empty() && !self.view_offset.is_gesture() {
+        // When a panel appears, hides or changes size, the leftmost column in view keeps its
+        // place relative to the edge of the working area, so the columns neither slide under
+        // the panel nor leave its space empty. Windows take their new widths only once they
+        // respond, so the view is set from the widths the columns are about to take.
+        let moved = working_area.loc.x != old_area.loc.x || working_area.size.w != old_area.size.w;
+        let mut placed = false;
+        let anchor_idx = anchor.and_then(|(id, offset)| {
+            let idx = self.columns.iter().position(|col| col.id() == id)?;
+            Some((idx, offset))
+        });
+        if let Some((anchor_idx, offset)) =
+            anchor_idx.filter(|_| moved && !self.view_offset.is_gesture())
+        {
+            let gaps = self.options.layout.gaps;
+            let upcoming = |col: &Column<W>| {
+                let width = if col.is_full_width {
+                    ColumnWidth::Proportion(1.)
+                } else {
+                    col.width
+                };
+                col.resolve_column_width(width) + gaps
+            };
+            let active = self.active_column_idx;
+            let span = |range: std::ops::Range<usize>| -> f64 {
+                self.columns[range]
+                    .iter()
+                    .filter(|col| col.pinned.is_none())
+                    .map(upcoming)
+                    .sum()
+            };
+            let anchor_x = working_area.loc.x + offset;
+            let active_x = if active >= anchor_idx {
+                anchor_x + span(anchor_idx..active)
+            } else {
+                anchor_x - span(active..anchor_idx)
+            };
+            // The active column is drawn at minus the view offset.
+            let fits = active_x + upcoming(&self.columns[active])
+                <= working_area.loc.x + working_area.size.w + 0.5;
+            if self.columns[active].pinned.is_none() {
+                placed = fits
+                    && self.options.layout.center_focused_column != CenterFocusedColumn::Always;
+                let delta = -active_x - self.view_offset.target();
+                self.view_offset.offset(delta);
+                let after = self.column_view_xs();
+                let config = self.options.animations.window_movement.0;
+                for (col, (id, x)) in zip(&mut self.columns, after) {
+                    let Some((_, from)) = before.iter().find(|(old, _)| *old == id) else {
+                        continue;
+                    };
+                    if col.pinned.is_none() && (from - x).abs() > 0.5 {
+                        col.animate_move_x_from_with_config(from - x, config);
+                    }
+                }
+            }
+        }
+
+        // Apply always-center and such right away, unless the columns were just placed for
+        // their upcoming widths.
+        if !placed && !self.columns.is_empty() && !self.view_offset.is_gesture() {
             self.animate_view_offset_to_column(None, self.active_column_idx, None);
         }
     }
@@ -489,6 +566,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             || !self.closing_windows.is_empty()
     }
 
+    pub(super) fn distance_to_stationary_view(&self) -> Option<f64> {
+        self.remaining_view_movement().map(f64::abs)
+    }
+
+    pub(super) fn remaining_view_movement(&self) -> Option<f64> {
+        match &self.view_offset {
+            ViewOffset::Static(_) if !self.are_transitions_ongoing() => Some(0.),
+            ViewOffset::Animation(animation) => Some(animation.to() - animation.clamped_value()),
+            _ => None,
+        }
+    }
+
     pub fn update_render_elements(&mut self, is_active: bool, layer: RenderLayer) {
         let view_pos = self.view_pos();
         let col_xs = self.column_render_xs(view_pos);
@@ -505,6 +594,32 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let col_off = Point::from((col_x, 0.));
             let col_pos = view_pos - col_off - col.render_offset();
             let view_rect = Rectangle::new(col_pos, view_size);
+            let clip = self.options.layout.clip_scroll_to_work_area;
+            let left = -col_pos.x;
+            let right = left + col.width();
+            let area = self.parent_area;
+            let gaps = self.options.layout.gaps;
+            let start = area.loc.x;
+            let end = area.loc.x + area.size.w;
+            let shown = right.min(end) - left.max(start);
+            let peek = clip && shown < col.width() * 0.5;
+            // A partly visible column draws as a card over the part in view, one gap in from
+            // the panels, with its own corners, border and shadow.
+            // Partly visible columns are cut straight at the gutter by the monitor; they keep
+            // their own frame and title where they are.
+            let card: Option<(f64, f64)> = None;
+            let _ = gaps;
+            let badge = if col.pinned.is_some() {
+                super::titlebar::TitlebarBadge::Pinned
+            } else {
+                super::titlebar::TitlebarBadge::None
+            };
+            for tile in &mut col.tiles {
+                tile.set_peek(peek);
+                tile.set_hidden_start(0.);
+                tile.set_card(card);
+                tile.set_badge(badge);
+            }
             col.update_render_elements(is_active, view_rect);
         }
     }
@@ -570,7 +685,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         let mut left = 0.;
         let mut right = 0.;
-        for data in &self.data {
+        for data in self.data.iter().filter(|data| !data.folded) {
             match data.pinned {
                 Some(PinSide::Left) => left = data.width + gaps,
                 Some(PinSide::Right) => right = data.width + gaps,
@@ -670,6 +785,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let gaps = self.options.layout.gaps;
         zip(self.column_xs(self.data.iter().copied()), &self.data)
             .map(|(x, data)| match data.pinned {
+                Some(side) if data.folded => {
+                    view_pos + folded_view_x(self.view_size, gaps, side, data.width)
+                }
                 Some(side) => view_pos + pinned_view_x(area, gaps, side, data.width),
                 None => x,
             })
@@ -711,6 +829,26 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         order
     }
 
+    /// How the column of `window` is arranged, for the layout menu.
+    pub fn layout_menu_state(&self, window: &W::Id) -> Option<LayoutMenuState> {
+        let column = self.columns.iter().find(|col| col.contains(window))?;
+        let width = if column.is_full_width {
+            Some(100)
+        } else {
+            match column.width {
+                ColumnWidth::Proportion(proportion) => width_choice(proportion),
+                ColumnWidth::Fixed(_) => None,
+            }
+        };
+        Some(LayoutMenuState {
+            floating: false,
+            pinned: column.pinned,
+            width,
+            tabbed: column.display_mode == ColumnDisplay::Tabbed,
+            in_scratchpad: false,
+        })
+    }
+
     /// Pins the column to an edge of the view.
     ///
     /// The column moves to that end of the column list and stays on screen while the other
@@ -737,6 +875,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         if let Some(other) = self.columns.iter().position(|c| c.pinned == Some(side)) {
             self.columns[other].pinned = None;
+            self.columns[other].folded = false;
             let col = &self.columns[other];
             self.data[other].update(col);
         }
@@ -795,6 +934,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let col = &mut self.columns[col_idx];
         cancel_resize_for_column(&mut self.interactive_resize, col);
         col.pinned = None;
+        col.folded = false;
         self.data[col_idx].update(col);
 
         self.update_scrolling_area(StripShift::None);
@@ -821,6 +961,78 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.unpin_column(window);
         } else {
             self.pin_column(window, side);
+        }
+    }
+
+    /// The folded pinned columns, by edge, with the window each shows.
+    pub fn folded_pinned_columns(&self) -> impl Iterator<Item = (PinSide, &W)> + '_ {
+        zip(&self.columns, &self.data).filter_map(|(col, data)| {
+            data.folded
+                .then_some(data.pinned)
+                .flatten()
+                .map(|side| (side, col.active_window()))
+        })
+    }
+
+    /// Folds the pinned column of `window` past its edge, or unfolds it. Without a window,
+    /// folds every pinned column when any of them is in view, and unfolds them all otherwise.
+    ///
+    /// A folded column gives its space to the scrolling columns and comes back when it is
+    /// focused.
+    pub fn toggle_pinned_column_folded(&mut self, window: Option<&W::Id>) -> bool {
+        let targets: Vec<usize> = match window {
+            Some(window) => self
+                .columns
+                .iter()
+                .position(|col| col.contains(window) && col.pinned.is_some())
+                .into_iter()
+                .collect(),
+            None => (0..self.columns.len())
+                .filter(|&idx| self.columns[idx].pinned.is_some())
+                .collect(),
+        };
+        if targets.is_empty() {
+            return false;
+        }
+        let fold = targets.iter().any(|&idx| !self.columns[idx].folded);
+        self.set_pinned_columns_folded(&targets, fold);
+        true
+    }
+
+    fn set_pinned_columns_folded(&mut self, targets: &[usize], fold: bool) {
+        let old_xs = self.column_view_xs();
+        for &idx in targets {
+            let col = &mut self.columns[idx];
+            cancel_resize_for_column(&mut self.interactive_resize, col);
+            col.folded = fold;
+            self.data[idx].update(col);
+        }
+
+        // Focus leaves a column that folds away, for the nearest scrolling column. Without one,
+        // the focused column stays in view.
+        let active = self.active_column_idx;
+        if fold && targets.contains(&active) {
+            let (start, end) = self.scrolling_range();
+            if start < end {
+                self.active_column_idx = active.clamp(start, end - 1);
+                self.activate_prev_column_on_removal = None;
+                self.view_offset_to_restore = None;
+            } else {
+                self.columns[active].folded = false;
+                self.data[active].update(&self.columns[active]);
+            }
+        }
+
+        self.update_scrolling_area(StripShift::None);
+        let active = self.active_column_idx;
+        let anchor = (self.data[active].pinned.is_none()).then(|| self.columns[active].id());
+        self.reposition_after_pinning(&old_xs, anchor);
+    }
+
+    /// Unfolds a folded pinned column about to take focus.
+    fn unfold_for_focus(&mut self, idx: usize) {
+        if self.columns.get(idx).is_some_and(|col| col.folded) {
+            self.set_pinned_columns_folded(&[idx], false);
         }
     }
 
@@ -871,12 +1083,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn active_window(&self) -> Option<&W> {
-        if self.columns.is_empty() {
-            return None;
-        }
-
-        let col = &self.columns[self.active_column_idx];
-        Some(col.tiles[col.active_tile_idx].window())
+        self.active_column().map(Column::active_window)
     }
 
     pub fn active_window_mut(&mut self) -> Option<&mut W> {
@@ -1149,9 +1356,39 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 } + self.options.layout.gaps * 2.;
 
                 // If it fits together, do a normal animation, otherwise center the new column.
-                if total_width <= self.working_area.size.w {
+                if columns_fit(total_width, self.working_area.size.w, self.scale) {
                     self.compute_new_view_offset_for_column_fit(target_x, idx)
                 } else {
+                    // When the source overflows, the target can still share the viewport
+                    // with its other neighbor. Fit that pair before isolating the target.
+                    let neighbor = if source_idx > idx {
+                        idx.checked_sub(1)
+                    } else {
+                        (idx + 1 < self.columns.len()).then_some(idx + 1)
+                    };
+                    if let Some(neighbor) = neighbor.filter(|&neighbor| {
+                        self.options.layout.clip_scroll_to_work_area
+                            && self.data[idx].pinned.is_none()
+                            && self.data[neighbor].pinned.is_none()
+                            && self.columns[idx].sizing_mode().is_normal()
+                            && self.columns[neighbor].sizing_mode().is_normal()
+                    }) {
+                        let neighbor_x = self.column_x(neighbor);
+                        let left = target_col_x.min(neighbor_x);
+                        let right = (target_col_x + target_col_width)
+                            .max(neighbor_x + self.columns[neighbor].width());
+                        let width = right - left;
+                        let gaps = self.options.layout.gaps;
+                        if columns_fit(width + gaps * 2., self.working_area.size.w, self.scale) {
+                            let offset = self.compute_new_view_offset_fit(
+                                target_x,
+                                left,
+                                width,
+                                SizingMode::Normal,
+                            );
+                            return offset + left - target_col_x;
+                        }
+                    }
                     self.compute_new_view_offset_for_column_centered(target_x, idx)
                 }
             }
@@ -1258,6 +1495,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     fn activate_column_with_anim_config(&mut self, idx: usize, config: niri_config::Animation) {
+        if self.active_column_idx == idx && self.columns.get(idx).is_some_and(|col| col.folded) {
+            self.unfold_for_focus(idx);
+            return;
+        }
         if self.active_column_idx == idx
             // During a DnD scroll, animate even when activating the same window, for DnD hold.
             && (self.columns.is_empty() || !self.view_offset.is_dnd_scroll())
@@ -1280,6 +1521,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.view_offset_to_restore = None;
             self.interactive_resize = None;
         }
+
+        // A folded pinned column comes back as it takes focus.
+        self.unfold_for_focus(idx);
     }
 
     pub(super) fn insert_position(&self, pos: Point<f64, Logical>) -> InsertPosition {
@@ -1298,6 +1542,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 continue;
             };
 
+            if data.folded {
+                continue;
+            }
             let col_x = self.pinned_view_x(side, data.width);
             if col_x - gaps / 2. <= pos.x && pos.x < col_x + data.width + gaps / 2. {
                 let (tile_idx, _) = self.columns[col_idx].closest_tile_gap(y);
@@ -1476,6 +1723,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // A column coming from elsewhere does not bring its pin along.
         column.pinned = None;
+        column.folded = false;
         column.update_config(
             self.view_size,
             self.working_area,
@@ -1685,6 +1933,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // A column leaving the workspace (or merging into another column) is no longer pinned.
         column.pinned = None;
+        column.folded = false;
 
         // While a pinned column was focused, the view was relative to the start of the strip (see
         // view_anchor_x()). The code below treats the view as relative to the removed column's X
@@ -1764,6 +2013,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             StripShift::None
         };
         self.sync_scrolling_area(shift);
+
+        // Focus may have fallen to a folded pinned column; it comes back.
+        self.unfold_for_focus(self.active_column_idx);
 
         column
     }
@@ -2962,6 +3214,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let dummy = ColumnData {
             width: 0.,
             pinned: None,
+            folded: false,
         };
         let data = data.chain(iter::once(dummy));
 
@@ -3625,6 +3878,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        visible_x: Option<&Range<f64>>,
         push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
@@ -3648,6 +3902,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         for (col, col_pos) in self.columns_with_render_positions() {
             // Skip columns belonging to a different render layer.
             if layer.is_normal() == col.is_moving_between_workspaces() {
+                continue;
+            }
+            // Skip the whole offscreen column, including its shadows, when
+            // the compositor substitutes a navigation control for a narrow peek.
+            if visible_x.is_some_and(|bounds| {
+                col_pos.x >= bounds.end || col_pos.x + col.width() <= bounds.start
+            }) {
                 continue;
             }
 
@@ -3698,6 +3959,23 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // Hit the tab indicator.
             if col.display_mode == ColumnDisplay::Tabbed && col.sizing_mode().is_normal() {
                 let col_pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
+
+                // Hit the tabs in the titlebar of the shown window.
+                let active = &col.tiles[col.active_tile_idx];
+                if active.has_titlebar_tabs() {
+                    let offset = col
+                        .tiles_in_render_order()
+                        .find_map(|(tile, off, _)| std::ptr::eq(tile, active).then_some(off));
+                    if let Some(offset) = offset {
+                        let tile_pos = col_pos + offset + active.render_offset();
+                        if let Some(idx) = active.titlebar_tab_hit(pos - tile_pos) {
+                            let hit = HitType::Activate {
+                                is_tab_indicator: true,
+                            };
+                            return Some((col.tiles[idx].window(), hit));
+                        }
+                    }
+                }
 
                 if let Some(idx) = col.tab_indicator.hit(
                     col.tab_indicator_area(),
@@ -4002,8 +4280,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                                         // NOTE: This logic won't work entirely correctly with small
                                         // fixed-size maximized windows (they have a different area
                                         // and padding).
-                                        center_on_overflow
-                                            && adj_col_w + 3.0 * gaps + col_w > area.size.w
+                                        !columns_fit(
+                                            adj_col_w + 3.0 * gaps + col_w,
+                                            area.size.w,
+                                            self.scale,
+                                        )
                                     })
                                     .is_some()
                         };
@@ -4447,7 +4728,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.parent_area
     }
 
-    #[cfg(test)]
+    /// The working area of the scrolling columns, which leaves out pinned columns in view.
     pub fn working_area(&self) -> Rectangle<f64, Logical> {
         self.working_area
     }
@@ -4486,7 +4767,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         assert_eq!(self.columns.len(), self.data.len());
         assert_eq!(
             self.full_working_area,
-            compute_working_area(self.parent_area, self.scale, self.options.layout.struts)
+            compute_scrolling_area(self.parent_area, self.scale, &self.options)
         );
         assert_eq!(
             self.working_area,
@@ -4643,6 +4924,7 @@ impl ColumnData {
         let mut rv = Self {
             width: 0.,
             pinned: None,
+            folded: false,
         };
         rv.update(column);
         rv
@@ -4651,6 +4933,7 @@ impl ColumnData {
     pub fn update<W: LayoutElement>(&mut self, column: &Column<W>) {
         self.width = column.width();
         self.pinned = column.pinned_in_place();
+        self.folded = self.pinned.is_some() && column.folded;
     }
 }
 
@@ -4745,6 +5028,7 @@ impl<W: LayoutElement> Column<W> {
             options,
             id: ColumnId::next(),
             pinned: None,
+            folded: false,
         };
 
         let pending_sizing_mode = tile.window().pending_sizing_mode();
@@ -4783,8 +5067,17 @@ impl<W: LayoutElement> Column<W> {
     /// Returns the edge this column is drawn at: its pin, while it is in the normal sizing mode.
     ///
     /// Fullscreen and maximized pinned columns scroll at their end of the strip instead.
+    /// Whether the column is pinned to an edge and stays there, out of the scrolling strip.
+    pub fn is_pinned_in_place(&self) -> bool {
+        self.pinned_in_place().is_some()
+    }
+
     fn pinned_in_place(&self) -> Option<PinSide> {
         self.pinned.filter(|_| self.sizing_mode().is_normal())
+    }
+
+    pub(super) fn active_window(&self) -> &W {
+        self.tiles[self.active_tile_idx].window()
     }
 
     fn update_config(
@@ -4918,6 +5211,30 @@ impl<W: LayoutElement> Column<W> {
 
     pub fn update_render_elements(&mut self, is_active: bool, view_rect: Rectangle<f64, Logical>) {
         let active_idx = self.active_tile_idx;
+        // Tabbed columns name their windows in the titlebar of the shown one.
+        let tabbed = self.display_mode == ColumnDisplay::Tabbed
+            && self.sizing_mode().is_normal()
+            && self.tiles.len() > 1;
+        let titles = tabbed.then(|| {
+            let titles = self
+                .tiles
+                .iter()
+                .map(|tile| tile.window().with_decoration_title(str::to_owned))
+                .collect::<Vec<_>>();
+            let app_ids = self
+                .tiles
+                .iter()
+                .map(|tile| tile.window().with_app_id(str::to_owned))
+                .collect::<Vec<_>>();
+            (titles, app_ids)
+        });
+        for (tile_idx, tile) in self.tiles.iter_mut().enumerate() {
+            tile.set_titlebar_tabs(titles.clone().map(|(titles, app_ids)| TitlebarTabs {
+                titles,
+                app_ids,
+                active: tile_idx,
+            }));
+        }
         for (tile_idx, (tile, tile_off)) in self.tiles_mut().enumerate() {
             let is_active = is_active && tile_idx == active_idx;
 
@@ -4941,7 +5258,9 @@ impl<W: LayoutElement> Column<W> {
         // you don't want that to happen in fullscreen. Also, laying things out correctly when the
         // tab indicator is within the column and the column goes fullscreen, would require too
         // many changes to the code for too little benefit (it's mostly invisible anyway).
-        let enabled = self.display_mode == ColumnDisplay::Tabbed && self.sizing_mode().is_normal();
+        let enabled = self.display_mode == ColumnDisplay::Tabbed
+            && self.sizing_mode().is_normal()
+            && !self.tiles[active_idx].has_titlebar_tabs();
 
         self.tab_indicator.update_render_elements(
             enabled,
@@ -5269,9 +5588,18 @@ impl<W: LayoutElement> Column<W> {
         }
     }
 
+    /// Width that proportional column widths refer to: the whole working area, so that pinning a
+    /// column does not shrink the others. See [`Self::resolve_column_width`].
+    fn proportion_basis(&self) -> f64 {
+        compute_scrolling_area(self.parent_area, self.scale, &self.options)
+            .size
+            .w
+            .max(self.working_area.size.w)
+    }
+
     fn resolve_preset_width(&self, preset: PresetSize) -> ResolvedSize {
         let extra = self.extra_size();
-        resolve_preset_size(preset, &self.options, self.working_area.size.w, extra.w)
+        resolve_preset_size(preset, &self.options, self.proportion_basis(), extra.w)
     }
 
     fn resolve_preset_height(&self, preset: PresetSize) -> ResolvedSize {
@@ -5286,7 +5614,10 @@ impl<W: LayoutElement> Column<W> {
 
         match width {
             ColumnWidth::Proportion(proportion) => {
-                (working_size.w - gaps) * proportion - gaps - extra.w
+                // Proportions refer to the whole working area, so a column keeps its width when
+                // another one is pinned beside it, and only narrows to fit the space left.
+                let width = (self.proportion_basis() - gaps) * proportion - gaps - extra.w;
+                width.min(working_size.w - gaps * 2. - extra.w)
             }
             ColumnWidth::Fixed(width) => width,
         }
@@ -5590,7 +5921,7 @@ impl<W: LayoutElement> Column<W> {
         }
     }
 
-    fn width(&self) -> f64 {
+    pub(super) fn width(&self) -> f64 {
         let mut tiles_width = self
             .data
             .iter()
@@ -5774,7 +6105,7 @@ impl<W: LayoutElement> Column<W> {
                 ColumnWidth::Proportion(proportion)
             }
             (ColumnWidth::Fixed(_), SizeChange::AdjustProportion(delta)) => {
-                let full = self.working_area.size.w - self.options.layout.gaps;
+                let full = self.proportion_basis() - self.options.layout.gaps;
                 let current = if full == 0. {
                     1.
                 } else {
@@ -6170,7 +6501,9 @@ impl<W: LayoutElement> Column<W> {
         self.display_mode
     }
 
-    fn tiles_mut(&mut self) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> + '_ {
+    pub(super) fn tiles_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> + '_ {
         let offsets = self.tile_offsets_iter(self.data.iter().copied());
         zip(&mut self.tiles, offsets)
     }
@@ -6360,6 +6693,12 @@ impl<W: LayoutElement> Column<W> {
     }
 }
 
+/// Adjacent half-width columns can round up by one physical pixel in total.
+/// Keep their normal edge alignment when that pixel is the only overflow.
+fn columns_fit(width: f64, available: f64, scale: f64) -> bool {
+    width <= available + 1. / scale
+}
+
 fn compute_new_view_offset(
     cur_x: f64,
     view_width: f64,
@@ -6395,11 +6734,41 @@ fn compute_new_view_offset(
 }
 
 /// Returns the X of a column pinned in place, in view coordinates.
+/// Returns the X of a folded pinned column, just past its edge of the view, in view coordinates.
+fn folded_view_x(view: Size<f64, Logical>, gaps: f64, side: PinSide, width: f64) -> f64 {
+    match side {
+        PinSide::Left => -width - gaps,
+        PinSide::Right => view.w + gaps,
+    }
+}
+
 fn pinned_view_x(area: Rectangle<f64, Logical>, gaps: f64, side: PinSide, width: f64) -> f64 {
     match side {
         PinSide::Left => area.loc.x + gaps,
         PinSide::Right => area.loc.x + area.size.w - gaps - width,
     }
+}
+
+pub(super) const NAVIGATION_STRIP_HEIGHT: f64 = 56.;
+
+pub(super) fn navigation_strip_fits(area: Rectangle<f64, Logical>) -> bool {
+    area.size.w >= 420. && area.size.h >= 400.
+}
+
+fn compute_scrolling_area(
+    parent_area: Rectangle<f64, Logical>,
+    scale: f64,
+    options: &Options,
+) -> Rectangle<f64, Logical> {
+    let mut struts = options.layout.struts;
+    // The window bar shown on demand slides over the windows instead.
+    if options.layout.clip_scroll_to_work_area
+        && options.layout.window_bar == niri_config::layout::WindowBar::Always
+        && navigation_strip_fits(parent_area)
+    {
+        struts.top.0 = struts.top.0.max(NAVIGATION_STRIP_HEIGHT);
+    }
+    compute_working_area(parent_area, scale, struts)
 }
 
 fn compute_working_area(
@@ -6489,6 +6858,12 @@ mod tests {
 
     use super::*;
     use crate::utils::round_logical_in_physical;
+
+    #[test]
+    fn fractional_rounding_keeps_neighboring_columns_in_view() {
+        assert!(columns_fit(936., 935.2, 1.25));
+        assert!(!columns_fit(937.6, 935.2, 1.25));
+    }
 
     #[test]
     fn working_area_starts_at_physical_pixel() {

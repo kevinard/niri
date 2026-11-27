@@ -497,6 +497,25 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg())]
         side: PinSide,
     },
+    /// Show or hide the window bar when it is shown on demand (`window-bar "on-demand"`).
+    ToggleWindowBar {},
+    /// Fold the pinned columns of the focused workspace past their edges, or unfold them.
+    ///
+    /// Folded columns give their space to the other columns. Focusing one unfolds it.
+    TogglePinnedColumnFolded {},
+    /// Show the scratchpad on the focused workspace, or hide it.
+    ///
+    /// A scratchpad window shown on the focused workspace takes focus, or hides if it has focus.
+    /// Otherwise a hidden scratchpad window comes to the focused workspace, centered.
+    ToggleScratchpad {},
+    /// Add a window to the scratchpad, floating and hidden, or take it out of the scratchpad.
+    ToggleWindowInScratchpad {
+        /// Id of the window.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
     /// Center the focused column on the screen.
     CenterColumn {},
     /// Center a window on the screen.
@@ -1596,6 +1615,12 @@ pub struct WindowLayout {
     /// Unset for floating windows and for unpinned columns.
     #[serde(default)]
     pub pinned: Option<PinSide>,
+    /// Whether the window belongs to the scratchpad, shown or hidden.
+    ///
+    /// A hidden scratchpad window keeps its workspace but is not drawn; see
+    /// [`Action::ToggleScratchpad`].
+    #[serde(default)]
+    pub in_scratchpad: bool,
 }
 
 /// Output configuration change result.

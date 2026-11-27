@@ -10,7 +10,7 @@ use niri_config::{
     is_keysym_modifier, Action, Bind, Binds, BoundAction, Config, Key, ModKey, Modifiers,
     MruDirection, SwitchBinds, Trigger,
 };
-use niri_ipc::LayoutSwitchTarget;
+use niri_ipc::{LayoutSwitchTarget, PinSide, SizeChange};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
@@ -52,6 +52,7 @@ use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_a11y::KbMonBlock;
+use crate::layout::layout_menu::LayoutMenuItem;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, Niri, PointerVisibility, State};
@@ -204,8 +205,14 @@ impl State {
                 self.on_device_removed(device);
             }
             Keyboard { event } => self.on_keyboard::<I>(event, &mut consumed_by_a11y),
-            PointerMotion { event } => self.on_pointer_motion::<I>(event),
-            PointerMotionAbsolute { event } => self.on_pointer_motion_absolute::<I>(event),
+            PointerMotion { event } => {
+                self.on_pointer_motion::<I>(event);
+                self.update_pointer_previews();
+            }
+            PointerMotionAbsolute { event } => {
+                self.on_pointer_motion_absolute::<I>(event);
+                self.update_pointer_previews();
+            }
             PointerButton { event } => self.on_pointer_button::<I>(event),
             PointerAxis { event } => self.on_pointer_axis::<I>(event),
             TabletToolAxis { event } => self.on_tablet_tool_axis::<I>(event),
@@ -806,6 +813,16 @@ impl State {
                 };
 
                 if matches!(res, ShouldInterceptResult::Forward) {
+                    // Escape closes a layout menu before anything else sees it.
+                    if pressed
+                        && modified == Some(Keysym::Escape)
+                        && this.niri.layout.close_layout_menus()
+                    {
+                        this.niri.suppressed_keys.insert(key_code);
+                        this.niri.queue_redraw_all();
+                        return ShouldInterceptResult::InterceptOnly;
+                    }
+
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
                         if let Some(bind) =
@@ -1070,6 +1087,12 @@ impl State {
             touch.cancel(self);
         }
 
+        // Moving between windows shows a window bar that is shown on demand, until the moves
+        // stop.
+        if is_window_navigation(&action) && self.niri.layout.reveal_window_bar_for_navigation() {
+            self.niri.queue_redraw_all();
+        }
+
         match action {
             Action::Quit(skip_confirmation) => {
                 if !skip_confirmation && self.niri.exit_confirm_dialog.show() {
@@ -1283,6 +1306,7 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.focus_window(&window);
+                    self.niri.layer_shell_on_demand_focus = None;
                 }
             }
             Action::FocusWindowInColumn(index) => {
@@ -2018,6 +2042,37 @@ impl State {
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
+            Action::ToggleScratchpad => {
+                if self.niri.layout.toggle_scratchpad() {
+                    self.maybe_warp_cursor_to_focus();
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Action::ToggleWindowInScratchpad => {
+                if self.niri.layout.toggle_window_in_scratchpad(None) {
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Action::ToggleWindowInScratchpadById(id) => {
+                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    if self.niri.layout.toggle_window_in_scratchpad(Some(&window)) {
+                        self.niri.queue_redraw_all();
+                    }
+                }
+            }
+            Action::TogglePinnedColumnFolded => {
+                if self.niri.layout.toggle_pinned_column_folded(None) {
+                    self.maybe_warp_cursor_to_focus();
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Action::ToggleWindowBar => {
+                if self.niri.layout.toggle_window_bar() {
+                    self.niri.queue_redraw_all();
+                }
+            }
             Action::TogglePinnedColumn(side) => {
                 self.niri.layout.toggle_pinned_column(None, side);
                 self.maybe_warp_cursor_to_focus();
@@ -2698,12 +2753,14 @@ impl State {
             Action::StopCast(session_id) => {
                 self.niri.stop_cast(CastSessionId::from(session_id));
             }
-            Action::ToggleOverview => {
-                self.niri.layout.toggle_overview();
-                self.niri.queue_redraw_all();
-            }
-            Action::OpenOverview => {
-                if self.niri.layout.open_overview() {
+            Action::ToggleOverview | Action::OpenOverview => {
+                let changed = if matches!(action, Action::ToggleOverview) {
+                    self.niri.layout.toggle_overview();
+                    true
+                } else {
+                    self.niri.layout.open_overview()
+                };
+                if changed {
                     self.niri.queue_redraw_all();
                 }
             }
@@ -3252,6 +3309,139 @@ impl State {
         find_configured_bind(bindings, mod_key, trigger, mods)
     }
 
+    fn update_pointer_previews(&mut self) {
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        let pointer_output = self.niri.output_under(pointer.current_location());
+        let mut menu_changed = false;
+        for monitor in self.niri.layout.monitors() {
+            let position = pointer_output
+                .filter(|(output, _)| *output == monitor.output())
+                .map(|(_, point)| point);
+            monitor.update_navigation_preview_pointer(position);
+            menu_changed |= monitor.update_layout_menu_pointer(position);
+            menu_changed |= monitor.update_bar_reveal_pointer(position);
+        }
+        if menu_changed {
+            self.niri.queue_redraw_all();
+        }
+    }
+
+    /// Handles a press while a layout menu is open. Returns whether the menu used the press.
+    fn layout_menu_press(&mut self, location: Point<f64, Logical>) -> bool {
+        if self.niri.layout.layout_menu_window().is_none() {
+            return false;
+        }
+        let mut chosen = None;
+        let mut inside = false;
+        let mut on_button = false;
+        if let Some((output, point)) = self.niri.output_under(location) {
+            if let Some(monitor) = self.niri.layout.monitor_for_output(output) {
+                match monitor.layout_menu_under(point) {
+                    Some(item) => {
+                        inside = true;
+                        chosen = item;
+                    }
+                    None => on_button = monitor.layout_menu_anchor_contains(point),
+                }
+            }
+        }
+        if let Some((window, item)) = chosen {
+            self.niri.layout.close_layout_menus();
+            self.apply_layout_menu_item(&window, item);
+            self.niri.queue_redraw_all();
+            return true;
+        }
+        if inside {
+            return true;
+        }
+        // A press on the button that opened the menu closes it on release, as the button does.
+        if !on_button && self.niri.layout.close_layout_menus() {
+            self.niri.queue_redraw_all();
+        }
+        false
+    }
+
+    /// Shows or hides the scratchpad from the window bar's button.
+    fn scratchpad_button_press(&mut self, location: Point<f64, Logical>) -> bool {
+        let on_button = self
+            .niri
+            .output_under(location)
+            .is_some_and(|(output, point)| {
+                self.niri
+                    .layout
+                    .monitor_for_output(output)
+                    .is_some_and(|monitor| monitor.scratchpad_button_under(point))
+            });
+        if !on_button {
+            return false;
+        }
+        if self.niri.layout.toggle_scratchpad() {
+            self.niri.queue_redraw_all();
+        }
+        true
+    }
+
+    fn apply_layout_menu_item(&mut self, window: &smithay::desktop::Window, item: LayoutMenuItem) {
+        self.focus_window(window);
+        let layout = &mut self.niri.layout;
+        match item {
+            LayoutMenuItem::Width(percent) => {
+                layout.set_column_width(SizeChange::SetProportion(f64::from(percent)))
+            }
+            LayoutMenuItem::PinLeft => layout.toggle_pinned_column(Some(window), PinSide::Left),
+            LayoutMenuItem::PinRight => layout.toggle_pinned_column(Some(window), PinSide::Right),
+            LayoutMenuItem::Floating => layout.toggle_window_floating(Some(window)),
+            LayoutMenuItem::Tabs => layout.toggle_column_tabbed_display(),
+            LayoutMenuItem::Fold => {
+                layout.toggle_pinned_column_folded(Some(window));
+            }
+            LayoutMenuItem::Scratchpad => {
+                layout.toggle_window_in_scratchpad(Some(window));
+            }
+        }
+    }
+
+    fn activate_window_navigation(&mut self, location: Point<f64, Logical>) -> bool {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.exit_confirm_dialog.is_open()
+        {
+            return false;
+        }
+
+        let navigation = self
+            .niri
+            .output_under(location)
+            .and_then(|(output, point)| {
+                let monitor = self.niri.layout.monitor_for_output(output)?;
+                let destination = monitor.navigation_window_under(point)?;
+                self.niri
+                    .contents_under(location)
+                    .layer
+                    .is_none_or(|layer| {
+                        use smithay::wayland::shell::wlr_layer::Layer;
+                        matches!(layer.layer(), Layer::Background | Layer::Bottom)
+                    })
+                    .then(|| (destination.window.clone(), output.clone(), point))
+            });
+        let Some((window, output, point)) = navigation else {
+            return false;
+        };
+
+        if let Some(monitor) = self.niri.layout.monitor_for_output(&output) {
+            monitor.dismiss_navigation_preview(point);
+            monitor.hide_window_bar();
+        }
+        self.niri.layer_shell_on_demand_focus = None;
+        self.focus_window(&window);
+        if let Some(workspace) = self.niri.layout.active_workspace_mut() {
+            workspace.reveal_window_from_navigation();
+        }
+        self.niri.layout.close_overview();
+        self.niri.queue_redraw_all();
+        true
+    }
+
     fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent)
     where
         I::Device: 'static,
@@ -3488,6 +3678,30 @@ impl State {
             self.niri.tablet_cursor_location = None;
 
             let is_overview_open = self.niri.layout.is_overview_open();
+
+            if !pointer.is_grabbed() && self.layout_menu_press(pointer.current_location()) {
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
+
+            if button == Some(MouseButton::Left)
+                && !mod_down
+                && !pointer.is_grabbed()
+                && self.scratchpad_button_press(pointer.current_location())
+            {
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
+
+            if button == Some(MouseButton::Left)
+                && !mod_down
+                && !pointer.is_grabbed()
+                && !is_mru_open
+                && self.activate_window_navigation(pointer.current_location())
+            {
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
 
             if is_overview_open && !pointer.is_grabbed() && button == Some(MouseButton::Right) {
                 if let Some((output, ws)) = self.niri.workspace_under_cursor(true) {
@@ -5055,6 +5269,10 @@ impl State {
                 }
             }
         } else if !handle.is_grabbed() {
+            if !mod_down && self.activate_window_navigation(pos) {
+                self.niri.pointer_visibility = PointerVisibility::Disabled;
+                return;
+            }
             if under.overview && !mod_down && under.output.is_some() {
                 let (output, pos_within_output) = self.niri.output_under(pos).unwrap();
                 let output = output.clone();
@@ -6091,6 +6309,36 @@ fn overview_typed_text(utf8: &str, mods: Modifiers) -> Option<String> {
     }
 
     Some(utf8.to_owned())
+}
+
+/// Actions that move focus or columns along the scrolling layout.
+fn is_window_navigation(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::FocusColumnLeft
+            | Action::FocusColumnRight
+            | Action::FocusColumnFirst
+            | Action::FocusColumnLast
+            | Action::FocusColumnRightOrFirst
+            | Action::FocusColumnLeftOrLast
+            | Action::FocusColumnOrMonitorLeft
+            | Action::FocusColumnOrMonitorRight
+            | Action::FocusWindowDown
+            | Action::FocusWindowUp
+            | Action::FocusWindowDownOrColumnLeft
+            | Action::FocusWindowDownOrColumnRight
+            | Action::FocusWindowUpOrColumnLeft
+            | Action::FocusWindowUpOrColumnRight
+            | Action::FocusWindowDownOrTop
+            | Action::FocusWindowUpOrBottom
+            | Action::MoveColumnLeft
+            | Action::MoveColumnRight
+            | Action::MoveColumnToFirst
+            | Action::MoveColumnToLast
+            | Action::MoveColumnLeftOrToMonitorLeft
+            | Action::MoveColumnRightOrToMonitorRight
+            | Action::CenterColumn
+    )
 }
 
 fn hardcoded_overview_bind(key: Keysym, mods: Modifiers) -> Option<Bind> {

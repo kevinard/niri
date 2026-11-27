@@ -548,6 +548,15 @@ enum Op {
         #[proptest(strategy = "arbitrary_pin_side()")]
         side: PinSide,
     },
+    TogglePinnedColumnFolded {
+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
+        id: Option<usize>,
+    },
+    ToggleScratchpad,
+    ToggleWindowInScratchpad {
+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
+        id: Option<usize>,
+    },
     CenterColumn,
     CenterWindow {
         #[proptest(strategy = "proptest::option::of(1..=5usize)")]
@@ -1227,6 +1236,17 @@ impl Op {
                 layout.unpin_column(id.as_ref());
             }
             Op::TogglePinnedColumn { side } => layout.toggle_pinned_column(None, side),
+            Op::ToggleScratchpad => {
+                layout.toggle_scratchpad();
+            }
+            Op::ToggleWindowInScratchpad { id } => {
+                let id = id.filter(|id| layout.has_window(id));
+                layout.toggle_window_in_scratchpad(id.as_ref());
+            }
+            Op::TogglePinnedColumnFolded { id } => {
+                let id = id.filter(|id| layout.has_window(id));
+                layout.toggle_pinned_column_folded(id.as_ref());
+            }
             Op::CenterColumn => layout.center_column(),
             Op::CenterWindow { id } => {
                 let id = id.filter(|id| layout.has_window(id));
@@ -4191,6 +4211,7 @@ fn arbitrary_op_with_pinning() -> impl Strategy<Value = Op> {
             .prop_map(|(id, side)| Op::PinColumn { id, side }),
         proptest::option::of(1..=5usize).prop_map(|id| Op::UnpinColumn { id }),
         arbitrary_pin_side().prop_map(|side| Op::TogglePinnedColumn { side }),
+        proptest::option::of(1..=5usize).prop_map(|id| Op::TogglePinnedColumnFolded { id }),
     ];
     let window = any::<TestWindowParams>().prop_map(|params| Op::AddWindow { params });
 
@@ -4200,4 +4221,309 @@ fn arbitrary_op_with_pinning() -> impl Strategy<Value = Op> {
         1 => window,
         1 => (1..=5usize).prop_map(Op::Communicate),
     ]
+}
+
+#[test]
+fn window_bar_mode_decides_its_reserved_row() {
+    use niri_config::layout::WindowBar;
+
+    let top = |window_bar: WindowBar| {
+        let options = Options {
+            layout: niri_config::Layout {
+                clip_scroll_to_work_area: true,
+                window_bar,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ops = [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+        ];
+        let layout = check_ops_with_options(options, ops);
+        let ws = layout.active_workspace().unwrap();
+        (ws.scrolling().full_working_area().loc.y, layout)
+    };
+
+    // Shown always, the bar has a row of its own above the windows.
+    let (always, _) = top(WindowBar::Always);
+    assert_eq!(always, scrolling::NAVIGATION_STRIP_HEIGHT);
+    // Shown on demand it slides over the windows, and turned off it takes no space.
+    let (on_demand, layout) = top(WindowBar::OnDemand);
+    assert_eq!(on_demand, 0.);
+    assert_eq!(top(WindowBar::Off).0, 0.);
+
+    // Only a bar shown on demand can be toggled.
+    assert!(layout.toggle_window_bar());
+    assert!(layout.toggle_window_bar());
+    let (_, layout) = top(WindowBar::Always);
+    assert!(!layout.toggle_window_bar());
+}
+
+#[test]
+fn panel_changes_keep_the_leftmost_column_at_the_edge() {
+    let panel = |left: f64| -> Box<niri_config::LayoutPart> {
+        Box::new(niri_config::LayoutPart {
+            struts: Some(Struts {
+                left: FloatOrInt(left),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    };
+    let settle = || {
+        let mut ops: Vec<Op> = (1..=2).map(Op::Communicate).collect();
+        ops.push(Op::Refresh { is_active: true });
+        ops.push(Op::CompleteAnimations);
+        ops
+    };
+    let positions = |layout: &Layout<TestWindow>| -> Vec<f64> {
+        let ws = layout.active_workspace().unwrap();
+        let mut tiles: Vec<_> = ws
+            .tiles_with_render_positions()
+            .map(|(tile, pos, _)| (*tile.window().id(), pos.x))
+            .collect();
+        tiles.sort_by_key(|(id, _)| *id);
+        tiles.into_iter().map(|(_, x)| x).collect()
+    };
+
+    for focus_first in [false, true] {
+        let mut ops = vec![
+            Op::AddOutput(1),
+            Op::UpdateConfig {
+                layout_config: panel(76.),
+            },
+        ];
+        for id in 1..=2 {
+            ops.push(Op::AddWindow {
+                params: TestWindowParams::new(id),
+            });
+            ops.push(Op::SetColumnWidth(SizeChange::SetProportion(50.)));
+        }
+        ops.extend(settle());
+        ops.push(Op::FocusColumnFirst);
+        if !focus_first {
+            ops.push(Op::FocusColumnLast);
+        }
+        ops.extend(settle());
+        let mut layout = check_ops(ops);
+        let gaps = layout.options.layout.gaps;
+        let start = positions(&layout);
+        assert_eq!(start[0], 76. + gaps);
+
+        // The panel hides: the columns take its space back.
+        check_ops_on_layout(
+            &mut layout,
+            [Op::UpdateConfig {
+                layout_config: panel(0.),
+            }],
+        );
+        check_ops_on_layout(&mut layout, settle());
+        assert_eq!(positions(&layout)[0], gaps, "focus_first: {focus_first}");
+
+        // It shows again: the columns move aside rather than under it.
+        check_ops_on_layout(
+            &mut layout,
+            [Op::UpdateConfig {
+                layout_config: panel(76.),
+            }],
+        );
+        check_ops_on_layout(&mut layout, settle());
+        assert_eq!(positions(&layout), start, "focus_first: {focus_first}");
+    }
+}
+
+#[test]
+fn keyboard_navigation_reveals_a_window_bar_shown_on_demand() {
+    use niri_config::layout::WindowBar;
+
+    let layout = |window_bar| {
+        let options = Options {
+            layout: niri_config::Layout {
+                clip_scroll_to_work_area: true,
+                window_bar,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        check_ops_with_options(
+            options,
+            [
+                Op::AddOutput(1),
+                Op::AddWindow {
+                    params: TestWindowParams::new(1),
+                },
+            ],
+        )
+    };
+    let on_demand = layout(WindowBar::OnDemand);
+    assert!(on_demand.reveal_window_bar_for_navigation());
+    // Further moves keep it shown rather than showing it again.
+    assert!(!on_demand.reveal_window_bar_for_navigation());
+    assert!(!layout(WindowBar::Always).reveal_window_bar_for_navigation());
+    assert!(!layout(WindowBar::Off).reveal_window_bar_for_navigation());
+}
+
+#[test]
+fn scratchpad_windows_hide_and_come_to_the_focused_workspace() {
+    let shown = |layout: &Layout<TestWindow>, id: usize| {
+        layout
+            .active_workspace()
+            .unwrap()
+            .tiles_with_render_positions()
+            .any(|(tile, _, visible)| *tile.window().id() == id && visible)
+    };
+    let focused = |layout: &Layout<TestWindow>| *layout.focus().unwrap().id();
+
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+    ]);
+
+    // Into the scratchpad: floating, hidden, and focus moves on.
+    check_ops_on_layout(&mut layout, [Op::ToggleWindowInScratchpad { id: Some(2) }]);
+    assert!(layout.is_in_scratchpad(&2));
+    assert!(!shown(&layout, 2));
+    assert_eq!(focused(&layout), 1);
+
+    // Shown, focused and floating.
+    check_ops_on_layout(&mut layout, [Op::ToggleScratchpad]);
+    assert!(shown(&layout, 2));
+    assert_eq!(focused(&layout), 2);
+    assert!(layout.active_workspace().unwrap().is_floating(&2));
+
+    // Hidden again while focused.
+    check_ops_on_layout(&mut layout, [Op::ToggleScratchpad]);
+    assert!(!shown(&layout, 2));
+    assert_eq!(focused(&layout), 1);
+
+    // It follows to another workspace.
+    check_ops_on_layout(&mut layout, [Op::FocusWorkspaceDown, Op::ToggleScratchpad]);
+    assert!(shown(&layout, 2));
+    assert_eq!(focused(&layout), 2);
+    assert!(!layout.active_workspace().unwrap().has_window(&1));
+
+    // Out of the scratchpad, it stays a floating window.
+    check_ops_on_layout(&mut layout, [Op::ToggleWindowInScratchpad { id: None }]);
+    assert!(!layout.is_in_scratchpad(&2));
+    assert!(shown(&layout, 2));
+    check_ops_on_layout(&mut layout, [Op::ToggleScratchpad]);
+    assert!(shown(&layout, 2));
+}
+
+#[test]
+fn open_in_scratchpad_window_rule() {
+    let rules = ResolvedWindowRules {
+        open_in_scratchpad: Some(true),
+        ..ResolvedWindowRules::default()
+    };
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams {
+                rules: Some(rules),
+                ..TestWindowParams::new(2)
+            },
+        },
+    ]);
+
+    // It opens hidden in the scratchpad, floating, and focus stays elsewhere.
+    assert!(layout.is_in_scratchpad(&2));
+    assert!(layout.active_workspace().unwrap().is_floating(&2));
+    assert_eq!(*layout.focus().unwrap().id(), 1);
+    let visible = |layout: &Layout<TestWindow>| {
+        layout
+            .active_workspace()
+            .unwrap()
+            .tiles_with_render_positions()
+            .any(|(tile, _, visible)| *tile.window().id() == 2 && visible)
+    };
+    assert!(!visible(&layout));
+
+    check_ops_on_layout(&mut layout, [Op::ToggleScratchpad]);
+    assert!(visible(&layout));
+    assert_eq!(*layout.focus().unwrap().id(), 2);
+}
+
+#[test]
+fn scratchpad_windows_come_and_go_together_where_they_were() {
+    let shown = |layout: &Layout<TestWindow>| -> Vec<(usize, Point<f64, Logical>)> {
+        let mut shown: Vec<_> = layout
+            .active_workspace()
+            .unwrap()
+            .tiles_with_render_positions()
+            .filter(|(tile, _, visible)| *visible && tile.is_scratchpad())
+            .map(|(tile, pos, _)| (*tile.window().id(), pos))
+            .collect();
+        shown.sort_by_key(|(id, _)| *id);
+        shown
+    };
+
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ToggleWindowInScratchpad { id: Some(2) },
+        Op::ToggleWindowInScratchpad { id: Some(3) },
+        Op::Communicate(2),
+        Op::Communicate(3),
+        Op::CompleteAnimations,
+    ]);
+    assert!(shown(&layout).is_empty());
+
+    // Both come together.
+    check_ops_on_layout(&mut layout, [Op::ToggleScratchpad, Op::CompleteAnimations]);
+    let first = shown(&layout);
+    assert_eq!(first.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [2, 3]);
+    assert!(layout.is_in_scratchpad(layout.focus().unwrap().id()));
+
+    // And go together.
+    check_ops_on_layout(&mut layout, [Op::ToggleScratchpad]);
+    assert!(shown(&layout).is_empty());
+    assert_eq!(*layout.focus().unwrap().id(), 1);
+
+    // On another workspace they come back where they were.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::FocusWorkspaceDown,
+            Op::ToggleScratchpad,
+            Op::CompleteAnimations,
+        ],
+    );
+    assert_eq!(shown(&layout), first);
+}
+
+#[test]
+fn floating_windows_snap_to_nearby_lines() {
+    let lines = SnapLines {
+        edges: vec![16., 1904.],
+        middles: vec![960.],
+    };
+    // An edge within reach snaps to its line, the nearest one winning.
+    assert_eq!(snap_axis(25., 400., &lines), -9.);
+    assert_eq!(snap_axis(1494., 400., &lines), 10.);
+    // So does the middle.
+    assert_eq!(snap_axis(755., 400., &lines), 5.);
+    // Out of reach, nothing moves.
+    assert_eq!(snap_axis(300., 400., &lines), 0.);
+    assert_eq!(snap_edge(1890., &lines), 14.);
+    assert_eq!(snap_edge(1880., &lines), 0.);
 }

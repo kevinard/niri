@@ -49,6 +49,7 @@ window-rule {
     open-floating true
     open-focused false
     open-pinned "left"
+    open-in-scratchpad true
 
     // Properties that apply continuously.
     draw-border-with-background false
@@ -550,6 +551,23 @@ window-rule {
     match app-id=r#"^org\.telegram\.desktop$"#
 
     open-pinned "right"
+}
+```
+
+#### `open-in-scratchpad`
+
+<sup>Since: next release</sup>
+
+Send the window to the scratchpad when it opens: it floats and stays hidden until `toggle-scratchpad` shows it.
+A window that would open tiled floats at 60% of the working area's width and 70% of its height, centered.
+See [the scratchpad](./Floating-Windows.md#scratchpad) for how it behaves.
+
+```kdl
+// A terminal kept at hand on every workspace.
+window-rule {
+    match app-id="^scratch-term$"
+
+    open-in-scratchpad true
 }
 ```
 

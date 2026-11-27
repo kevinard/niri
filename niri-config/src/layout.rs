@@ -23,6 +23,9 @@ pub struct Layout {
     pub empty_workspace_above_first: bool,
     pub default_column_display: ColumnDisplay,
     pub gaps: f64,
+    pub clip_scroll_to_work_area: bool,
+    /// When the window bar shows above the scrolling columns.
+    pub window_bar: WindowBar,
     pub struts: Struts,
     pub background_color: Color,
     pub fullscreen_backdrop_color: Color,
@@ -48,6 +51,8 @@ impl Default for Layout {
             empty_workspace_above_first: false,
             default_column_display: ColumnDisplay::Normal,
             gaps: 16.,
+            clip_scroll_to_work_area: false,
+            window_bar: WindowBar::Always,
             struts: Struts::default(),
             preset_window_heights: vec![
                 PresetSize::Proportion(1. / 3.),
@@ -73,6 +78,7 @@ impl MergeWith<LayoutPart> for Layout {
             always_center_single_column,
             empty_workspace_above_first,
             gaps,
+            clip_scroll_to_work_area,
         );
 
         merge_clone!(
@@ -80,6 +86,7 @@ impl MergeWith<LayoutPart> for Layout {
             preset_column_widths,
             preset_window_heights,
             center_focused_column,
+            window_bar,
             default_column_display,
             struts,
             background_color,
@@ -131,6 +138,10 @@ pub struct LayoutPart {
     #[knuffel(child, unwrap(argument))]
     pub gaps: Option<FloatOrInt<0, 65535>>,
     #[knuffel(child)]
+    pub clip_scroll_to_work_area: Option<Flag>,
+    #[knuffel(child, unwrap(argument))]
+    pub window_bar: Option<WindowBar>,
+    #[knuffel(child)]
     pub struts: Option<Struts>,
     #[knuffel(child)]
     pub background_color: Option<Color>,
@@ -166,6 +177,20 @@ pub struct Struts {
     pub top: FloatOrInt<-65535, 65535>,
     #[knuffel(child, unwrap(argument), default)]
     pub bottom: FloatOrInt<-65535, 65535>,
+}
+
+/// When the window bar, which lists the windows of the scrolling layout, is shown. It needs
+/// `clip-scroll-to-work-area`.
+#[derive(knuffel::DecodeScalar, Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum WindowBar {
+    /// Always shown, in a row reserved above the columns.
+    #[default]
+    Always,
+    /// Hidden until the pointer touches the top edge of the work area or `toggle-window-bar`
+    /// reveals it, then shown over the windows.
+    OnDemand,
+    /// Never shown.
+    Off,
 }
 
 #[derive(knuffel::DecodeScalar, Debug, Default, PartialEq, Eq, Clone, Copy)]

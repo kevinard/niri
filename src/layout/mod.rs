@@ -79,8 +79,10 @@ pub mod closing_window;
 pub mod floating;
 pub mod focus_ring;
 pub mod insert_hint_element;
+pub mod layout_menu;
 pub mod monitor;
 pub mod opening_window;
+mod overview_caption;
 pub mod scrolling;
 pub mod shadow;
 pub mod tab_indicator;
@@ -135,6 +137,10 @@ pub trait LayoutElement {
 
     /// Unique ID of this element.
     fn id(&self) -> &Self::Id;
+
+    fn with_overview_title<T>(&self, display: impl FnOnce(&str) -> T) -> T {
+        display("")
+    }
 
     /// Updates the config for the element.
     fn update_config(&mut self, blur_config: niri_config::Blur) {
@@ -241,6 +247,10 @@ pub trait LayoutElement {
     }
     /// Calls `f` with the text compositor decorations display: the title, else the app ID.
     fn with_decoration_title<T>(&self, f: impl FnOnce(&str) -> T) -> T {
+        f("")
+    }
+    /// The application ID, used to show the application's icon.
+    fn with_app_id<T>(&self, f: impl FnOnce(&str) -> T) -> T {
         f("")
     }
     /// The titlebar button under the pointer or a finger, and its state.
@@ -460,6 +470,8 @@ struct InteractiveMoveData<W: LayoutElement> {
     ///
     /// This helps the pointer remain inside the window as it resizes.
     pub(self) pointer_ratio_within_window: (f64, f64),
+    /// How far a floating window is pulled to snap to an edge or another window.
+    pub(self) snap: Point<f64, Logical>,
     /// Config overrides for the output where the window is currently located.
     ///
     /// Cached here to be accessible while an output is removed.
@@ -641,10 +653,48 @@ impl<W: LayoutElement> InteractiveMoveData<W> {
         ));
         let pos = self.pointer_pos_within_output
             - (pointer_offset_within_window + self.tile.window_loc() - self.tile.render_offset())
-                .upscale(zoom);
+                .upscale(zoom)
+            + self.snap.upscale(zoom);
         // Round to physical pixels.
         pos.to_physical_precise_round(scale).to_logical(scale)
     }
+}
+
+/// How close an edge comes before it snaps.
+pub(super) const SNAP_DISTANCE: f64 = 14.;
+
+/// Lines a floating window snaps to along one axis: those its edges meet, and those its
+/// middle meets.
+#[derive(Debug, Default)]
+pub(super) struct SnapLines {
+    pub edges: Vec<f64>,
+    pub middles: Vec<f64>,
+}
+
+/// The shift that snaps a span starting at `start` and `len` long to the nearest line within
+/// [`SNAP_DISTANCE`], or zero.
+pub(super) fn snap_axis(start: f64, len: f64, lines: &SnapLines) -> f64 {
+    let end = start + len;
+    let middle = start + len / 2.;
+    lines
+        .edges
+        .iter()
+        .flat_map(|line| [line - start, line - end])
+        .chain(lines.middles.iter().map(|line| line - middle))
+        .filter(|shift| shift.abs() <= SNAP_DISTANCE)
+        .min_by(|a, b| a.abs().total_cmp(&b.abs()))
+        .unwrap_or(0.)
+}
+
+/// The shift that snaps one edge at `edge` to the nearest line, or zero.
+pub(super) fn snap_edge(edge: f64, lines: &SnapLines) -> f64 {
+    lines
+        .edges
+        .iter()
+        .map(|line| line - edge)
+        .filter(|shift| shift.abs() <= SNAP_DISTANCE)
+        .min_by(|a, b| a.abs().total_cmp(&b.abs()))
+        .unwrap_or(0.)
 }
 
 impl ActivateWindow {
@@ -1007,6 +1057,7 @@ impl<W: LayoutElement> Layout<W> {
     ) -> Option<&Output> {
         let scrolling_height = height.map(SizeChange::from);
         let open_pinned = window.rules().open_pinned;
+        let open_in_scratchpad = window.rules().open_in_scratchpad == Some(true);
         let id = window.id().clone();
 
         match &mut self.monitor_set {
@@ -1120,6 +1171,16 @@ impl<W: LayoutElement> Layout<W> {
                     ws.open_pinned(&id, side);
                 }
 
+                // Or send it to the scratchpad.
+                if open_in_scratchpad {
+                    let ws = mon
+                        .workspaces
+                        .iter_mut()
+                        .find(|ws| ws.has_window(&id))
+                        .unwrap();
+                    ws.add_to_scratchpad(&id);
+                }
+
                 Some(&mon.output)
             }
             MonitorSet::NoOutputs { workspaces } => {
@@ -1206,6 +1267,9 @@ impl<W: LayoutElement> Layout<W> {
                 // Pin the new column if a window rule asks for it.
                 if let Some(side) = open_pinned {
                     ws.open_pinned(&id, side);
+                }
+                if open_in_scratchpad {
+                    ws.add_to_scratchpad(&id);
                 }
 
                 None
@@ -1900,6 +1964,64 @@ impl<W: LayoutElement> Layout<W> {
         monitors.iter_mut()
     }
 
+    /// Shows or hides the window bar of the active output, when it is shown on demand.
+    pub fn toggle_window_bar(&self) -> bool {
+        self.active_monitor_ref()
+            .is_some_and(|monitor| monitor.toggle_window_bar())
+    }
+
+    /// Shows the window bar of the active output for a moment while keyboard navigation moves
+    /// between windows, when it is shown on demand.
+    pub fn reveal_window_bar_for_navigation(&self) -> bool {
+        self.active_monitor_ref()
+            .is_some_and(|monitor| monitor.reveal_window_bar_for_navigation())
+    }
+
+    fn monitor_of_window(&self, window: &W::Id) -> Option<&Monitor<W>> {
+        self.monitors()
+            .find(|mon| mon.windows().any(|win| win.id() == window))
+    }
+
+    /// Opens, pins open or closes the layout menu of `window`, from a click on its titlebar
+    /// button. Other layout menus close.
+    pub fn toggle_layout_menu(&self, window: &W::Id) -> bool {
+        let Some(monitor) = self.monitor_of_window(window) else {
+            return false;
+        };
+        let mut changed = false;
+        for other in self.monitors() {
+            if other.output != monitor.output {
+                changed |= other.close_layout_menu();
+            }
+        }
+        monitor.toggle_layout_menu(window) || changed
+    }
+
+    /// Opens the layout menu of `window` because the pointer rests on its titlebar button.
+    pub fn open_layout_menu_on_hover(&self, window: &W::Id) -> bool {
+        if self
+            .monitors()
+            .any(|mon| mon.layout_menu_window().is_some())
+        {
+            return false;
+        }
+        self.monitor_of_window(window)
+            .is_some_and(|monitor| monitor.open_layout_menu(window, true))
+    }
+
+    pub fn close_layout_menus(&self) -> bool {
+        let mut changed = false;
+        for monitor in self.monitors() {
+            changed |= monitor.close_layout_menu();
+        }
+        changed
+    }
+
+    /// The window whose layout menu is open, if any.
+    pub fn layout_menu_window(&self) -> Option<W::Id> {
+        self.monitors().find_map(|mon| mon.layout_menu_window())
+    }
+
     pub fn monitor_for_output(&self, output: &Output) -> Option<&Monitor<W>> {
         self.monitors().find(|mon| &mon.output == output)
     }
@@ -2452,6 +2574,124 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Shows the scratchpad on the focused workspace, or hides it.
+    ///
+    /// The scratchpad works like a workspace of floating windows laid over the others: all its
+    /// windows come and go together, each where it was left. While they are shown here, a
+    /// scratchpad window with focus hides them all; without focus, the topmost one takes it.
+    /// Otherwise they all come to the focused workspace, the topmost focused.
+    pub fn toggle_scratchpad(&mut self) -> bool {
+        let Some(monitor) = self.active_monitor_ref() else {
+            return false;
+        };
+        let output = monitor.output.clone();
+        let active_ws = monitor.active_workspace_ref().id();
+        let active_ws_idx = monitor.active_workspace_idx;
+        // (window, hidden, on the focused workspace), topmost first on each workspace.
+        let windows: Vec<(W::Id, bool, bool)> = self
+            .workspaces()
+            .flat_map(|(_, _, ws)| {
+                let here = ws.id() == active_ws;
+                ws.scratchpad_windows()
+                    .map(move |(window, hidden)| (window.id().clone(), hidden, here))
+            })
+            .collect();
+        if windows.is_empty() {
+            return false;
+        }
+
+        let focused = self.focus().map(|window| window.id().clone());
+        let shown_here: Vec<&W::Id> = windows
+            .iter()
+            .filter(|(_, hidden, here)| !hidden && *here)
+            .map(|(id, _, _)| id)
+            .collect();
+        if !shown_here.is_empty() {
+            let has_focus = focused
+                .as_ref()
+                .is_some_and(|focused| windows.iter().any(|(id, _, _)| id == focused));
+            if has_focus {
+                for ws in self.workspaces_mut() {
+                    let ids: Vec<W::Id> = ws
+                        .scratchpad_windows()
+                        .filter(|(_, hidden)| !hidden)
+                        .map(|(window, _)| window.id().clone())
+                        .collect();
+                    for id in ids {
+                        ws.hide_scratchpad_window(&id);
+                    }
+                }
+            } else {
+                let top = shown_here[0].clone();
+                self.activate_window(&top);
+            }
+            return true;
+        }
+
+        // Bring them all here, keeping their places, the bottommost first so the stacking
+        // stays as it was.
+        for (id, _, here) in windows.iter().rev() {
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.show_scratchpad_window(id);
+            }
+            if !here {
+                let on_this_output = self
+                    .monitor_for_output(&output)
+                    .is_some_and(|mon| mon.has_window(id));
+                if on_this_output {
+                    self.move_to_workspace(Some(id), active_ws_idx, ActivateWindow::No);
+                } else {
+                    self.move_to_output(Some(id), &output, Some(active_ws_idx), ActivateWindow::No);
+                }
+            }
+        }
+        let top = windows[0].0.clone();
+        self.activate_window(&top);
+        true
+    }
+
+    /// Adds the window to the scratchpad, floating and hidden, or takes it out of the
+    /// scratchpad, where it stays as an ordinary floating window.
+    pub fn toggle_window_in_scratchpad(&mut self, id: Option<&W::Id>) -> bool {
+        let Some(id) = id
+            .cloned()
+            .or_else(|| self.focus().map(|window| window.id().clone()))
+        else {
+            return false;
+        };
+        let Some(in_scratchpad) = self.workspaces().find_map(|(_, _, ws)| {
+            ws.has_window(&id).then(|| {
+                ws.scratchpad_windows()
+                    .any(|(window, _)| window.id() == &id)
+            })
+        }) else {
+            return false;
+        };
+        if in_scratchpad {
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(&id)) {
+                ws.set_scratchpad(&id, false);
+            }
+            return true;
+        }
+        if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(&id)) {
+            ws.add_to_scratchpad(&id);
+        }
+        true
+    }
+
+    /// Whether the window belongs to the scratchpad.
+    pub fn is_in_scratchpad(&self, id: &W::Id) -> bool {
+        self.workspaces()
+            .any(|(_, _, ws)| ws.scratchpad_windows().any(|(window, _)| window.id() == id))
+    }
+
+    /// Folds or unfolds the pinned column of `id`, or every pinned column of the active
+    /// workspace without an ID.
+    pub fn toggle_pinned_column_folded(&mut self, id: Option<&W::Id>) -> bool {
+        self.workspace_for_column_action(id)
+            .is_some_and(|workspace| workspace.toggle_pinned_column_folded(id))
+    }
+
     pub fn focus(&self) -> Option<&W> {
         self.focus_with_output().map(|(win, _out)| win)
     }
@@ -2576,6 +2816,19 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn overview_zoom(&self) -> f64 {
+        // Monitors may zoom out further to fit their workspaces; follow the active one.
+        if let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &self.monitor_set
+        {
+            if let Some(monitor) = monitors.get(*active_monitor_idx) {
+                if self.overview_progress.is_some() {
+                    return monitor.overview_zoom();
+                }
+            }
+        }
         let progress = self.overview_progress.as_ref().map(|p| p.value());
         compute_overview_zoom(&self.options, progress)
     }
@@ -4202,6 +4455,7 @@ impl<W: LayoutElement> Layout<W> {
                     is_full_width,
                     is_floating,
                     pointer_ratio_within_window,
+                    snap: Point::default(),
                     output_config,
                     workspace_config,
                 };
@@ -4265,6 +4519,21 @@ impl<W: LayoutElement> Layout<W> {
                 }
 
                 move_.pointer_pos_within_output = pointer_pos_within_output;
+
+                // A floating window snaps to the edges of the working area and of the other
+                // floating windows as it comes close.
+                move_.snap = Point::default();
+                if move_.is_floating && !self.overview_open {
+                    if let Some(mon) = self.monitor_for_output(&output) {
+                        let rect =
+                            Rectangle::new(move_.tile_render_location(1.), move_.tile.tile_size());
+                        let (xs, ys) = mon.floating_snap_lines(move_.tile.window().id());
+                        move_.snap = Point::from((
+                            snap_axis(rect.loc.x, rect.size.w, &xs),
+                            snap_axis(rect.loc.y, rect.size.h, &ys),
+                        ));
+                    }
+                }
 
                 self.interactive_move = Some(InteractiveMoveState::Moving(move_));
             }
@@ -5035,6 +5304,15 @@ impl<W: LayoutElement> Layout<W> {
         let _span = tracy_client::span!("Layout::refresh");
 
         self.is_active = is_active;
+
+        // The window bar of every output shows whether the scratchpad holds windows.
+        let scratchpad = self
+            .workspaces()
+            .map(|(_, _, ws)| ws.scratchpad_windows().count())
+            .sum();
+        for monitor in self.monitors() {
+            monitor.set_scratchpad_count(scratchpad);
+        }
 
         let mut ongoing_scrolling_dnd = self.dnd.is_some().then_some(true);
 

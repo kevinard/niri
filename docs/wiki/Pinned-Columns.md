@@ -29,8 +29,8 @@ Pinning a column to an edge that already has one unpins the old column, which be
   The other columns keep their order.
   Unpinning a column returns it to the scrolling columns at the edge it was pinned to.
 - The other columns get the rest of the working area, as if the pinned column was a [strut](./Configuration:-Layout.md#struts) with an extra gap.
-  Proportional widths like `proportion 0.5` are relative to this remaining area, so two half-width columns still fit next to a pinned column.
-  The pinned column's own proportional width is relative to the whole working area.
+  Proportional widths like `proportion 0.5` stay relative to the whole working area, so pinning a column does not make the others narrower.
+  A column narrows only when it would not fit in the remaining area, which a full-width column then fills.
   Pinned columns together never take more than three quarters of the working area; wider pinned columns overlap the scrolling columns.
 - Focus moves into a pinned column at the end of the workspace: `focus-column-left` from the first scrolling column focuses the column pinned to the left, and `focus-column-first` and `focus-column-last` focus the pinned columns.
   Focusing a pinned column doesn't scroll the view.
@@ -46,6 +46,21 @@ Pinning a column to an edge that already has one unpins the old column, which be
 - A fullscreen or maximized pinned column keeps its pin, but while it is fullscreen or maximized it behaves like an ordinary column at its end of the workspace: the other columns get the whole working area and can scroll it out of view.
   Once it returns to normal, it goes back to its edge.
 - `center-column`, `center-visible-columns` and `expand-column-to-available-width` do nothing for a focused pinned column.
+
+### Folding
+
+`toggle-pinned-column-folded` folds the pinned columns of the focused workspace past their edges, or unfolds them when they are all folded.
+A folded column gives its space back to the scrolling columns, which keep their widths, and keeps its pin.
+It leaves a slim tab in the gap at the middle of its edge; pointing at the tab shows the column's name, and clicking it unfolds the column.
+Focusing a folded column in any other way, for example with `focus-column-first` or from the window bar, unfolds it too.
+Folding the focused column moves focus to the nearest scrolling column; a workspace without scrolling columns keeps its pinned column in view.
+Unpinning a folded column returns it to the scrolling columns.
+
+```kdl
+binds {
+    Mod+Ctrl+P { toggle-pinned-column-folded; }
+}
+```
 
 ### Window rule
 

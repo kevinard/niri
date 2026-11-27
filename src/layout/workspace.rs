@@ -1,4 +1,5 @@
 use std::cmp::max;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
 use super::shadow::Shadow;
-use super::tile::{Tile, TileRenderSnapshot};
+use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
 use super::{
     ActivateWindow, HitType, InsertPosition, InteractiveResizeData, LayoutElement, Options,
     RemovedTile, SizeFrac,
@@ -151,6 +152,17 @@ niri_render_elements! {
     }
 }
 
+impl<R: NiriRenderer> WorkspaceRenderElement<R> {
+    pub(super) fn is_window_shadow(&self) -> bool {
+        matches!(
+            self,
+            Self::Scrolling(ScrollingSpaceRenderElement::Tile(
+                TileRenderElement::Shadow(_)
+            ))
+        )
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct InteractiveResize<W: LayoutElement> {
     pub window: W::Id,
@@ -178,6 +190,8 @@ enum FloatingActive {
     /// This is necessary for focus-follows-mouse that activates but doesn't raise the window to
     /// avoid being annoying.
     NoButRaised,
+    /// A window navigation control selected an unobstructed tiling view.
+    NoWithFloatingHidden,
     /// The floating space is active.
     Yes,
 }
@@ -408,6 +422,12 @@ impl<W: LayoutElement> Workspace<W> {
                 .with_merged_layout(self.layout_config.as_ref())
                 .adjusted_for_scale(scale),
         );
+
+        if !options.layout.clip_scroll_to_work_area
+            && self.floating_is_active == FloatingActive::NoWithFloatingHidden
+        {
+            self.floating_is_active = FloatingActive::No;
+        }
 
         self.scrolling.update_config(
             self.view_size,
@@ -680,7 +700,8 @@ impl<W: LayoutElement> Workspace<W> {
                 }
             }
             WorkspaceAddWindowTarget::NextTo(next_to) => {
-                let activate = activate.map_smart(|| self.active_window().unwrap().id() == next_to);
+                let activate = activate
+                    .map_smart(|| self.active_window().is_some_and(|win| win.id() == next_to));
 
                 let floating_has_window = self.floating.has_window(next_to);
 
@@ -775,8 +796,9 @@ impl<W: LayoutElement> Workspace<W> {
                 self.floating_is_active = FloatingActive::No;
             }
         } else {
-            // Scrolling should remain focused if both are empty.
-            if self.scrolling.is_empty() && !self.floating.is_empty() {
+            // Scrolling should remain focused if both are empty, or if the floating windows are
+            // all hidden in the scratchpad.
+            if self.scrolling.is_empty() && self.floating.has_shown_window() {
                 self.floating_is_active = FloatingActive::Yes;
             }
         }
@@ -1266,6 +1288,13 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    pub fn toggle_pinned_column_folded(&mut self, id: Option<&W::Id>) -> bool {
+        if id.is_some_and(|id| !self.scrolling.has_window(id)) {
+            return false;
+        }
+        self.scrolling.toggle_pinned_column_folded(id)
+    }
+
     /// Applies the open-pinned window rule to a newly added window.
     ///
     /// Floating windows are not pinned: only scrolling-layout columns can be.
@@ -1499,7 +1528,9 @@ impl<W: LayoutElement> Workspace<W> {
             .unwrap();
 
         if self.floating.has_window(&id) {
-            let removed = self.floating.remove_tile(&id);
+            let mut removed = self.floating.remove_tile(&id);
+            // Only floating windows belong to the scratchpad.
+            removed.tile.set_scratchpad(false);
             // FIXME: compute closest pos?
             self.scrolling.add_tile(
                 None,
@@ -1509,7 +1540,7 @@ impl<W: LayoutElement> Workspace<W> {
                 removed.is_full_width,
                 None,
             );
-            if target_is_active {
+            if target_is_active || self.floating.is_empty() {
                 self.floating_is_active = FloatingActive::No;
             }
         } else {
@@ -1555,6 +1586,65 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.toggle_window_floating(id);
+    }
+
+    /// The floating windows of the scratchpad, with whether each is hidden.
+    pub fn scratchpad_windows(&self) -> impl Iterator<Item = (&W, bool)> + '_ {
+        self.floating
+            .tiles()
+            .filter(|tile| tile.is_scratchpad())
+            .map(|tile| (tile.window(), tile.is_hidden()))
+    }
+
+    /// Adds a floating window to the scratchpad, or takes it out.
+    pub fn set_scratchpad(&mut self, id: &W::Id, scratchpad: bool) -> bool {
+        let Some(tile) = self
+            .floating
+            .tiles_mut()
+            .find(|tile| tile.window().id() == id)
+        else {
+            return false;
+        };
+        tile.set_scratchpad(scratchpad);
+        true
+    }
+
+    /// Adds a window to the scratchpad and hides it. A tiled window floats first, at a
+    /// comfortable size rather than as tall as its column, centered in the working area.
+    pub fn add_to_scratchpad(&mut self, id: &W::Id) {
+        if !self.floating.has_window(id) {
+            self.toggle_window_floating(Some(id));
+            self.set_window_width(Some(id), SizeChange::SetProportion(60.));
+            self.set_window_height(Some(id), SizeChange::SetProportion(70.));
+            self.center_window(Some(id));
+        }
+        self.set_scratchpad(id, true);
+        self.hide_scratchpad_window(id);
+    }
+
+    /// Shows a window hidden in the scratchpad where it is, without focusing it.
+    pub fn show_scratchpad_window(&mut self, id: &W::Id) -> bool {
+        let Some(tile) = self
+            .floating
+            .tiles_mut()
+            .find(|tile| tile.window().id() == id)
+        else {
+            return false;
+        };
+        tile.set_hidden(false);
+        true
+    }
+
+    /// Hides a floating window of the scratchpad. Focus moves to another shown floating window,
+    /// or to the tiled windows.
+    pub fn hide_scratchpad_window(&mut self, id: &W::Id) -> bool {
+        if !self.floating.hide_window(id) {
+            return false;
+        }
+        if self.floating_is_active.get() && !self.floating.active_window_is_shown() {
+            self.floating_is_active = FloatingActive::No;
+        }
+        true
     }
 
     pub fn focus_floating(&mut self) {
@@ -1690,7 +1780,8 @@ impl<W: LayoutElement> Workspace<W> {
 
         let floating = self.floating.tiles_with_render_positions();
         let visible = self.is_floating_visible();
-        let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
+        // Windows hidden in the scratchpad keep their place but are not visible.
+        let floating = floating.map(move |(tile, pos)| (tile, pos, visible && !tile.is_hidden()));
 
         floating.chain(scrolling)
     }
@@ -1736,13 +1827,18 @@ impl<W: LayoutElement> Workspace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        visible_x: Option<&Range<f64>>,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
         let scrolling_focus_ring = focus_ring && !self.floating_is_active();
-        self.scrolling
-            .render(ctx, xray_pos, scrolling_focus_ring, layer, &mut |elem| {
-                push(elem.into())
-            });
+        self.scrolling.render(
+            ctx,
+            xray_pos,
+            scrolling_focus_ring,
+            layer,
+            visible_x,
+            &mut |elem| push(elem.into()),
+        );
     }
 
     pub fn render_floating<R: NiriRenderer>(
@@ -1790,12 +1886,39 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.fullscreen_window_above_top_layer()
     }
 
+    /// How `window` is arranged, for the layout menu.
+    pub fn layout_menu_state(&self, window: &W::Id) -> Option<super::layout_menu::LayoutMenuState> {
+        if let Some(tile) = self
+            .floating
+            .tiles()
+            .find(|tile| tile.window().id() == window)
+        {
+            return Some(super::layout_menu::LayoutMenuState {
+                floating: true,
+                in_scratchpad: tile.is_scratchpad(),
+                ..Default::default()
+            });
+        }
+        self.scrolling.layout_menu_state(window)
+    }
+
     pub fn is_floating_visible(&self) -> bool {
+        if self.floating_is_active == FloatingActive::NoWithFloatingHidden {
+            return false;
+        }
         // If the focus is on a fullscreen scrolling window, hide the floating windows.
         matches!(
             self.floating_is_active,
             FloatingActive::Yes | FloatingActive::NoButRaised
         ) || self.fullscreen_window_above_top_layer().is_none()
+    }
+
+    /// Reveal the selected tiled window while keeping floating windows in the
+    /// workspace, ready to select again from its navigation strip or overview.
+    pub fn reveal_window_from_navigation(&mut self) {
+        if !self.floating.is_empty() && !self.floating_is_active.get() {
+            self.floating_is_active = FloatingActive::NoWithFloatingHidden;
+        }
     }
 
     pub fn store_unmap_snapshot_if_empty(
@@ -1870,6 +1993,7 @@ impl<W: LayoutElement> Workspace<W> {
             if let Some(rv) = self
                 .floating
                 .tiles_with_render_positions()
+                .filter(|(tile, _)| !tile.is_hidden())
                 .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
             {
                 return Some(rv);
@@ -1945,7 +2069,9 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating_is_active = FloatingActive::Yes;
             true
         } else if self.scrolling.activate_window(window) {
-            self.floating_is_active = FloatingActive::No;
+            if self.floating_is_active != FloatingActive::NoWithFloatingHidden {
+                self.floating_is_active = FloatingActive::No;
+            }
             true
         } else {
             false
@@ -1960,6 +2086,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating_is_active = match self.floating_is_active {
                 FloatingActive::No => FloatingActive::No,
                 FloatingActive::NoButRaised => FloatingActive::NoButRaised,
+                FloatingActive::NoWithFloatingHidden => FloatingActive::NoWithFloatingHidden,
                 FloatingActive::Yes => FloatingActive::NoButRaised,
             };
             true
@@ -2142,7 +2269,7 @@ impl<W: LayoutElement> Workspace<W> {
                 !self.floating_is_active.get(),
                 "when floating is empty it must never be active"
             );
-        } else if self.scrolling.is_empty() {
+        } else if self.scrolling.is_empty() && self.floating.has_shown_window() {
             assert!(
                 self.floating_is_active.get(),
                 "when scrolling is empty but floating isn't, floating should be active"
@@ -2179,7 +2306,7 @@ pub(super) fn compute_working_area(output: &Output) -> Rectangle<f64, Logical> {
     layer_map_for_output(output).non_exclusive_zone().to_f64()
 }
 
-fn compute_workspace_shadow_config(
+pub(super) fn compute_workspace_shadow_config(
     config: niri_config::WorkspaceShadow,
     view_size: Size<f64, Logical>,
 ) -> niri_config::Shadow {

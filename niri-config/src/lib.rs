@@ -1981,6 +1981,8 @@ mod tests {
                 empty_workspace_above_first: false,
                 default_column_display: Tabbed,
                 gaps: 8.0,
+                clip_scroll_to_work_area: false,
+                window_bar: Always,
                 struts: Struts {
                     left: FloatOrInt(
                         1.0,
@@ -2334,6 +2336,7 @@ mod tests {
                         true,
                     ),
                     open_pinned: None,
+                    open_in_scratchpad: None,
                     on_xdg_activate: Some(
                         Ignore,
                     ),
