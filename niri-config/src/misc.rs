@@ -124,6 +124,7 @@ pub struct Overview {
     pub backdrop_color: Color,
     pub workspace_shadow: WorkspaceShadow,
     pub emit_typed_text: bool,
+    pub workspace_cards: bool,
 }
 
 impl Default for Overview {
@@ -133,6 +134,7 @@ impl Default for Overview {
             backdrop_color: DEFAULT_BACKDROP_COLOR,
             workspace_shadow: WorkspaceShadow::default(),
             emit_typed_text: false,
+            workspace_cards: false,
         }
     }
 }
@@ -147,11 +149,19 @@ pub struct OverviewPart {
     pub workspace_shadow: Option<WorkspaceShadowPart>,
     #[knuffel(child)]
     pub emit_typed_text: Option<Flag>,
+    #[knuffel(child)]
+    pub workspace_cards: Option<Flag>,
 }
 
 impl MergeWith<OverviewPart> for Overview {
     fn merge_with(&mut self, part: &OverviewPart) {
-        merge!((self, part), zoom, workspace_shadow, emit_typed_text);
+        merge!(
+            (self, part),
+            zoom,
+            workspace_shadow,
+            emit_typed_text,
+            workspace_cards
+        );
         merge_clone!((self, part), backdrop_color);
     }
 }

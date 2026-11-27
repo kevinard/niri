@@ -12,8 +12,10 @@ use smithay::utils::{Logical, Point, Transform};
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 
-const HEIGHT: f64 = 28.;
-const PADDING: f64 = 10.;
+/// Height of a group title caption.
+pub(super) const HEIGHT: f64 = 28.;
+/// Space between a caption's edge and its text.
+pub(super) const PADDING: f64 = 10.;
 pub(super) const SCROLL_BUTTON_HEIGHT: f64 = 32.;
 pub(super) const STRIP_FORECAST_HEIGHT: f64 = 126.;
 pub(super) const STRIP_TRAY_HEIGHT: f64 = 52.;

@@ -37,6 +37,7 @@ overview {
     }
 
     // emit-typed-text
+    // workspace-cards
 }
 
 xwayland-satellite {
@@ -269,6 +270,23 @@ Key presses with <kbd>Ctrl</kbd>, <kbd>Alt</kbd> or <kbd>Super</kbd> held, and k
 ```kdl
 overview {
     emit-typed-text
+}
+```
+
+#### `workspace-cards`
+
+<sup>Since: next release</sup>
+
+Present each zoomed-out workspace as a card.
+
+Layer surfaces placed [within the backdrop](./Configuration:-Layer-Rules.md#place-within-backdrop), such as a wallpaper, are drawn inside every workspace as well as in the backdrop while the overview is open, so each workspace shows the wallpaper behind its windows, like it does on the desktop.
+The backdrop around the workspaces dims towards the `backdrop-color`, and a label above each workspace names it: its configured name, or "Workspace" and its number; the empty workspace at the end reads "New workspace".
+
+Outside the overview, nothing changes: the wallpaper stays still in the backdrop during workspace switches.
+
+```kdl
+overview {
+    workspace-cards
 }
 ```
 

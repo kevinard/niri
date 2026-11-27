@@ -17,8 +17,8 @@ use niri_config::debug::PreviewRender;
 use niri_config::output::MaxBpc;
 use niri_config::window_rule::VrrRule;
 use niri_config::{
-    Bind, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
-    WorkspaceReference, Xkb,
+    Bind, Config, CornerRadius, FloatOrInt, Key, Modifiers, OutputName, TrackLayout,
+    WarpMouseToFocusMode, WorkspaceReference, Xkb,
 };
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{InputTime, Keycode};
@@ -165,6 +165,7 @@ use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
 use crate::render_helpers::blur::BlurOptions;
+use crate::render_helpers::clipped_surface::ClippedSurfaceRenderElement;
 use crate::render_helpers::debug::push_opaque_regions;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
@@ -201,6 +202,9 @@ use crate::window::{
 };
 
 const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
+
+/// How far the backdrop around the workspace cards fades towards the backdrop color.
+const OVERVIEW_BACKDROP_DIM: f64 = 0.55;
 
 // We'll try to send frame callbacks at least once a second. We'll make a timer that fires once a
 // second, so with the worst timing the maximum interval between two frame callbacks for a surface
@@ -564,6 +568,8 @@ pub struct OutputState {
     /// Solid color buffer for the backdrop that we use instead of clearing to avoid damage
     /// tracking issues and make screenshots easier.
     pub backdrop_buffer: SolidColorBuffer,
+    /// Dims the backdrop around the workspace cards in the overview.
+    pub overview_dim_buffer: SolidColorBuffer,
     pub xray: Xray,
     pub lock_render_state: LockRenderState,
     pub lock_surface: Option<LockSurface>,
@@ -2062,6 +2068,7 @@ impl State {
             if let Some(state) = self.niri.output_state.get_mut(output) {
                 if state.backdrop_buffer.color() != backdrop_color {
                     state.backdrop_buffer.set_color(backdrop_color);
+                    state.overview_dim_buffer.set_color(backdrop_color);
                     recolored_outputs.push(output.clone());
                 }
             }
@@ -3229,6 +3236,7 @@ impl Niri {
             vblank_throttle: VBlankThrottle::new(self.event_loop.clone(), name.connector.clone()),
             frame_callback_sequence: 0,
             backdrop_buffer: SolidColorBuffer::new(size, backdrop_color),
+            overview_dim_buffer: SolidColorBuffer::new(size, backdrop_color),
             xray: Xray::new(),
             lock_render_state,
             lock_surface: None,
@@ -3354,6 +3362,7 @@ impl Niri {
 
         if let Some(state) = self.output_state.get_mut(output) {
             state.backdrop_buffer.resize(output_size);
+            state.overview_dim_buffer.resize(output_size);
 
             state.lock_color_buffer.resize(output_size);
             if let Some(lock_surface) = &state.lock_surface {
@@ -4683,6 +4692,8 @@ impl Niri {
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
         let zoom = mon.overview_zoom();
+        let cards = mon.workspace_cards_progress();
+        let clip_shader = ClippedSurfaceRenderElement::shader(ctx.renderer).cloned();
         let pointer = self.seat.get_pointer().unwrap();
         let pointer = (mon.has_navigation_controls()
             && self.pointer_visibility.is_visible()
@@ -4829,10 +4840,59 @@ impl Niri {
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
                 process!(geo)(ws.render_background());
+
+                // Workspace cards show the wallpaper of the backdrop behind their windows,
+                // rounded like the card.
+                if cards.is_some() {
+                    let card = Rectangle::from_size(mon.view_size());
+                    let radius = CornerRadius::from(mon.workspace_card_radius() as f32);
+                    let clip = |elem: LayerSurfaceRenderElement<R>| match elem {
+                        LayerSurfaceRenderElement::Wayland(elem) => match clip_shader.clone() {
+                            Some(shader)
+                                if ClippedSurfaceRenderElement::will_clip(
+                                    &elem,
+                                    output_scale,
+                                    card,
+                                    radius,
+                                ) =>
+                            {
+                                LayerSurfaceRenderElement::Clipped(
+                                    ClippedSurfaceRenderElement::new(
+                                        elem,
+                                        output_scale,
+                                        card,
+                                        shader,
+                                        radius,
+                                    ),
+                                )
+                            }
+                            _ => LayerSurfaceRenderElement::Wayland(elem),
+                        },
+                        elem => elem,
+                    };
+                    let process = process!(geo);
+                    push_normal_from_layer!(Layer::Background, ns, xray_pos, true, &mut |elem| {
+                        process(clip(elem))
+                    });
+                }
             }
         }
 
+        mon.render_workspace_labels(ctx.renderer, &mut |elem| push(elem.into()));
         mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
+
+        // The backdrop dims around the workspace cards.
+        if let Some(progress) = cards {
+            push(
+                SolidColorRenderElement::from_buffer(
+                    &state.overview_dim_buffer,
+                    (0., 0.),
+                    (OVERVIEW_BACKDROP_DIM * progress) as f32,
+                    Kind::Unspecified,
+                )
+                .into(),
+            );
+        }
 
         // Then the backdrop.
         push_popups_from_layer!(Layer::Background, true);
