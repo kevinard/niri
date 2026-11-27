@@ -1822,7 +1822,14 @@ impl<W: LayoutElement> Monitor<W> {
         let gap = self.workspace_gap(zoom);
         let ws_height_with_gap = ws_size.h + gap;
 
-        let static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
+        let mut static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
+        // Workspace cards shrink towards the middle of the working area, so they
+        // centre beside panels such as a side bar rather than under them.
+        if self.options.overview.workspace_cards {
+            let area = self.working_area;
+            let pivot_x = area.loc.x + area.size.w / 2.;
+            static_offset.x = pivot_x * (1. - ws_size.w / self.view_size.w.max(1.));
+        }
         let static_offset = static_offset
             .to_physical_precise_round(scale)
             .to_logical(scale);
@@ -4171,7 +4178,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     /// Labels above the zoomed-out workspaces: a workspace's name, or "Workspace" and its
-    /// number, and "New workspace" for the empty one at the end.
+    /// number, marked "Empty" for the empty one at the end.
     pub fn render_workspace_labels<R: NiriRenderer>(
         &self,
         renderer: &mut R,
@@ -4205,9 +4212,12 @@ impl<W: LayoutElement> Monitor<W> {
         let mut labels = self.workspace_labels.borrow_mut();
         labels.resize_with(self.workspaces.len(), PreviewLabel::default);
         for ((idx, ws), geo) in self.workspaces_with_render_geo_idx() {
+            // Numbered like the workspaces in a bar; the empty one at the end says so.
             let text = match ws.name() {
                 Some(name) => name.clone(),
-                None if idx == last && !ws.has_windows() => "New workspace".to_owned(),
+                None if idx == last && !ws.has_windows() => {
+                    format!("Workspace {} · Empty", idx + 1)
+                }
                 None => format!("Workspace {}", idx + 1),
             };
             let emphasis = if idx == self.active_workspace_idx {
