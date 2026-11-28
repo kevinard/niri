@@ -57,6 +57,8 @@ const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
 const MAX_NAVIGATION_TITLES: usize = 8;
 
 /// Corner radius of a workspace card in the overview, on screen.
+/// The height of the compact empty workspace card, as a share of a full card.
+const COMPACT_WORKSPACE_SHARE: f64 = 0.34;
 const WORKSPACE_CARD_RADIUS: f64 = 16.;
 /// How long a window bar shown on demand stays after the last keyboard move between windows.
 const NAVIGATION_BAR_LINGER: Duration = Duration::from_millis(1200);
@@ -1722,7 +1724,35 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn overview_zoom(&self) -> f64 {
         let progress = self.overview_progress.as_ref().map(|p| p.value());
-        compute_overview_zoom(&self.options, progress)
+        self.overview_zoom_at(progress)
+    }
+
+    /// The overview zoom at `progress`. Workspace cards grow to fill the height the stack has
+    /// (and at most the working area's width), never below the configured zoom.
+    fn overview_zoom_at(&self, progress: Option<f64>) -> f64 {
+        let Some(progress) = progress.filter(|_| self.options.overview.workspace_cards) else {
+            return compute_overview_zoom(&self.options, progress);
+        };
+        let configured = self.options.overview.zoom.clamp(0.0001, 0.75);
+        let view = self.view_size;
+        let count = self.workspaces.len().max(1) as f64;
+        let compact = if self.compact_last_workspace() { 1. } else { 0. };
+        // In units of the view height at zoom 1: full cards, the compact one, and the gaps.
+        let units = (count - compact) + compact * COMPACT_WORKSPACE_SHARE + 0.1 * (count - 1.);
+        let available = view.h - (WORKSPACE_LABEL_HEIGHT + 16.) - 16.;
+        let by_height = available / (view.h * units).max(1.);
+        let by_width = (self.working_area.size.w - 48.) / view.w.max(1.);
+        let target = by_height.min(by_width).min(0.72).max(configured);
+        (1. - progress * (1. - target)).max(0.0001)
+    }
+
+    /// Whether the empty workspace at the end of the overview shows as a short card, leaving
+    /// the room to the workspaces with windows.
+    pub fn compact_last_workspace(&self) -> bool {
+        self.options.overview.workspace_cards
+            && self.workspaces.len() > 1
+            && self.active_workspace_idx + 1 != self.workspaces.len()
+            && self.workspaces.last().is_some_and(|ws| !ws.has_windows())
     }
 
     pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
@@ -1801,7 +1831,7 @@ impl<W: LayoutElement> Monitor<W> {
                 // - first_y = to * from_height - switch_anim.value() * from_height - to * current_height
                 // - first_y = -switch_anim.value() * from_height + to * (from_height - current_height)
                 let from = progress_anim.from();
-                let from_zoom = compute_overview_zoom(&self.options, Some(from));
+                let from_zoom = self.overview_zoom_at(Some(from));
                 let from_ws_height_with_gap = self.workspace_size_with_gap(from_zoom).h;
 
                 let zoom = self.overview_zoom();
@@ -1847,7 +1877,10 @@ impl<W: LayoutElement> Monitor<W> {
         // empty space past the first or last workspace.
         if let Some(progress) = self.workspace_cards_progress() {
             let count = self.workspaces.len().max(1) as f64;
-            let total = count * ws_size.h + (count - 1.) * gap;
+            let mut total = count * ws_size.h + (count - 1.) * gap;
+            if self.compact_last_workspace() {
+                total -= ws_size.h * (1. - COMPACT_WORKSPACE_SHARE) * progress;
+            }
             let top = WORKSPACE_LABEL_HEIGHT + 16.;
             let bottom = 16.;
             let available = self.view_size.h - top - bottom;
@@ -1861,6 +1894,16 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
+        // The empty workspace at the end can be a short card, growing in with the overview.
+        let last = self.workspaces.len().saturating_sub(1);
+        let compact_height = match self.workspace_cards_progress() {
+            Some(progress) if self.compact_last_workspace() => round_logical_in_physical(
+                scale,
+                ws_size.h * (1. - progress * (1. - COMPACT_WORKSPACE_SHARE)),
+            ),
+            _ => ws_size.h,
+        };
+
         // Return position for one-past-last workspace too.
         (0..=self.workspaces.len()).map(move |idx| {
             let y = first_ws_y + idx as f64 * ws_height_with_gap;
@@ -1872,7 +1915,8 @@ impl<W: LayoutElement> Monitor<W> {
             // monitor edge with y = 0. So, post-round the location too.
             let loc = loc.to_physical_precise_round(scale).to_logical(scale);
 
-            Rectangle::new(loc, ws_size)
+            let height = if idx == last { compact_height } else { ws_size.h };
+            Rectangle::new(loc, Size::from((ws_size.w, height)))
         })
     }
 
@@ -4167,7 +4211,12 @@ impl<W: LayoutElement> Monitor<W> {
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
 
+        let full_height = self.workspace_size(zoom).h;
         for (ws, geo) in self.workspaces_with_render_geo() {
+            // A short card's shadow would be the full workspace's.
+            if geo.size.h < full_height - 0.5 {
+                continue;
+            }
             ws.render_shadow(renderer, &mut |elem| {
                 let elem = elem.with_alpha(alpha);
                 let elem = MonitorInnerRenderElement::Shadow(elem);
