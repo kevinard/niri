@@ -151,6 +151,8 @@ pub struct Monitor<W: LayoutElement> {
     scratchpad_label: PreviewLabel,
     /// Names above the zoomed-out workspaces with `overview { workspace-cards; }`.
     workspace_labels: RefCell<Vec<PreviewLabel>>,
+    /// Outlines around the zoomed-out workspaces with `overview { workspace-cards; }`.
+    workspace_outlines: RefCell<Vec<BorderRenderElement>>,
     /// How many windows the scratchpad holds, on every output.
     scratchpad_count: Cell<usize>,
     scroll_cue_labels: [PreviewLabel; 2],
@@ -383,6 +385,7 @@ niri_render_elements! {
         Caption = PrimaryGpuTextureRenderElement,
         ClippedCaption = CropRenderElement<PrimaryGpuTextureRenderElement>,
         WindowPreview = CropRenderElement<LayoutElementRenderElement<R>>,
+        Outline = BorderRenderElement,
     }
 }
 
@@ -647,6 +650,7 @@ impl<W: LayoutElement> Monitor<W> {
             layer_action_label: PreviewLabel::default(),
             scratchpad_label: PreviewLabel::default(),
             workspace_labels: RefCell::new(Vec::new()),
+            workspace_outlines: RefCell::new(Vec::new()),
             scratchpad_count: Cell::new(0),
             scroll_cue_labels: Default::default(),
             folded_tab_labels: Default::default(),
@@ -4275,6 +4279,73 @@ impl<W: LayoutElement> Monitor<W> {
                     Relocate::Relative,
                 ));
             }
+        }
+    }
+
+    /// Outlines on the zoomed-out workspaces: a hairline that gives every card its edge
+    /// against the backdrop, and the current one ringed in the focus ring's colour (or
+    /// brighter, with the ring off).
+    pub fn render_workspace_outlines<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let Some(progress) = self.workspace_cards_progress() else {
+            return;
+        };
+        if !BorderRenderElement::has_shader(renderer) {
+            return;
+        }
+        let alpha = progress as f32;
+        let scale = self.scale.fractional_scale() as f32;
+        let radius = CornerRadius::from((WORKSPACE_CARD_RADIUS * progress) as f32);
+        let backdrop = self.options.overview.backdrop_color;
+        let hairline = if is_light(backdrop) {
+            Color::new_unpremul(0., 0., 0., 0.16)
+        } else {
+            Color::new_unpremul(1., 1., 1., 0.14)
+        };
+        let accent = if self.options.layout.focus_ring.off {
+            Color::new_unpremul(1., 1., 1., 0.7)
+        } else {
+            let accent = self.options.layout.focus_ring.active_color;
+            Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
+        };
+
+        let mut outlines = self.workspace_outlines.borrow_mut();
+        outlines.resize_with(self.workspaces.len(), BorderRenderElement::empty);
+        for ((idx, _ws), geo) in self.workspaces_with_render_geo_idx() {
+            let current = idx == self.active_workspace_idx;
+            let (color, width) = if current { (accent, 2.) } else { (hairline, 1.) };
+            // The ring sits just outside the card, so it never covers its content.
+            let area = Rectangle::new(
+                geo.loc - Point::from((width, width)),
+                geo.size + Size::from((width * 2., width * 2.)),
+            );
+            let outline = &mut outlines[idx];
+            let local = Rectangle::from_size(area.size);
+            outline.update(
+                area.size,
+                local,
+                Default::default(),
+                color,
+                color,
+                0.,
+                local,
+                width as f32,
+                radius.expanded_by(width as f32),
+                scale,
+                alpha,
+            );
+            push(RelocateRenderElement::from_element(
+                RescaleRenderElement::from_element(
+                    MonitorInnerRenderElement::Outline(outline.clone().with_location(area.loc)),
+                    Point::default(),
+                    1.,
+                ),
+                Point::default(),
+                Relocate::Relative,
+            ));
         }
     }
 

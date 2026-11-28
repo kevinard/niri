@@ -4836,6 +4836,9 @@ impl Niri {
                 push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
             }
 
+            // Workspace card outlines sit above the windows they frame.
+            mon.render_workspace_outlines(ctx.renderer, &mut |elem| push(elem.into()));
+
             mon.render_workspaces(ctx.r(), focus_ring, pointer, &mut |elem| push(elem.into()));
 
             // Only one empty card is veiled: the buffer is one render element.
