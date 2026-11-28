@@ -528,6 +528,9 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                     Event::OverviewTyped { text } => {
                         println!("Overview typed: {text:?}");
                     }
+                    Event::OverviewWorkspaceLabelClicked { id } => {
+                        println!("Overview workspace label clicked: id {id}");
+                    }
                 }
             }
         }

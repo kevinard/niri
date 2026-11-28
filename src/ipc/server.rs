@@ -1032,6 +1032,15 @@ impl State {
         server.send_event(Event::OverviewTyped { text });
     }
 
+    pub fn ipc_overview_workspace_label_clicked(&mut self, id: u64) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+
+        // This event is momentary and does not change the event stream state.
+        server.send_event(Event::OverviewWorkspaceLabelClicked { id });
+    }
+
     pub fn ipc_screenshot_taken(&mut self, path: Option<String>) {
         let Some(server) = &self.niri.ipc_server else {
             return;

@@ -1966,6 +1966,18 @@ pub enum Event {
         /// Text produced by the key press, at most 16 bytes long.
         text: String,
     },
+    /// A workspace label was clicked in the overview.
+    ///
+    /// Only sent with `overview { workspace-labels; }` or `overview { workspace-cards; }` in
+    /// the config, when a label is pressed and released without being dragged (dragging a label
+    /// moves its workspace instead). Niri does not otherwise act on the click: a desktop shell
+    /// can, for example, offer to rename the workspace.
+    ///
+    /// This event is not part of the event stream state: it is not replayed to new clients.
+    OverviewWorkspaceLabelClicked {
+        /// Id of the workspace whose label was clicked.
+        id: u64,
+    },
 }
 
 impl From<Duration> for Timestamp {
