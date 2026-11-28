@@ -4863,7 +4863,12 @@ impl Niri {
                 // Workspace cards show the wallpaper of the backdrop behind their windows,
                 // rounded like the card.
                 if let Some(progress) = cards {
-                    let card = Rectangle::from_size(mon.view_size());
+                    // The card in workspace coordinates: shorter than the view for the
+                    // compact empty workspace.
+                    let card = Rectangle::from_size(Size::from((
+                        mon.view_size().w,
+                        (geo.size.h / zoom).min(mon.view_size().h),
+                    )));
                     let radius = CornerRadius::from(mon.workspace_card_radius() as f32);
                     // An empty workspace recedes behind a veil of the backdrop, rounded like
                     // the card.
