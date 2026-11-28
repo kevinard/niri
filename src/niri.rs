@@ -17,7 +17,7 @@ use niri_config::debug::PreviewRender;
 use niri_config::output::MaxBpc;
 use niri_config::window_rule::VrrRule;
 use niri_config::{
-    Bind, Config, CornerRadius, FloatOrInt, Key, Modifiers, OutputName, TrackLayout,
+    Bind, Color, Config, CornerRadius, FloatOrInt, GradientInterpolation, Key, Modifiers, OutputName, TrackLayout,
     WarpMouseToFocusMode, WorkspaceReference, Xkb,
 };
 use smithay::backend::allocator::Fourcc;
@@ -165,6 +165,7 @@ use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
 use crate::render_helpers::blur::BlurOptions;
+use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::clipped_surface::ClippedSurfaceRenderElement;
 use crate::render_helpers::debug::push_opaque_regions;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
@@ -575,6 +576,8 @@ pub struct OutputState {
     pub overview_dim_buffer: SolidColorBuffer,
     /// Veils the empty workspace card in the overview.
     pub overview_empty_buffer: SolidColorBuffer,
+    /// The same veil with the card's rounded corners, where the border shader is available.
+    pub overview_empty_veil: RefCell<BorderRenderElement>,
     pub xray: Xray,
     pub lock_render_state: LockRenderState,
     pub lock_surface: Option<LockSurface>,
@@ -3244,6 +3247,7 @@ impl Niri {
             backdrop_buffer: SolidColorBuffer::new(size, backdrop_color),
             overview_dim_buffer: SolidColorBuffer::new(size, backdrop_color),
             overview_empty_buffer: SolidColorBuffer::new(size, backdrop_color),
+            overview_empty_veil: RefCell::new(BorderRenderElement::empty()),
             xray: Xray::new(),
             lock_render_state,
             lock_surface: None,
@@ -4702,6 +4706,7 @@ impl Niri {
         let zoom = mon.overview_zoom();
         let cards = mon.workspace_cards_progress();
         let clip_shader = ClippedSurfaceRenderElement::shader(ctx.renderer).cloned();
+        let rounded_veil = BorderRenderElement::has_shader(ctx.renderer);
         let pointer = self.seat.get_pointer().unwrap();
         let pointer = (mon.has_navigation_controls()
             && self.pointer_visibility.is_visible()
@@ -4854,18 +4859,39 @@ impl Niri {
                 // Workspace cards show the wallpaper of the backdrop behind their windows,
                 // rounded like the card.
                 if let Some(progress) = cards {
-                    // An empty workspace recedes behind a veil of the backdrop.
-                    if !ws.has_windows() && !veiled {
-                        veiled = true;
-                        process!(geo)(SolidColorRenderElement::from_buffer(
-                            &state.overview_empty_buffer,
-                            (0., 0.),
-                            (OVERVIEW_EMPTY_DIM * progress) as f32,
-                            Kind::Unspecified,
-                        ));
-                    }
                     let card = Rectangle::from_size(mon.view_size());
                     let radius = CornerRadius::from(mon.workspace_card_radius() as f32);
+                    // An empty workspace recedes behind a veil of the backdrop, rounded like
+                    // the card.
+                    if !ws.has_windows() && !veiled {
+                        veiled = true;
+                        let alpha = (OVERVIEW_EMPTY_DIM * progress) as f32;
+                        if rounded_veil {
+                            let color = Color::from_color32f(state.overview_empty_buffer.color());
+                            let mut veil = state.overview_empty_veil.borrow_mut();
+                            veil.update(
+                                card.size,
+                                card,
+                                GradientInterpolation::default(),
+                                color,
+                                color,
+                                0.,
+                                card,
+                                0.,
+                                radius,
+                                output_scale.x as f32,
+                                alpha,
+                            );
+                            process!(geo)(veil.clone());
+                        } else {
+                            process!(geo)(SolidColorRenderElement::from_buffer(
+                                &state.overview_empty_buffer,
+                                (0., 0.),
+                                alpha,
+                                Kind::Unspecified,
+                            ));
+                        }
+                    }
                     let clip = |elem: LayerSurfaceRenderElement<R>| match elem {
                         LayerSurfaceRenderElement::Wayland(elem) => match clip_shader.clone() {
                             Some(shader)
@@ -7500,6 +7526,9 @@ niri_render_elements! {
         >>>,
         RelocatedColor = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
             SolidColorRenderElement
+        >>>,
+        RelocatedBorder = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
+            BorderRenderElement
         >>>,
         Pointer = PointerRenderElements<R>,
         Wayland = WaylandSurfaceRenderElement<R>,
