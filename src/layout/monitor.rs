@@ -4245,11 +4245,9 @@ impl<W: LayoutElement> Monitor<W> {
             // when it is on; the others recede.
             let current = idx == self.active_workspace_idx;
             let emphasis = if current { 1. } else { 0.68 };
-            let ink = if current && !self.options.layout.focus_ring.off {
-                let accent = self.options.layout.focus_ring.active_color;
-                Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
-            } else {
-                ink
+            let ink = match self.focus_accent() {
+                Some(accent) if current => accent,
+                _ => ink,
             };
             // The caption pads its text; align the text, not the texture, with the card.
             let loc = Point::from((
@@ -4282,9 +4280,22 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    /// The colour that marks focus: the focus ring's, else the active border's, opaque.
+    fn focus_accent(&self) -> Option<Color> {
+        let layout = &self.options.layout;
+        let color = if !layout.focus_ring.off {
+            layout.focus_ring.active_color
+        } else if !layout.border.off {
+            layout.border.active_color
+        } else {
+            return None;
+        };
+        Some(Color::new_unpremul(color.r, color.g, color.b, 1.))
+    }
+
     /// Outlines on the zoomed-out workspaces: a hairline that gives every card its edge
-    /// against the backdrop, and the current one ringed in the focus ring's colour (or
-    /// brighter, with the ring off).
+    /// against the backdrop, and the current one ringed in the colour that marks focus
+    /// (white when neither the focus ring nor the border is on).
     pub fn render_workspace_outlines<R: NiriRenderer>(
         &self,
         renderer: &mut R,
@@ -4305,12 +4316,9 @@ impl<W: LayoutElement> Monitor<W> {
         } else {
             Color::new_unpremul(1., 1., 1., 0.14)
         };
-        let accent = if self.options.layout.focus_ring.off {
-            Color::new_unpremul(1., 1., 1., 0.7)
-        } else {
-            let accent = self.options.layout.focus_ring.active_color;
-            Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
-        };
+        let accent = self
+            .focus_accent()
+            .unwrap_or(Color::new_unpremul(1., 1., 1., 0.7));
 
         let mut outlines = self.workspace_outlines.borrow_mut();
         outlines.resize_with(self.workspaces.len(), BorderRenderElement::empty);
