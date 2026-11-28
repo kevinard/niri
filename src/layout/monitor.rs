@@ -1741,9 +1741,26 @@ impl<W: LayoutElement> Monitor<W> {
         let units = (count - compact) + compact * COMPACT_WORKSPACE_SHARE + 0.1 * (count - 1.);
         let available = view.h - (WORKSPACE_LABEL_HEIGHT + 16.) - 16.;
         let by_height = available / (view.h * units).max(1.);
-        let by_width = (self.working_area.size.w - 48.) / view.w.max(1.);
+        let by_width = (self.working_area.size.w - 48.) / self.working_area.size.w.max(1.);
         let target = by_height.min(by_width).min(0.72).max(configured);
         (1. - progress * (1. - target)).max(0.0001)
+    }
+
+    /// The card a zoomed-out workspace at `geo` presents on screen: its working area, so the
+    /// space under side panels (such as a bar along an edge) is left out and the windows sit
+    /// centred in their card. The whole workspace outside the overview's cards.
+    pub fn workspace_card_area(&self, geo: Rectangle<f64, Logical>) -> Rectangle<f64, Logical> {
+        if self.workspace_cards_progress().is_none() {
+            return geo;
+        }
+        let zoom = self.overview_zoom();
+        let area = self.working_area;
+        let loc = geo.loc + area.loc.upscale(zoom);
+        let size = Size::from((
+            (area.size.w * zoom).min(geo.size.w - area.loc.x * zoom),
+            (area.size.h * zoom).min(geo.size.h - area.loc.y * zoom),
+        ));
+        Rectangle::new(loc, size)
     }
 
     /// Whether the empty workspace at the end of the overview shows as a short card, leaving
@@ -4215,12 +4232,12 @@ impl<W: LayoutElement> Monitor<W> {
         let scale = self.scale.fractional_scale();
         let zoom = self.overview_zoom();
 
-        let full_height = self.workspace_size(zoom).h;
+        // Cards are framed to their working area and outlined; a workspace's shadow would
+        // reach past them.
+        if self.workspace_cards_progress().is_some() {
+            return;
+        }
         for (ws, geo) in self.workspaces_with_render_geo() {
-            // A short card's shadow would be the full workspace's.
-            if geo.size.h < full_height - 0.5 {
-                continue;
-            }
             ws.render_shadow(renderer, &mut |elem| {
                 let elem = elem.with_alpha(alpha);
                 let elem = MonitorInnerRenderElement::Shadow(elem);
@@ -4289,6 +4306,7 @@ impl<W: LayoutElement> Monitor<W> {
         let mut labels = self.workspace_labels.borrow_mut();
         labels.resize_with(self.workspaces.len(), PreviewLabel::default);
         for ((idx, ws), geo) in self.workspaces_with_render_geo_idx() {
+            let geo = self.workspace_card_area(geo);
             // Numbered like the workspaces in a bar; the empty one at the end says so.
             let text = match ws.name() {
                 Some(name) => name.clone(),
@@ -4462,9 +4480,10 @@ impl<W: LayoutElement> Monitor<W> {
             let current = idx == self.active_workspace_idx;
             let (color, width) = if current { (accent, 2.) } else { (hairline, 1.) };
             // The ring sits just outside the card, so it never covers its content.
+            let card = self.workspace_card_area(geo);
             let area = Rectangle::new(
-                geo.loc - Point::from((width, width)),
-                geo.size + Size::from((width * 2., width * 2.)),
+                card.loc - Point::from((width, width)),
+                card.size + Size::from((width * 2., width * 2.)),
             );
             let outline = &mut outlines[idx];
             let local = Rectangle::from_size(area.size);

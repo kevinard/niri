@@ -4865,10 +4865,11 @@ impl Niri {
                 if let Some(progress) = cards {
                     // The card in workspace coordinates: smaller than the view for the
                     // compact empty workspace.
-                    let card = Rectangle::from_size(Size::from((
-                        (geo.size.w / zoom).min(mon.view_size().w),
-                        (geo.size.h / zoom).min(mon.view_size().h),
-                    )));
+                    let shown = mon.workspace_card_area(geo);
+                    let card = Rectangle::new(
+                        (shown.loc - geo.loc).downscale(zoom),
+                        shown.size.downscale(zoom),
+                    );
                     let radius = CornerRadius::from(mon.workspace_card_radius() as f32);
                     // An empty workspace recedes behind a veil of the backdrop, rounded like
                     // the card.
@@ -4878,20 +4879,21 @@ impl Niri {
                         if rounded_veil {
                             let color = Color::from_color32f(state.overview_empty_buffer.color());
                             let mut veil = state.overview_empty_veil.borrow_mut();
+                            let local = Rectangle::from_size(card.size);
                             veil.update(
                                 card.size,
-                                card,
+                                local,
                                 GradientInterpolation::default(),
                                 color,
                                 color,
                                 0.,
-                                card,
+                                local,
                                 0.,
                                 radius,
                                 output_scale.x as f32,
                                 alpha,
                             );
-                            process!(geo)(veil.clone());
+                            process!(geo)(veil.clone().with_location(card.loc));
                         } else {
                             process!(geo)(SolidColorRenderElement::from_buffer(
                                 &state.overview_empty_buffer,
