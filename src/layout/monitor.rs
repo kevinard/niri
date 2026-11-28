@@ -153,6 +153,8 @@ pub struct Monitor<W: LayoutElement> {
     scratchpad_label: PreviewLabel,
     /// Names above the zoomed-out workspaces with `overview { workspace-cards; }`.
     workspace_labels: RefCell<Vec<PreviewLabel>>,
+    /// Where the workspace labels were last drawn, for clicks and drags on them.
+    workspace_label_rects: RefCell<Vec<(WorkspaceId, Rectangle<f64, Logical>)>>,
     /// Outlines around the zoomed-out workspaces with `overview { workspace-cards; }`.
     workspace_outlines: RefCell<Vec<BorderRenderElement>>,
     /// Window names on the zoomed-out workspaces with `overview { workspace-cards; }`.
@@ -654,6 +656,7 @@ impl<W: LayoutElement> Monitor<W> {
             layer_action_label: PreviewLabel::default(),
             scratchpad_label: PreviewLabel::default(),
             workspace_labels: RefCell::new(Vec::new()),
+            workspace_label_rects: RefCell::new(Vec::new()),
             workspace_outlines: RefCell::new(Vec::new()),
             window_labels: RefCell::new(Vec::new()),
             scratchpad_count: Cell::new(0),
@@ -4292,6 +4295,8 @@ impl<W: LayoutElement> Monitor<W> {
         renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
+        let mut rects = self.workspace_label_rects.borrow_mut();
+        rects.clear();
         let Some(progress) = self.workspace_labels_progress() else {
             return;
         };
@@ -4343,6 +4348,13 @@ impl<W: LayoutElement> Monitor<W> {
                 geo.loc.y - WORKSPACE_LABEL_HEIGHT - (gap - WORKSPACE_LABEL_HEIGHT).min(12.) / 2.,
             ));
             let width = geo.size.w.min(420.) + WORKSPACE_LABEL_INSET;
+            // Only a settled label can be clicked or dragged.
+            if alpha >= 1. {
+                rects.push((
+                    ws.id(),
+                    Rectangle::new(loc, Size::from((width, WORKSPACE_LABEL_HEIGHT))),
+                ));
+            }
             if let Some(label) = labels[idx].render_with_ink(
                 renderer.as_gles_renderer(),
                 text,
@@ -4446,6 +4458,32 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
         labels.truncate(index.max(1));
+    }
+
+    /// The workspace whose label is at `pos` (output-local), as last drawn in the overview.
+    pub fn workspace_label_at(&self, pos: Point<f64, Logical>) -> Option<WorkspaceId> {
+        self.workspace_label_rects
+            .borrow()
+            .iter()
+            .find(|(_, rect)| rect.contains(pos))
+            .map(|(id, _)| *id)
+    }
+
+    /// The index of workspace `id` on this monitor.
+    pub fn workspace_idx(&self, id: WorkspaceId) -> Option<usize> {
+        self.workspaces.iter().position(|ws| ws.id() == id)
+    }
+
+    /// The index of the workspace whose overview position is under `y` (output-local): the
+    /// one it is over, or the nearest one above or below the stack.
+    pub fn workspace_idx_at_y(&self, y: f64) -> Option<usize> {
+        let geos: Vec<_> = self.workspaces_render_geo().take(self.workspaces.len()).collect();
+        let last = geos.len().checked_sub(1)?;
+        Some(
+            geos.iter()
+                .position(|geo| y < geo.loc.y + geo.size.h)
+                .unwrap_or(last),
+        )
     }
 
     /// The colour that marks focus: the focus ring's, else the active border's, opaque.
