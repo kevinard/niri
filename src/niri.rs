@@ -4839,6 +4839,8 @@ impl Niri {
             // Window names and workspace card outlines sit above the windows.
             mon.render_window_labels(ctx.renderer, ctx.target, &mut |elem| push(elem.into()));
             mon.render_workspace_outlines(ctx.renderer, &mut |elem| push(elem.into()));
+            // A workspace dragged by its label is ringed above everything.
+            mon.render_workspace_drag_cues(ctx.renderer, true, &mut |elem| push(elem.into()));
 
             mon.render_workspaces(ctx.r(), focus_ring, pointer, &mut |elem| push(elem.into()));
 
@@ -4937,6 +4939,8 @@ impl Niri {
 
         mon.render_workspace_labels(ctx.renderer, &mut |elem| push(elem.into()));
         mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
+        // Its slot shows behind the workspaces, where it will drop.
+        mon.render_workspace_drag_cues(ctx.renderer, false, &mut |elem| push(elem.into()));
 
         // The backdrop dims around the workspace cards.
         if let Some(progress) = cards {

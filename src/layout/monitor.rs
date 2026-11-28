@@ -155,6 +155,15 @@ pub struct Monitor<W: LayoutElement> {
     workspace_labels: RefCell<Vec<PreviewLabel>>,
     /// Where the workspace labels were last drawn, for clicks and drags on them.
     workspace_label_rects: RefCell<Vec<(WorkspaceId, Rectangle<f64, Logical>)>>,
+    /// A workspace dragged by its label in the overview.
+    workspace_drag: Option<WorkspaceDrag>,
+    /// Workspaces sliding into new places in the overview stack: an offset in
+    /// slots that animates to zero.
+    workspace_slides: HashMap<WorkspaceId, Animation>,
+    /// The whole overview stack settling after a drag, as an offset in pixels.
+    stack_slide: Option<Animation>,
+    /// The ring around a dragged workspace, and the slot it will drop into.
+    drag_cues: RefCell<[BorderRenderElement; 2]>,
     /// Outlines around the zoomed-out workspaces with `overview { workspace-cards; }`.
     workspace_outlines: RefCell<Vec<BorderRenderElement>>,
     /// Window names on the zoomed-out workspaces with `overview { workspace-cards; }`.
@@ -397,6 +406,19 @@ niri_render_elements! {
 
 pub type MonitorRenderElement<R> =
     RelocateRenderElement<RescaleRenderElement<MonitorInnerRenderElement<R>>>;
+
+/// A workspace dragged by its label in the overview: it follows the pointer
+/// while the stack holds still.
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceDrag {
+    id: WorkspaceId,
+    /// The pointer's distance below the workspace's top edge when the drag began.
+    grab_dy: f64,
+    /// The pointer's y on the output.
+    pointer_y: f64,
+    /// The top of the stack when the drag began.
+    first_ws_y: f64,
+}
 
 impl WorkspaceSwitch {
     pub fn current_idx(&self) -> f64 {
@@ -657,6 +679,10 @@ impl<W: LayoutElement> Monitor<W> {
             scratchpad_label: PreviewLabel::default(),
             workspace_labels: RefCell::new(Vec::new()),
             workspace_label_rects: RefCell::new(Vec::new()),
+            workspace_drag: None,
+            workspace_slides: HashMap::new(),
+            stack_slide: None,
+            drag_cues: RefCell::new([BorderRenderElement::empty(), BorderRenderElement::empty()]),
             workspace_outlines: RefCell::new(Vec::new()),
             window_labels: RefCell::new(Vec::new()),
             scratchpad_count: Cell::new(0),
@@ -1407,12 +1433,20 @@ impl<W: LayoutElement> Monitor<W> {
             self.set_bar_shown(false, false);
         }
 
+        self.workspace_slides.retain(|_, anim| !anim.is_done());
+        if self.stack_slide.as_ref().is_some_and(|anim| anim.is_done()) {
+            self.stack_slide = None;
+        }
+
         for ws in &mut self.workspaces {
             ws.advance_animations();
         }
     }
 
     pub(super) fn are_animations_ongoing(&self) -> bool {
+        if !self.workspace_slides.is_empty() || self.stack_slide.is_some() {
+            return true;
+        }
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
@@ -1892,6 +1926,7 @@ impl<W: LayoutElement> Monitor<W> {
             .to_logical(scale);
 
         let mut first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        let drag = self.workspace_drag;
         // Workspace cards keep the whole stack in view: centred when every workspace
         // fits below its label, otherwise scrolled to the active one without leaving
         // empty space past the first or last workspace.
@@ -1912,7 +1947,27 @@ impl<W: LayoutElement> Monitor<W> {
             };
             first_ws_y += (target - centred) * progress;
         }
+        // While a workspace is dragged the stack holds still; after the drop it
+        // settles back where the overview puts it.
+        if let Some(drag) = drag {
+            first_ws_y = drag.first_ws_y - static_offset.y;
+        } else if let Some(slide) = &self.stack_slide {
+            first_ws_y += slide.value();
+        }
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
+        let slides: Vec<f64> = self
+            .workspaces
+            .iter()
+            .map(|ws| {
+                self.workspace_slides
+                    .get(&ws.id())
+                    .map_or(0., |anim| anim.value() * ws_height_with_gap)
+            })
+            .collect();
+        let dragged = drag.and_then(|drag| {
+            let idx = self.workspaces.iter().position(|ws| ws.id() == drag.id)?;
+            Some((idx, drag.pointer_y - drag.grab_dy))
+        });
 
         // The empty workspace at the end can be a small card in the workspaces'
         // proportions, shrinking in with the overview.
@@ -1930,8 +1985,15 @@ impl<W: LayoutElement> Monitor<W> {
 
         // Return position for one-past-last workspace too.
         (0..=self.workspaces.len()).map(move |idx| {
-            let y = first_ws_y + idx as f64 * ws_height_with_gap;
-            let loc = Point::from((0., y)) + static_offset;
+            let mut y = first_ws_y + idx as f64 * ws_height_with_gap;
+            y += slides.get(idx).copied().unwrap_or(0.);
+            let mut loc = Point::from((0., y)) + static_offset;
+            // The dragged workspace follows the pointer.
+            if let Some((dragged_idx, top)) = dragged {
+                if dragged_idx == idx {
+                    loc.y = top;
+                }
+            }
 
             // Even though all components that go into loc are rounded to physical pixels, the
             // floating point addition may lose precision. This can result for example in the
@@ -4467,6 +4529,197 @@ impl<W: LayoutElement> Monitor<W> {
             .iter()
             .find(|(_, rect)| rect.contains(pos))
             .map(|(id, _)| *id)
+    }
+
+    /// Begin dragging workspace `id` by its label, with the pointer at `pointer_y` on the
+    /// output.
+    pub fn workspace_drag_begin(&mut self, id: WorkspaceId, pointer_y: f64) {
+        let geos: Vec<_> = self.workspaces_render_geo().collect();
+        let Some(idx) = self.workspace_idx(id) else {
+            return;
+        };
+        let (Some(first), Some(geo)) = (geos.first(), geos.get(idx)) else {
+            return;
+        };
+        self.stack_slide = None;
+        self.workspace_slides.remove(&id);
+        self.workspace_drag = Some(WorkspaceDrag {
+            id,
+            grab_dy: pointer_y - geo.loc.y,
+            pointer_y,
+            first_ws_y: first.loc.y,
+        });
+    }
+
+    /// Follow the pointer; returns the index the dragged workspace would take.
+    pub fn workspace_drag_update(&mut self, pointer_y: f64) -> Option<usize> {
+        let drag = self.workspace_drag.as_mut()?;
+        drag.pointer_y = pointer_y;
+        let drag = *drag;
+        let zoom = self.overview_zoom();
+        let slot = self.workspace_size(zoom).h + self.workspace_gap(zoom);
+        let mut last = self.workspaces.len().checked_sub(1)?;
+        // Niri keeps an empty workspace at the end; nothing moves past it.
+        if last > 0 && !self.workspaces[last].has_windows_or_name() {
+            last -= 1;
+        }
+        // The slot under the dragged workspace's middle.
+        let middle = pointer_y - drag.grab_dy + self.workspace_size(zoom).h / 2.;
+        let idx = ((middle - drag.first_ws_y) / slot).floor().max(0.) as usize;
+        Some(idx.min(last))
+    }
+
+    /// The ids of the workspaces in order, to animate a reorder from.
+    pub fn workspace_order(&self) -> Vec<WorkspaceId> {
+        self.workspaces.iter().map(|ws| ws.id()).collect()
+    }
+
+    /// Slide the workspaces that changed places since `before` into their new slots; the
+    /// dragged one stays under the pointer.
+    pub fn animate_workspace_reorder(&mut self, before: &[WorkspaceId]) {
+        let config = self.options.animations.workspace_switch.0;
+        let dragged = self.workspace_drag.map(|drag| drag.id);
+        for (new_idx, ws) in self.workspaces.iter().enumerate() {
+            let id = ws.id();
+            if Some(id) == dragged {
+                continue;
+            }
+            let Some(old_idx) = before.iter().position(|other| *other == id) else {
+                continue;
+            };
+            if old_idx == new_idx {
+                continue;
+            }
+            let current = self
+                .workspace_slides
+                .get(&id)
+                .map_or(0., |anim| anim.value());
+            let from = old_idx as f64 - new_idx as f64 + current;
+            self.workspace_slides
+                .insert(id, Animation::new(self.clock.clone(), from, 0., 0., config));
+        }
+    }
+
+    /// Drop the dragged workspace: it settles into its slot, and the stack back where the
+    /// overview puts it.
+    pub fn workspace_drag_end(&mut self) {
+        let Some(drag) = self.workspace_drag else {
+            return;
+        };
+        let before: Vec<_> = self.workspaces_render_geo().collect();
+        let held_first = before.first().map(|geo| geo.loc.y);
+        let dragged_top = drag.pointer_y - drag.grab_dy;
+        self.workspace_drag = None;
+        let after: Vec<_> = self.workspaces_render_geo().collect();
+        let config = self.options.animations.workspace_switch.0;
+        let zoom = self.overview_zoom();
+        let slot = self.workspace_size(zoom).h + self.workspace_gap(zoom);
+        if let (Some(held), Some(first)) = (held_first, after.first()) {
+            let delta = held - first.loc.y;
+            if delta.abs() > 0.5 {
+                self.stack_slide = Some(Animation::new(self.clock.clone(), delta, 0., 0., config));
+            }
+        }
+        if let Some(idx) = self.workspace_idx(drag.id) {
+            if let Some(geo) = after.get(idx) {
+                // Measured from where the stack will rest, the slide adds itself back in.
+                let stack = self.stack_slide.as_ref().map_or(0., |anim| anim.value());
+                let from = (dragged_top - (geo.loc.y + stack)) / slot.max(1.);
+                if from.abs() > 0.001 {
+                    self.workspace_slides
+                        .insert(drag.id, Animation::new(self.clock.clone(), from, 0., 0., config));
+                }
+            }
+        }
+    }
+
+    /// Where the dragged workspace will drop: its slot in the held stack.
+    fn dragged_slot(&self) -> Option<Rectangle<f64, Logical>> {
+        let drag = self.workspace_drag?;
+        let idx = self.workspace_idx(drag.id)?;
+        let zoom = self.overview_zoom();
+        let size = self.workspace_size(zoom);
+        let slot = size.h + self.workspace_gap(zoom);
+        let geo = self.workspaces_render_geo().nth(idx)?;
+        Some(Rectangle::new(
+            Point::from((geo.loc.x, drag.first_ws_y + idx as f64 * slot)),
+            size,
+        ))
+    }
+
+    /// Cues for a workspace dragged in the overview: a ring in the focus colour around it,
+    /// drawn in front, and a faint slot where it will drop, drawn behind the workspaces.
+    pub fn render_workspace_drag_cues<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        front: bool,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let Some(drag) = self.workspace_drag else {
+            return;
+        };
+        if !BorderRenderElement::has_shader(renderer) {
+            return;
+        }
+        let scale = self.scale.fractional_scale() as f32;
+        let accent = self
+            .focus_accent()
+            .unwrap_or(Color::new_unpremul(1., 1., 1., 0.8));
+        let rect = if front {
+            let Some(idx) = self.workspace_idx(drag.id) else {
+                return;
+            };
+            let Some(geo) = self.workspaces_render_geo().nth(idx) else {
+                return;
+            };
+            geo
+        } else {
+            let Some(slot) = self.dragged_slot() else {
+                return;
+            };
+            slot
+        };
+        // The ring sits just outside the workspace; the slot is a soft fill with an edge.
+        let width = if front { 2.5 } else { 1.5 };
+        let area = Rectangle::new(
+            rect.loc - Point::from((width, width)),
+            rect.size + Size::from((width * 2., width * 2.)),
+        );
+        let local = Rectangle::from_size(area.size);
+        let radius = CornerRadius::from(10.);
+        let mut cues = self.drag_cues.borrow_mut();
+        let (index, color, border, alpha) = if front {
+            (0, accent, width as f32, 1.)
+        } else {
+            (1, Color { a: 0.16, ..accent }, 0., 1.)
+        };
+        cues[index].update(
+            area.size,
+            local,
+            Default::default(),
+            color,
+            color,
+            0.,
+            local,
+            border,
+            radius,
+            scale,
+            alpha,
+        );
+        push(RelocateRenderElement::from_element(
+            RescaleRenderElement::from_element(
+                MonitorInnerRenderElement::Outline(cues[index].clone().with_location(area.loc)),
+                Point::default(),
+                1.,
+            ),
+            Point::default(),
+            Relocate::Relative,
+        ));
+    }
+
+    /// The workspace being dragged by its label, if any.
+    pub fn dragged_workspace(&self) -> Option<WorkspaceId> {
+        self.workspace_drag.map(|drag| drag.id)
     }
 
     /// The index of workspace `id` on this monitor.
