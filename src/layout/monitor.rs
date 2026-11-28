@@ -1894,14 +1894,18 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
-        // The empty workspace at the end can be a short card, growing in with the overview.
+        // The empty workspace at the end can be a small card in the workspaces'
+        // proportions, shrinking in with the overview.
         let last = self.workspaces.len().saturating_sub(1);
-        let compact_height = match self.workspace_cards_progress() {
-            Some(progress) if self.compact_last_workspace() => round_logical_in_physical(
-                scale,
-                ws_size.h * (1. - progress * (1. - COMPACT_WORKSPACE_SHARE)),
-            ),
-            _ => ws_size.h,
+        let compact_size = match self.workspace_cards_progress() {
+            Some(progress) if self.compact_last_workspace() => {
+                let share = 1. - progress * (1. - COMPACT_WORKSPACE_SHARE);
+                Size::from((
+                    round_logical_in_physical(scale, ws_size.w * share),
+                    round_logical_in_physical(scale, ws_size.h * share),
+                ))
+            }
+            _ => ws_size,
         };
 
         // Return position for one-past-last workspace too.
@@ -1915,8 +1919,8 @@ impl<W: LayoutElement> Monitor<W> {
             // monitor edge with y = 0. So, post-round the location too.
             let loc = loc.to_physical_precise_round(scale).to_logical(scale);
 
-            let height = if idx == last { compact_height } else { ws_size.h };
-            Rectangle::new(loc, Size::from((ws_size.w, height)))
+            let size = if idx == last { compact_size } else { ws_size };
+            Rectangle::new(loc, size)
         })
     }
 
