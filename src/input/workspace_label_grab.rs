@@ -41,6 +41,10 @@ impl WorkspaceLabelGrab {
     }
 
     fn on_motion(&mut self, data: &mut State, location: Point<f64, Logical>) {
+        let Some(output_geo) = data.niri.global_space.output_geometry(&self.output) else {
+            return;
+        };
+        let y = location.y - f64::from(output_geo.loc.y);
         if !self.dragging {
             let delta = location - self.start_data.location;
             if delta.x.hypot(delta.y) < DRAG_THRESHOLD {
@@ -50,27 +54,43 @@ impl WorkspaceLabelGrab {
             data.niri
                 .cursor_manager
                 .set_cursor_image(CursorImageStatus::Named(CursorIcon::Grabbing));
+            let start_y = self.start_data.location.y - f64::from(output_geo.loc.y);
+            if let Some(monitor) = data.niri.layout.monitor_for_output_mut(&self.output) {
+                monitor.workspace_drag_begin(self.workspace_id, start_y);
+            }
         }
 
-        let Some(output_geo) = data.niri.global_space.output_geometry(&self.output) else {
-            return;
-        };
-        let y = location.y - f64::from(output_geo.loc.y);
         let layout = &mut data.niri.layout;
-        let Some(monitor) = layout.monitor_for_output(&self.output) else {
+        let Some(monitor) = layout.monitor_for_output_mut(&self.output) else {
             return;
         };
-        let Some(current) = monitor.workspace_idx(self.workspace_id) else {
-            return;
-        };
-        let Some(target) = monitor.workspace_idx_at_y(y) else {
-            return;
-        };
-        if target != current {
-            layout.move_workspace_to_idx(Some((Some(self.output.clone()), current)), target);
-            // FIXME: granular.
-            data.niri.queue_redraw_all();
+        let target = monitor.workspace_drag_update(y);
+        let current = monitor.workspace_idx(self.workspace_id);
+        if let (Some(target), Some(current)) = (target, current) {
+            if target != current {
+                // The others slide aside as the workspace passes them.
+                let before = monitor.workspace_order();
+                layout.move_workspace_to_idx(Some((Some(self.output.clone()), current)), target);
+                if let Some(monitor) = layout.monitor_for_output_mut(&self.output) {
+                    monitor.animate_workspace_reorder(&before);
+                }
+            }
         }
+        // FIXME: granular.
+        data.niri.queue_redraw_all();
+    }
+
+    fn finish(&mut self, data: &mut State) {
+        if !self.dragging {
+            return;
+        }
+        if let Some(monitor) = data.niri.layout.monitor_for_output_mut(&self.output) {
+            monitor.workspace_drag_end();
+        }
+        data.niri
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::default_named());
+        data.niri.queue_redraw_all();
     }
 }
 
@@ -205,10 +225,8 @@ impl PointerGrab<State> for WorkspaceLabelGrab {
     }
 
     fn unset(&mut self, data: &mut State) {
-        if self.dragging {
-            data.niri
-                .cursor_manager
-                .set_cursor_image(CursorImageStatus::default_named());
-        }
+        // Released, or the grab was taken away: the workspace settles in its slot.
+        self.finish(data);
+        self.dragging = false;
     }
 }
