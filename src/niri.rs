@@ -206,6 +206,9 @@ const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 /// How far the backdrop around the workspace cards fades towards the backdrop color.
 const OVERVIEW_BACKDROP_DIM: f64 = 0.55;
 
+/// How far an empty workspace card fades towards the backdrop color.
+const OVERVIEW_EMPTY_DIM: f64 = 0.45;
+
 // We'll try to send frame callbacks at least once a second. We'll make a timer that fires once a
 // second, so with the worst timing the maximum interval between two frame callbacks for a surface
 // should be ~1.995 seconds.
@@ -570,6 +573,8 @@ pub struct OutputState {
     pub backdrop_buffer: SolidColorBuffer,
     /// Dims the backdrop around the workspace cards in the overview.
     pub overview_dim_buffer: SolidColorBuffer,
+    /// Veils the empty workspace card in the overview.
+    pub overview_empty_buffer: SolidColorBuffer,
     pub xray: Xray,
     pub lock_render_state: LockRenderState,
     pub lock_surface: Option<LockSurface>,
@@ -2069,6 +2074,7 @@ impl State {
                 if state.backdrop_buffer.color() != backdrop_color {
                     state.backdrop_buffer.set_color(backdrop_color);
                     state.overview_dim_buffer.set_color(backdrop_color);
+                    state.overview_empty_buffer.set_color(backdrop_color);
                     recolored_outputs.push(output.clone());
                 }
             }
@@ -3237,6 +3243,7 @@ impl Niri {
             frame_callback_sequence: 0,
             backdrop_buffer: SolidColorBuffer::new(size, backdrop_color),
             overview_dim_buffer: SolidColorBuffer::new(size, backdrop_color),
+            overview_empty_buffer: SolidColorBuffer::new(size, backdrop_color),
             xray: Xray::new(),
             lock_render_state,
             lock_surface: None,
@@ -3363,6 +3370,7 @@ impl Niri {
         if let Some(state) = self.output_state.get_mut(output) {
             state.backdrop_buffer.resize(output_size);
             state.overview_dim_buffer.resize(output_size);
+            state.overview_empty_buffer.resize(output_size);
 
             state.lock_color_buffer.resize(output_size);
             if let Some(lock_surface) = &state.lock_surface {
@@ -4825,6 +4833,8 @@ impl Niri {
 
             mon.render_workspaces(ctx.r(), focus_ring, pointer, &mut |elem| push(elem.into()));
 
+            // Only one empty card is veiled: the buffer is one render element.
+            let mut veiled = false;
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 // The render element namespace. This will be set to the workspace index for
                 // elements duplicated across workspaces (i.e. background and bottom layers) in
@@ -4843,7 +4853,17 @@ impl Niri {
 
                 // Workspace cards show the wallpaper of the backdrop behind their windows,
                 // rounded like the card.
-                if cards.is_some() {
+                if let Some(progress) = cards {
+                    // An empty workspace recedes behind a veil of the backdrop.
+                    if !ws.has_windows() && !veiled {
+                        veiled = true;
+                        process!(geo)(SolidColorRenderElement::from_buffer(
+                            &state.overview_empty_buffer,
+                            (0., 0.),
+                            (OVERVIEW_EMPTY_DIM * progress) as f32,
+                            Kind::Unspecified,
+                        ));
+                    }
                     let card = Rectangle::from_size(mon.view_size());
                     let radius = CornerRadius::from(mon.workspace_card_radius() as f32);
                     let clip = |elem: LayerSurfaceRenderElement<R>| match elem {

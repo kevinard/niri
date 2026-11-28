@@ -4237,10 +4237,15 @@ impl<W: LayoutElement> Monitor<W> {
                 }
                 None => format!("Workspace {}", idx + 1),
             };
-            let emphasis = if idx == self.active_workspace_idx {
-                1.
+            // The current workspace's name is bright, in the focus ring's colour
+            // when it is on; the others recede.
+            let current = idx == self.active_workspace_idx;
+            let emphasis = if current { 1. } else { 0.68 };
+            let ink = if current && !self.options.layout.focus_ring.off {
+                let accent = self.options.layout.focus_ring.active_color;
+                Color::new_unpremul(accent.r, accent.g, accent.b, 1.)
             } else {
-                0.68
+                ink
             };
             // The caption pads its text; align the text, not the texture, with the card.
             let loc = Point::from((
