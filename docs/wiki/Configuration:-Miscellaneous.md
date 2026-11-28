@@ -38,6 +38,7 @@ overview {
 
     // emit-typed-text
     // workspace-cards
+    // workspace-labels
 }
 
 xwayland-satellite {
@@ -270,6 +271,20 @@ Key presses with <kbd>Ctrl</kbd>, <kbd>Alt</kbd> or <kbd>Super</kbd> held, and k
 ```kdl
 overview {
     emit-typed-text
+}
+```
+
+#### `workspace-labels`
+
+<sup>Since: next release</sup>
+
+Name each zoomed-out workspace in the overview: a label above it shows its configured name, or "Workspace" and its number, with "Empty" for the empty workspace at the end.
+The current workspace's label is brighter, in the active focus ring color (or the active border color with the focus ring off).
+The workspaces keep the regular overview look; [`workspace-cards`](#workspace-cards) shows the same labels as part of its cards.
+
+```kdl
+overview {
+    workspace-labels
 }
 ```
 

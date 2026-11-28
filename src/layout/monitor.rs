@@ -4252,6 +4252,20 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    /// How far the overview shows workspace labels, from 0 (closed) to 1 (open): with
+    /// `overview { workspace-labels; }`, or as part of workspace cards.
+    ///
+    /// `None` outside the overview, or when neither option is on.
+    pub fn workspace_labels_progress(&self) -> Option<f64> {
+        let overview = &self.options.overview;
+        if !overview.workspace_labels && !overview.workspace_cards {
+            return None;
+        }
+        self.overview_progress
+            .as_ref()
+            .map(|p| p.clamped_value().clamp(0., 1.))
+    }
+
     /// How far the overview presents workspaces as cards, from 0 (closed) to 1 (open).
     ///
     /// `None` outside the overview, or when `overview { workspace-cards; }` is off.
@@ -4278,7 +4292,7 @@ impl<W: LayoutElement> Monitor<W> {
         renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
-        let Some(progress) = self.workspace_cards_progress() else {
+        let Some(progress) = self.workspace_labels_progress() else {
             return;
         };
         // Labels appear once the workspaces have shrunk enough to leave room above them.

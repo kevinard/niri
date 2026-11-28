@@ -2232,6 +2232,7 @@ mod tests {
                 },
                 emit_typed_text: false,
                 workspace_cards: false,
+                workspace_labels: false,
             },
             environment: Environment(
                 [
