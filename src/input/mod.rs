@@ -81,6 +81,7 @@ pub mod swipe_tracker;
 mod titlebar_grab;
 pub mod touch_overview_grab;
 pub mod touch_swipe;
+pub mod workspace_label_grab;
 
 use backend_ext::{NiriInputBackend as InputBackend, NiriInputDevice as _};
 
@@ -3701,6 +3702,32 @@ impl State {
             {
                 self.niri.suppressed_buttons.insert(button_code);
                 return;
+            }
+
+            // A workspace label in the overview: click it (a shell may rename the workspace)
+            // or drag it to move the workspace.
+            if is_overview_open
+                && !pointer.is_grabbed()
+                && !mod_down
+                && button == Some(MouseButton::Left)
+            {
+                let location = pointer.current_location();
+                let label = self.niri.output_under(location).and_then(|(output, pos)| {
+                    let mon = self.niri.layout.monitor_for_output(output)?;
+                    Some((output.clone(), mon.workspace_label_at(pos)?))
+                });
+                if let Some((output, ws_id)) = label {
+                    let start_data = PointerGrabStartData {
+                        focus: None,
+                        button: button_code,
+                        location,
+                    };
+                    let grab = workspace_label_grab::WorkspaceLabelGrab::new(
+                        start_data, output, ws_id,
+                    );
+                    pointer.set_grab(self, grab, serial, Focus::Clear);
+                    return;
+                }
             }
 
             if is_overview_open && !pointer.is_grabbed() && button == Some(MouseButton::Right) {

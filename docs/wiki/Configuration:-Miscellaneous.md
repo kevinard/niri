@@ -282,6 +282,9 @@ Name each zoomed-out workspace in the overview: a label above it shows its confi
 The current workspace's label is brighter, in the active focus ring color (or the active border color with the focus ring off).
 The workspaces keep the regular overview look; [`workspace-cards`](#workspace-cards) shows the same labels as part of its cards.
 
+Drag a label up or down to move its workspace among the workspaces of its monitor: the workspace follows the pointer, ringed in the focus color, while the others slide aside and a faint slot shows where it will land; the stack holds still until it is dropped. The empty workspace at the end stays last.
+Clicking a label without dragging it does nothing in niri itself, but is reported to IPC clients as an `OverviewWorkspaceLabelClicked` event, so a desktop shell can, for example, offer to rename the workspace.
+
 ```kdl
 overview {
     workspace-labels
