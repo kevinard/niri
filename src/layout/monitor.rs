@@ -153,6 +153,8 @@ pub struct Monitor<W: LayoutElement> {
     workspace_labels: RefCell<Vec<PreviewLabel>>,
     /// Outlines around the zoomed-out workspaces with `overview { workspace-cards; }`.
     workspace_outlines: RefCell<Vec<BorderRenderElement>>,
+    /// Window names on the zoomed-out workspaces with `overview { workspace-cards; }`.
+    window_labels: RefCell<Vec<PreviewLabel>>,
     /// How many windows the scratchpad holds, on every output.
     scratchpad_count: Cell<usize>,
     scroll_cue_labels: [PreviewLabel; 2],
@@ -651,6 +653,7 @@ impl<W: LayoutElement> Monitor<W> {
             scratchpad_label: PreviewLabel::default(),
             workspace_labels: RefCell::new(Vec::new()),
             workspace_outlines: RefCell::new(Vec::new()),
+            window_labels: RefCell::new(Vec::new()),
             scratchpad_count: Cell::new(0),
             scroll_cue_labels: Default::default(),
             folded_tab_labels: Default::default(),
@@ -4278,6 +4281,86 @@ impl<W: LayoutElement> Monitor<W> {
                 ));
             }
         }
+    }
+
+    /// Window names on the zoomed-out workspaces: a pill with each visible window's title at
+    /// the bottom of its preview, readable where the scaled title bar is not.
+    pub fn render_window_labels<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        target: RenderTarget,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let Some(progress) = self.workspace_cards_progress() else {
+            return;
+        };
+        // Names appear once the windows have shrunk to previews.
+        let alpha = ((progress - 0.5) / 0.5).clamp(0., 1.) as f32;
+        if alpha <= 0. {
+            return;
+        }
+        let scale = self.scale.fractional_scale();
+        let zoom = self.overview_zoom();
+        let backdrop = self.options.overview.backdrop_color;
+        let (surface, ink) = if is_light(backdrop) {
+            (
+                Color::new_unpremul(0.97, 0.99, 0.98, 0.94),
+                Color::new_unpremul(0.06, 0.13, 0.11, 1.),
+            )
+        } else {
+            (
+                Color::new_unpremul(0.07, 0.11, 0.10, 0.88),
+                Color::new_unpremul(0.95, 0.98, 0.96, 1.),
+            )
+        };
+        let inset = 8.;
+        let mut labels = self.window_labels.borrow_mut();
+        let mut index = 0;
+        for (ws, geo) in self.workspaces_with_render_geo() {
+            for (tile, pos, visible) in ws.tiles_with_render_positions() {
+                if !visible {
+                    continue;
+                }
+                let size = tile.tile_size();
+                let width = size.w * zoom - 2. * inset;
+                // Too narrow a preview for a readable name.
+                if width < 64. || size.h * zoom < BAR_PILL_HEIGHT + 2. * inset {
+                    continue;
+                }
+                let loc = Point::from((
+                    geo.loc.x + pos.x * zoom + inset,
+                    geo.loc.y + (pos.y + size.h) * zoom - BAR_PILL_HEIGHT - inset,
+                ));
+                if labels.len() <= index {
+                    labels.push(PreviewLabel::default());
+                }
+                let title = navigation_title(tile.window(), target, "Window");
+                if let Some(label) = labels[index].render_with_ink(
+                    renderer.as_gles_renderer(),
+                    title,
+                    String::new(),
+                    surface,
+                    ink,
+                    LabelKind::Tooltip { right_align: false },
+                    width.min(280.),
+                    scale,
+                    loc,
+                    alpha,
+                ) {
+                    push(RelocateRenderElement::from_element(
+                        RescaleRenderElement::from_element(
+                            MonitorInnerRenderElement::Caption(label),
+                            Point::default(),
+                            1.,
+                        ),
+                        Point::default(),
+                        Relocate::Relative,
+                    ));
+                }
+                index += 1;
+            }
+        }
+        labels.truncate(index.max(1));
     }
 
     /// The colour that marks focus: the focus ring's, else the active border's, opaque.

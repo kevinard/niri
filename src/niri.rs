@@ -4836,7 +4836,8 @@ impl Niri {
                 push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
             }
 
-            // Workspace card outlines sit above the windows they frame.
+            // Window names and workspace card outlines sit above the windows.
+            mon.render_window_labels(ctx.renderer, ctx.target, &mut |elem| push(elem.into()));
             mon.render_workspace_outlines(ctx.renderer, &mut |elem| push(elem.into()));
 
             mon.render_workspaces(ctx.r(), focus_ring, pointer, &mut |elem| push(elem.into()));
