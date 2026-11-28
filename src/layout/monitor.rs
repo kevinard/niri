@@ -1834,7 +1834,24 @@ impl<W: LayoutElement> Monitor<W> {
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        let mut first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        // Workspace cards keep the whole stack in view: centred when every workspace
+        // fits below its label, otherwise scrolled to the active one without leaving
+        // empty space past the first or last workspace.
+        if let Some(progress) = self.workspace_cards_progress() {
+            let count = self.workspaces.len().max(1) as f64;
+            let total = count * ws_size.h + (count - 1.) * gap;
+            let top = WORKSPACE_LABEL_HEIGHT + 16.;
+            let bottom = 16.;
+            let available = self.view_size.h - top - bottom;
+            let centred = first_ws_y + static_offset.y;
+            let target = if total <= available {
+                top + (available - total) / 2.
+            } else {
+                centred.clamp(self.view_size.h - bottom - total, top)
+            };
+            first_ws_y += (target - centred) * progress;
+        }
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
         // Return position for one-past-last workspace too.
